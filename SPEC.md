@@ -23,9 +23,9 @@ The shared substrate:
 | Project | Schema (dims × metrics) | Geo? | Status |
 |---|---|---|---|
 | **awair** | `(ts, device_id) × (temp, co2, pm10, pm25, humid, voc)` | no | binning client-side at request time |
-| **tomat** | `(step, run_id) × (loss, lr, …)` (WB-style training viz) | no | not started |
+| **tomat** | `(step, run_id) × (loss, lr, …)` (WB-style training viz) — **schema TBD, verify with $oa/tomat** | no | not started |
 | **ctbk** | `(dt, station_id, region, gender, …) × (count, duration_s, duration_s_sq)` and `(dt, station, metric, state) × minutes` | yes | builders (`avail_agg.py`, `trips_agg.py`) + CFW (`gbfs/api/`) **live in production** |
-| **crashes** | `(ts, lat, lon, …) × (…)` | yes | not started |
+| **crashes** | `(ts, lat, lon, …) × (…)` — **schema TBD, verify with $c/crashes** | yes | not started |
 
 `ctbk` is the reference implementation; `pyrmts` will absorb its patterns. The other three drive abstraction pressure.
 
@@ -238,6 +238,28 @@ Time-only consumers (`awair`, `tomat`) skip this package entirely.
 - **duckdb** — single-file store; small/embedded cases.
 
 All backends share one `Storage` interface — `head(key)`, `get_range(key, start, end)`, `put(key, bytes)`, `list(prefix)`.
+
+## Sequencing
+
+Greenfield lib, not extraction-from-ctbk: ctbk's working code (`gbfs/api/`, `avail_agg.py`, `trips_agg.py`) is the *reference* but the lib starts from a blank page so the abstractions aren't shaped by any one consumer's accidents. ctbk migrates to `pyrmts` as one of the consumers, same as the others.
+
+Within the lib, **build the read side first**:
+
+1. **Read side** (TS): `Pyramid` type, `planQuery`, `stitch`, `pyrmts-cfw` serving helpers, FE hook. Most reusable across all 4 consumers; ctbk's `gbfs/api/` is the closest reference.
+2. **Build side** (Python): aggregation, tier construction, CLI. Each consumer can keep its own builder for now, writing to the shared key/schema convention. Library extraction comes after we have at least 2 builders (ctbk + awair) to compare.
+3. **Geo extension** (`pyrmts-geo`): land alongside (1) or after, depending on whether ctbk or crashes is the first geo consumer to migrate.
+
+First concrete milestone: `awair` chart switches from `hyparquetSource.ts` to a `pyrmts` CFW + FE hook, against its own ad-hoc builder. That's the smallest "second consumer" loop that validates the read-side API.
+
+## Decision history
+
+Captured here so future sessions don't re-litigate:
+
+- **Lib-first over copy-first**: with 4 imminent consumers (ctbk live, awair next, tomat + crashes following), the rule-of-three threshold is met. Copy-first risks the extraction never landing.
+- **Greenfield over extract-from-ctbk**: extractions usually require greenfield-shaped work anyway, while also constraining the design to not break the source. Cleaner to design fresh with ctbk as reference.
+- **Polyglot monorepo over split repos**: YAML schema + data model must evolve atomically between Python (build) and TS (serve). uv + pnpm workspaces side-by-side, polars/ruff/uv-style.
+- **Geo as separate package, not core**: H3/S2 are non-trivial deps; time-only consumers (awair, tomat) shouldn't carry them. `pyrmts-geo` depends on `pyrmts`.
+- **Name**: `pyrmts` chosen over `mts` (npm-taken), `pyramts` (more pronounceable but `pyrmts` is shorter and the tagline carries explanation), `pyrami.ts` (cute but biases against Python sibling).
 
 ## Open questions
 

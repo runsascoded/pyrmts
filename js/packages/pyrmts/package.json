@@ -21,6 +21,14 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "hyparquet-writer": "^0.15.2"
+    "@types/react": "^19.2.15",
+    "hyparquet-writer": "^0.15.2",
+    "react": "^19.2.6"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true }
   }
 }

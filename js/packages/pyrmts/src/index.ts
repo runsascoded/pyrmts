@@ -49,4 +49,14 @@ export { memStorage } from './storage.js'
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js'
 export type { PyramidConfig } from './yaml.js'
 
+export { buildQueryUrl, fetchPyramidQuery } from './query.js'
+export type {
+  FetchPyramidQueryInput,
+  PlanMeta,
+  PyramidQueryResult,
+} from './query.js'
+
+export { usePyramid } from './use-pyramid.js'
+export type { UsePyramidInput, UsePyramidResult } from './use-pyramid.js'
+
 export const VERSION = '0.0.0'

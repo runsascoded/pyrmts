@@ -18,7 +18,15 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.19)
 
-  packages/pyrmts: {}
+  packages/pyrmts:
+    dependencies:
+      hyparquet:
+        specifier: ^1.26.0
+        version: 1.26.0
+    devDependencies:
+      hyparquet-writer:
+        specifier: ^0.15.2
+        version: 0.15.2
 
   packages/pyrmts-cfw:
     dependencies:
@@ -393,6 +401,12 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  hyparquet-writer@0.15.2:
+    resolution: {integrity: sha512-Sj/Ma3xHa/Y/wTAA6XHAxtjkUE1mPFN0YRJJPw2A+HNF+C42qLlBAQ+eU/FoKgQVplO33wsMmhes/E5mXl7cTQ==}
+
+  hyparquet@1.26.0:
+    resolution: {integrity: sha512-yxUiViPZ+z5h+xdX4rA1G+k30jXoEsG9I2xEpjaM84imGznbKjZzxuZFsdzqg6C4LxNnnAlDFvzpk4uxQWTbTQ==}
 
   loupe@3.2.1:
     resolution: {integrity: sha512-CdzqowRJCeLU72bHvWqwRBBlLcMEtIvGrlvef74kMnV2AolS9Y8xUv1I0U/MNAWMhBlKIoyuEgoJ0t/bbwHbLQ==}
@@ -786,6 +800,12 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  hyparquet-writer@0.15.2:
+    dependencies:
+      hyparquet: 1.26.0
+
+  hyparquet@1.26.0: {}
 
   loupe@3.2.1: {}
 

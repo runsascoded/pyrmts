@@ -46,4 +46,7 @@ export { fetchShardData, fetchSegmentRows } from './fetch.js'
 
 export { memStorage } from './storage.js'
 
+export { parsePyramidYaml, pyramidFromConfig } from './yaml.js'
+export type { PyramidConfig } from './yaml.js'
+
 export const VERSION = '0.0.0'

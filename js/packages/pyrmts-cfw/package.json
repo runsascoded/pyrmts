@@ -20,6 +20,7 @@
     "directory": "js/packages/pyrmts-cfw"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260524.1"
+    "@cloudflare/workers-types": "^4.20260524.1",
+    "hyparquet-writer": "^0.15.2"
   }
 }

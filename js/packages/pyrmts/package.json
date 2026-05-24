@@ -17,7 +17,8 @@
     "directory": "js/packages/pyrmts"
   },
   "dependencies": {
-    "hyparquet": "^1.26.0"
+    "hyparquet": "^1.26.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "hyparquet-writer": "^0.15.2"

@@ -1,0 +1,19 @@
+{
+  "name": "pyrmts-cfw",
+  "version": "0.0.0",
+  "description": "Cloudflare Worker serving helpers for pyrmts.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": ["src", "dist"],
+  "license": "MIT",
+  "author": "Ryan Williams <ryan@runsascoded.com>",
+  "dependencies": {
+    "pyrmts": "workspace:*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/runsascoded/pyrmts.git",
+    "directory": "js/packages/pyrmts-cfw"
+  }
+}

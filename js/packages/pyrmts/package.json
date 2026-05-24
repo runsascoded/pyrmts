@@ -1,0 +1,16 @@
+{
+  "name": "pyrmts",
+  "version": "0.0.0",
+  "description": "Multi-scale timeseries pyramids — planner, types, frontend hook.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": ["src", "dist"],
+  "license": "MIT",
+  "author": "Ryan Williams <ryan@runsascoded.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/runsascoded/pyrmts.git",
+    "directory": "js/packages/pyrmts"
+  }
+}

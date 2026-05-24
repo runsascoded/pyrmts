@@ -25,6 +25,10 @@ importers:
       pyrmts:
         specifier: workspace:*
         version: link:../pyrmts
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260524.1
+        version: 4.20260524.1
 
   packages/pyrmts-geo:
     dependencies:
@@ -33,6 +37,9 @@ importers:
         version: link:../pyrmts
 
 packages:
+
+  '@cloudflare/workers-types@4.20260524.1':
+    resolution: {integrity: sha512-9o939wce6hAlfNAIG4W58bySW7twgkqgPkxmSNrk/DV0eEexjTPyqChGdsQeKZEXJAjxSUFklaebMYJWg1GM0g==}
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -526,6 +533,8 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@cloudflare/workers-types@4.20260524.1': {}
 
   '@esbuild/aix-ppc64@0.21.5':
     optional: true

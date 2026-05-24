@@ -36,4 +36,10 @@ export type {
   QueryPlan,
 } from './planner.js'
 
+export { getMonoid, stateColumns } from './monoids.js'
+export type { Monoid, Row } from './monoids.js'
+
+export { stitch } from './stitch.js'
+export type { StitchInput } from './stitch.js'
+
 export const VERSION = '0.0.0'

@@ -5,7 +5,10 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
-  "files": ["src", "dist"],
+  "files": [
+    "src",
+    "dist"
+  ],
   "license": "MIT",
   "author": "Ryan Williams <ryan@runsascoded.com>",
   "dependencies": {
@@ -15,5 +18,8 @@
     "type": "git",
     "url": "git+https://github.com/runsascoded/pyrmts.git",
     "directory": "js/packages/pyrmts-cfw"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260524.1"
   }
 }

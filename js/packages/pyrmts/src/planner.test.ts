@@ -14,6 +14,7 @@ const awair: Pyramid = {
   storage: mockStorage,
   keyTemplate: 'awair-{device_id}/{tier}/{period}.parquet',
   axis: 'time',
+  binCol: 'ts',
   dims: [{ name: 'device_id', type: 'int' }],
   metrics: [
     { name: 'temp', monoid: 'sum' },

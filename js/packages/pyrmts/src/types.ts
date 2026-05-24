@@ -46,6 +46,8 @@ export interface Metric {
 
 export interface Storage {
   head(key: string): Promise<{ size: number; etag?: string } | null>
+  // Fetch the half-open byte range [start, end). Returns exactly `end - start`
+  // bytes; throws if the object doesn't exist or the range is out of bounds.
   getRange(key: string, start: number, end: number): Promise<Uint8Array>
   get(key: string): Promise<Uint8Array | null>
   put(key: string, bytes: Uint8Array): Promise<void>
@@ -59,6 +61,10 @@ export interface Pyramid {
   // (e.g. `awair-{device_id}/{tier}/{period}.parquet`).
   keyTemplate: string
   axis: Axis
+  // Name of the bin column in each shard. For time-axis pyramids, this is
+  // an int64 UTC millisecond timestamp; for step-axis, an int step count.
+  // Conventional names: 'ts', 'bin', 'dt'.
+  binCol: string
   dims: Dim[]
   metrics: Metric[]
   // Canonical order: finest → coarsest. Planner iterates coarsest-first

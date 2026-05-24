@@ -2,5 +2,15 @@
   "name": "pyrmts-workspace",
   "version": "0.0.0",
   "private": true,
-  "description": "pnpm workspace root for pyrmts TS packages."
+  "description": "pnpm workspace root for pyrmts TS packages.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
 }

@@ -47,14 +47,14 @@ export async function fetchShardData(
   const file = asyncBufferFromStorage(storage, key, head.size)
 
   const initialFetchSize = opts?.initialFetchSize ?? DEFAULT_INITIAL_FETCH_SIZE
+  const metadata = await parquetMetadataAsync(file, { initialFetchSize })
 
   // No filter → read everything.
   if (opts?.binCol === undefined || opts.range === undefined) {
-    const rows = await parquetReadObjects({ file, initialFetchSize })
+    const rows = await parquetReadObjects({ file, metadata })
     return rows.map(normalizeRow)
   }
 
-  const metadata = await parquetMetadataAsync(file, { initialFetchSize })
   const runs = selectRowGroupRuns(metadata, opts.binCol, opts.range)
   if (runs.length === 0) return []
 

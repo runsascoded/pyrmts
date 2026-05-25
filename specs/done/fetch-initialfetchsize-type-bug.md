@@ -26,16 +26,26 @@ built `dist`).
 Surfaced when wiring awair against `89c1e8f` — for now we just skip
 typecheck and rely on `wrangler deploy` (esbuild) to bundle.
 
-Likely fix: drop the param from the no-filter branch (it was probably
-copy-pasted from the metadata branch).
+## Resolution
+
+Took the "preserve footer-fetch bound" path — the file-level comment on
+`initialFetchSize` says that's the intent. Hoisted `parquetMetadataAsync`
+out of the filter branch, and pass `metadata` to `parquetReadObjects` in
+both branches.
 
 ```ts
+const metadata = await parquetMetadataAsync(file, { initialFetchSize })
+
 if (opts?.binCol === undefined || opts.range === undefined) {
-  const rows = await parquetReadObjects({ file })  // ← drop initialFetchSize
+  const rows = await parquetReadObjects({ file, metadata })
   return rows.map(normalizeRow)
 }
+
+const runs = selectRowGroupRuns(metadata, opts.binCol, opts.range)
+// ...
 ```
 
-If the intent was to also bound footer fetch in the no-filter path, the
-call needs to be split into `parquetMetadataAsync({ file, initialFetchSize })`
-+ `parquetReadObjects({ file, metadata })`.
+One extra metadata-fetch in the unfiltered path vs letting hyparquet do
+it internally, but it's now bounded by `initialFetchSize` instead of
+hyparquet's 512KB default. `tsc --noEmit` passes across the workspace;
+all 118 tests still green.

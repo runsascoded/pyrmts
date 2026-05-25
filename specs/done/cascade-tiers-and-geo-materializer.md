@@ -1,10 +1,27 @@
 # Spec: `cascade_tiers` + `materialize_resolutions` helpers
 
-> Status: **draft** (2026-05-25, from ctbk's avail-pyramid-v2 work).
-> Two pure, generic helpers needed by the ctbk Cascade-to-pyrmts port
-> (`~/c/hccs/ctbk/specs/avail-pyramid-v2.md`). Both are project-agnostic
-> and useful to awair / tomat / any future pyrmts consumer building
-> tier pyramids bottom-up with geo.
+> Status: **done** (2026-05-25). Both shipped in Python (`pyrmts.cascade_tiers`
+> in `dac9d5b`/`012538e`, `pyrmts_geo.materialize_resolutions` in `adafc2b`).
+> TS ports deferred — ctbk's port is Python-side, and no current TS consumer
+> needs them yet.
+>
+> From ctbk's avail-pyramid-v2 work (`~/c/hccs/ctbk/specs/avail-pyramid-v2.md`).
+> Two pure, generic helpers needed by the ctbk Cascade-to-pyrmts port.
+> Both are project-agnostic and useful to awair / tomat / any future pyrmts
+> consumer building tier pyramids bottom-up with geo.
+
+## Resolution
+
+- `pyrmts.cascade_tiers` shipped per §1 with one API rename: `range` →
+  `time_range` (avoid shadowing the Python builtin). Added a `filter` kwarg
+  for awair-style multi-tenant key templates (extra `keyTemplate` vars).
+  8 tests covering histogram/sum/count monoids, idempotency, explicit
+  `derive_from`, and empty-source no-op.
+- `pyrmts_geo.materialize_resolutions` shipped per §2 as written. Optional
+  `MaterializeStats` sidecar (the "stats sidecar" the spec floated) tracks
+  `rows_in` / `rows_out` / `dropped`. 7 tests.
+- TS ports skipped for now; if/when a TS consumer wants offline builders
+  they can be added by mirroring the Python API.
 
 ## 1. `cascade_tiers`
 

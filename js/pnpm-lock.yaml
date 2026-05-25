@@ -59,9 +59,15 @@ importers:
         specifier: workspace:*
         version: link:../pyrmts
     devDependencies:
+      '@types/react':
+        specifier: ^19.2.15
+        version: 19.2.15
       hyparquet-writer:
         specifier: ^0.15.2
         version: 0.15.2
+      react:
+        specifier: ^19.2.6
+        version: 19.2.6
 
 packages:
 

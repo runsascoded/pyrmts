@@ -13,6 +13,14 @@ export interface PlanQueryInput {
   // are clamped to never exceed finer ones' watermarks (a coarse tier can't
   // hold data past where its finer source ends).
   watermarks?: Record<string, Date>
+  // tier_name → earliest available bin instant. Missing tier means "available
+  // since the beginning of time" (no clamp). Coarser tiers are clamped to
+  // never start before finer ones' earliest (a coarser tier is built from a
+  // finer one, so it can't have data earlier than its source — symmetric to
+  // `watermarks` propagation, opposite direction). Use for pyramids with
+  // heterogeneous dim coverage so the planner doesn't emit shard keys for
+  // periods that pre-date a dim's data start.
+  earliestWatermarks?: Record<string, Date>
   // dim_name → value, for `{dim_name}` placeholders in the key template
   // (e.g. `awair-{device_id}/{tier}/{period}.parquet`).
   filter?: Record<string, string | number>
@@ -52,24 +60,29 @@ export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
   const outputTier = pickTier(pyramid.tiers, from, to, input.binBudget)
   const outputIdx = pyramid.tiers.indexOf(outputTier)
   const effective = effectiveWatermarks(pyramid.tiers, input.watermarks ?? {}, to)
+  const earliest = effectiveEarliestWatermarks(pyramid.tiers, input.earliestWatermarks ?? {})
 
   // Walk from output tier down to finest, emitting one segment per tier
-  // covering the gap up to that tier's effective watermark.
+  // covering the gap up to that tier's effective watermark. Each tier's
+  // segment is clamped on the left by its earliest watermark — if the
+  // entire candidate segment falls before that, skip the tier entirely.
   const segments: PlanSegment[] = []
   let cursor = from
   for (let i = outputIdx; i >= 0; i--) {
     const tier = pyramid.tiers[i]!
     const tierEnd = clamp(effective[tier.name]!, cursor, to)
-    if (tierEnd > cursor) {
+    const earlyT = earliest[tier.name]
+    const tierStart = earlyT && earlyT.getTime() > cursor.getTime() ? earlyT : cursor
+    if (tierEnd > tierStart) {
       segments.push({
-        from: cursor,
+        from: tierStart,
         to: tierEnd,
         shardTier: tier,
-        keys: shardKeys(pyramid, tier, cursor, tierEnd, input.filter ?? {}),
+        keys: shardKeys(pyramid, tier, tierStart, tierEnd, input.filter ?? {}),
         reaggregate: i !== outputIdx,
       })
-      cursor = tierEnd
     }
+    cursor = tierEnd
     if (cursor >= to) break
   }
 
@@ -113,6 +126,31 @@ function effectiveWatermarks(
     // Clamp to rangeTo so watermarks past the query don't leak through.
     const clamped = eff.getTime() > rangeTo.getTime() ? rangeTo : eff
     out[tier.name] = clamped
+    finerBound = eff
+  }
+  return out
+}
+
+// Each tier's effective earliest = max(declared, next-finer-tier's effective).
+// Walks finest → coarsest, propagating the finer tier's bound forward.
+// Unspecified tiers have no clamp (treat as -infinity); a finer tier's
+// declared value carries up to coarser tiers that didn't declare one
+// (coarser tiers can't have data before their finer source did).
+function effectiveEarliestWatermarks(
+  tiers: Tier[],
+  declared: Record<string, Date>,
+): Record<string, Date | undefined> {
+  const out: Record<string, Date | undefined> = {}
+  let finerBound: Date | undefined = undefined
+  for (const tier of tiers) {
+    const decl = declared[tier.name]
+    let eff: Date | undefined
+    if (decl && finerBound) {
+      eff = decl.getTime() > finerBound.getTime() ? decl : finerBound
+    } else {
+      eff = decl ?? finerBound
+    }
+    out[tier.name] = eff
     finerBound = eff
   }
   return out

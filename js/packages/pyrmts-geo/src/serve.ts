@@ -24,6 +24,13 @@ export interface ServeGeoOptions {
   watermarks?:
     | Record<string, Date>
     | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
+  // Per-tier earliest-available-bin instants. See pyrmts-cfw `ServeOptions`.
+  earliestWatermarks?:
+    | Record<string, Date>
+    | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
+  // Treat missing shard objects as empty instead of erroring. See pyrmts-cfw
+  // `ServeOptions`.
+  tolerateMissingShards?: boolean
   cors?: boolean
 }
 
@@ -65,6 +72,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
   }
 
   const watermarks = await resolveWatermarks(opts.watermarks, request)
+  const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request)
 
   let result: { records: unknown[]; plan: unknown }
   try {
@@ -74,6 +82,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
       bbox,
       cellBudget,
       watermarks,
+      earliestWatermarks,
       filter,
     })
 
@@ -81,6 +90,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
       plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys, {
         binCol: pyramid.binCol,
         range: { from: seg.from, to: seg.to },
+        ...(opts.tolerateMissingShards !== undefined ? { tolerate404: opts.tolerateMissingShards } : {}),
       })),
     )
     const filteredRows = shardRows.map(rows =>
@@ -144,7 +154,7 @@ function parseBBox(s: string | null): BBox | null {
 }
 
 async function resolveWatermarks(
-  src: ServeGeoOptions['watermarks'],
+  src: ServeGeoOptions['watermarks'] | ServeGeoOptions['earliestWatermarks'],
   request: Request,
 ): Promise<Record<string, Date>> {
   if (src === undefined) return {}

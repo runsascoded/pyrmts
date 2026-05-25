@@ -165,6 +165,93 @@ describe('serveQuery', () => {
     expect(res.headers.get('access-control-allow-origin')).toBe('*')
   })
 
+  test('tolerateMissingShards: returns empty bins for shards that do not exist', async () => {
+    // Pyramid without the awair-99999 device's h1 shard for 2026-01.
+    const data = new Map<string, Uint8Array>()
+    data.set('awair-17617/h1/2026-01.parquet', awairH1Parquet())
+    const pyramid: Pyramid = {
+      ...buildPyramid(),
+      storage: memStorage(data),
+    }
+
+    // Query for device 99999 — its h1 shard doesn't exist. Without
+    // tolerateMissingShards we'd 400; with it we get an empty record set.
+    const url = 'https://serve.example/?'
+      + 'from=2026-01-01T00:00:00Z'
+      + '&to=2026-01-01T03:00:00Z'
+      + '&bin_budget=100'
+      + '&device_id=99999'
+
+    const errRes = await serveQuery({ pyramid, request: new Request(url) })
+    expect(errRes.status).toBe(400)
+    expect(await errRes.json()).toEqual({
+      error: 'fetchShardData: object not found: awair-99999/h1/2026-01.parquet',
+    })
+
+    const okRes = await serveQuery({
+      pyramid,
+      request: new Request(url),
+      tolerateMissingShards: true,
+    })
+    expect(okRes.status).toBe(200)
+    const body = await okRes.json() as ResponseBody
+    expect(body.records).toEqual([])
+    expect(body.plan.segments).toEqual([{
+      tier: 'h1',
+      from: '2026-01-01T00:00:00.000Z',
+      to: '2026-01-01T03:00:00.000Z',
+      reaggregate: false,
+      keys: ['awair-99999/h1/2026-01.parquet'],
+    }])
+  })
+
+  test('earliestWatermarks clamps the segment so a pre-data shard is never planned', async () => {
+    // Device 17617 raw data starts at 2026-01-01T02:00; query starts at
+    // 2026-01-01T00:00. earliestWatermarks pushes the query's effective
+    // start to 02:00, so the planner only emits one (h1) segment for the
+    // tail rather than [00:00, 02:00) from a pre-data tier.
+    const res = await serveQuery({
+      pyramid: buildPyramid(),
+      request: new Request(
+        'https://serve.example/?'
+        + 'from=2026-01-01T00:00:00Z'
+        + '&to=2026-01-01T03:00:00Z'
+        + '&bin_budget=100'
+        + '&device_id=17617',
+      ),
+      earliestWatermarks: { raw: new Date('2026-01-01T02:00:00Z') },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as ResponseBody
+    expect(body.plan.segments).toEqual([{
+      tier: 'h1',
+      from: '2026-01-01T02:00:00.000Z',
+      to: '2026-01-01T03:00:00.000Z',
+      reaggregate: false,
+      keys: ['awair-17617/h1/2026-01.parquet'],
+    }])
+    expect(body.records).toEqual([
+      { ts: ms('2026-01-01T02:00:00Z'), device_id: 17617, temp_n: 60, temp_sum: 1320, temp_sumsq: 29200 },
+    ])
+  })
+
+  test('earliestWatermarks accepts a callback', async () => {
+    const res = await serveQuery({
+      pyramid: buildPyramid(),
+      request: new Request(
+        'https://serve.example/?'
+        + 'from=2026-01-01T00:00:00Z'
+        + '&to=2026-01-01T03:00:00Z'
+        + '&bin_budget=100'
+        + '&device_id=17617',
+      ),
+      earliestWatermarks: () => ({ raw: new Date('2026-01-01T02:00:00Z') }),
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as ResponseBody
+    expect(body.plan.segments[0]!.from).toBe('2026-01-01T02:00:00.000Z')
+  })
+
   test('honors watermark callback (splits into h1 + reaggregated raw)', async () => {
     // h1 watermark at 02:00 → segment 0 reads h1 shard for [00:00, 02:00),
     // segment 1 reaggregates raw shard for [02:00, 03:00) into h1 bins.

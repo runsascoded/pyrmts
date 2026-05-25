@@ -24,6 +24,13 @@ export interface FetchOptions {
   // catch the footer of typical shards in one round trip; hyparquet falls
   // back to a second fetch if the metadata is bigger.
   initialFetchSize?: number
+  // Treat missing objects (`storage.head` → null) as empty shards instead
+  // of throwing. For pyramids with heterogeneous dim coverage (e.g. some
+  // devices haven't existed long enough to have data in older shard
+  // periods), the planner emits shard keys that don't yet exist; enabling
+  // this lets the query succeed with empty bins for those gaps instead of
+  // erroring. Default: false (fail loudly — usually a config bug).
+  tolerate404?: boolean
 }
 
 const DEFAULT_INITIAL_FETCH_SIZE = 64 * 1024
@@ -42,6 +49,7 @@ export async function fetchShardData(
 ): Promise<Row[]> {
   const head = await storage.head(key)
   if (head === null) {
+    if (opts?.tolerate404) return []
     throw new Error(`fetchShardData: object not found: ${key}`)
   }
   const file = asyncBufferFromStorage(storage, key, head.size)

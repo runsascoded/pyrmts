@@ -26,6 +26,18 @@ export interface ServeOptions {
   watermarks?:
     | Record<string, Date>
     | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
+  // Per-tier earliest-available-bin instants. Missing tiers default to "data
+  // available since the beginning of time" (no clamp). Useful for pyramids
+  // with heterogeneous dim coverage — e.g. some devices started reporting
+  // later, so shards for older periods don't exist.
+  earliestWatermarks?:
+    | Record<string, Date>
+    | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
+  // Treat missing shard objects as empty instead of erroring. Pair with
+  // `earliestWatermarks` for the cleanest behavior: earliest watermarks
+  // skip planning shards that shouldn't exist; tolerate404 catches the
+  // residual misses (e.g. a shard the writer hasn't flushed yet).
+  tolerateMissingShards?: boolean
   // Add `access-control-allow-origin: *` to responses.
   cors?: boolean
 }
@@ -53,14 +65,22 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
   }
 
   const watermarks = await resolveWatermarks(opts.watermarks, request)
+  const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request)
 
   let result: { records: unknown[]; plan: unknown }
   try {
-    const plan = planQuery(pyramid, { range: { from, to }, binBudget, watermarks, filter })
+    const plan = planQuery(pyramid, {
+      range: { from, to },
+      binBudget,
+      watermarks,
+      earliestWatermarks,
+      filter,
+    })
     const shardRows = await Promise.all(
       plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys, {
         binCol: pyramid.binCol,
         range: { from: seg.from, to: seg.to },
+        ...(opts.tolerateMissingShards !== undefined ? { tolerate404: opts.tolerateMissingShards } : {}),
       })),
     )
     const records = stitch({ pyramid, plan, shardRows })
@@ -94,7 +114,7 @@ function parseInstant(s: string | null): Date | null {
 }
 
 async function resolveWatermarks(
-  src: ServeOptions['watermarks'],
+  src: ServeOptions['watermarks'] | ServeOptions['earliestWatermarks'],
   request: Request,
 ): Promise<Record<string, Date>> {
   if (src === undefined) return {}

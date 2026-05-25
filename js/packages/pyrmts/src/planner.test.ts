@@ -235,6 +235,120 @@ describe('planQuery: watermark-driven segmentation', () => {
   })
 })
 
+describe('planQuery: earliestWatermarks', () => {
+  test('clamps the leading segment when query begins before the earliest', () => {
+    // Raw earliest at Jan-15 → segment for [Jan-01, Feb-01) starts at Jan-15.
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-02-01T00:00:00Z') },
+      binBudget: 1000,
+      filter: { device_id: 17617 },
+      earliestWatermarks: { raw: d('2026-01-15T00:00:00Z') },
+    })
+    expect(segments(plan)).toEqual([
+      {
+        from: '2026-01-15T00:00:00.000Z',
+        to:   '2026-02-01T00:00:00.000Z',
+        tier: 'h1',
+        keys: ['awair-17617/h1/2026-01.parquet'],
+        reaggregate: false,
+      },
+    ])
+  })
+
+  test('omits a tier entirely when its earliest exceeds its segment end', () => {
+    // h1 watermark @ Jan-15 → segment 0 wants [Jan-01, Jan-15) on h1.
+    // h1 earliest @ Jan-20 → entire segment is before earliest, drop it.
+    // raw segment [Jan-15, Jan-25) still emitted (raw earliest @ Jan-10).
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-25T00:00:00Z') },
+      binBudget: 1000,
+      filter: { device_id: 17617 },
+      watermarks: {
+        raw: d('2026-01-25T00:00:00Z'),
+        h1: d('2026-01-15T00:00:00Z'),
+      },
+      earliestWatermarks: {
+        raw: d('2026-01-10T00:00:00Z'),
+        h1: d('2026-01-20T00:00:00Z'),
+      },
+    })
+    expect(segments(plan)).toEqual([
+      {
+        from: '2026-01-15T00:00:00.000Z',
+        to:   '2026-01-25T00:00:00.000Z',
+        tier: 'raw',
+        keys: ['awair-17617/raw/2026-01.parquet'],
+        reaggregate: true,
+      },
+    ])
+  })
+
+  test('propagates finer earliest up to coarser tiers (finest-bound monotonicity)', () => {
+    // Declare earliest at raw only; h1 / d1 / mo1 inherit. Query begins way
+    // before any tier has data → output tier (mo1, given the 5-bin budget over
+    // a year) gets clamped to raw's earliest.
+    const plan = planQuery(awair, {
+      range: { from: d('2025-01-01T00:00:00Z'), to: d('2026-01-01T00:00:00Z') },
+      binBudget: 5,
+      filter: { device_id: 17617 },
+      earliestWatermarks: { raw: d('2025-10-01T00:00:00Z') },
+    })
+    expect(plan.outputTier.name).toBe('mo1')
+    expect(segments(plan)).toEqual([
+      {
+        from: '2025-10-01T00:00:00.000Z',
+        to:   '2026-01-01T00:00:00.000Z',
+        tier: 'mo1',
+        keys: ['awair-17617/mo1/2025.parquet'],
+        reaggregate: false,
+      },
+    ])
+  })
+
+  test('coarser declared earliest > finer earliest wins for that coarser tier', () => {
+    // raw earliest @ Jan-01; mo1 declared earliest @ Mar-01 (coarser tier
+    // didn't backfill the earliest months). The mo1 segment should start at
+    // Mar-01.
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-06-01T00:00:00Z') },
+      binBudget: 4,    // mo1 = 5 bins, exceeds → mo1 fallback (only tier within budget? no — 5 > 4 → mo1 still fallback)
+      filter: { device_id: 17617 },
+      earliestWatermarks: {
+        raw: d('2026-01-01T00:00:00Z'),
+        mo1: d('2026-03-01T00:00:00Z'),
+      },
+    })
+    expect(plan.outputTier.name).toBe('mo1')
+    expect(segments(plan)).toEqual([
+      {
+        from: '2026-03-01T00:00:00.000Z',
+        to:   '2026-06-01T00:00:00.000Z',
+        tier: 'mo1',
+        keys: ['awair-17617/mo1/2026.parquet'],
+        reaggregate: false,
+      },
+    ])
+  })
+
+  test('no clamp when query starts after all earliest watermarks', () => {
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-15T00:00:00Z'), to: d('2026-02-01T00:00:00Z') },
+      binBudget: 1000,
+      filter: { device_id: 17617 },
+      earliestWatermarks: { raw: d('2026-01-01T00:00:00Z') },
+    })
+    expect(segments(plan)).toEqual([
+      {
+        from: '2026-01-15T00:00:00.000Z',
+        to:   '2026-02-01T00:00:00.000Z',
+        tier: 'h1',
+        keys: ['awair-17617/h1/2026-01.parquet'],
+        reaggregate: false,
+      },
+    ])
+  })
+})
+
 describe('planQuery: errors', () => {
   test('throws on step-axis pyramid', () => {
     const stepPyramid: Pyramid = { ...awair, axis: 'step' }

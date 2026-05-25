@@ -1,8 +1,8 @@
-// Tests for row-group filtering in fetchShardData.
+// Tests for row-group filtering and missing-shard tolerance in fetchShardData.
 
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { describe, expect, test } from 'vitest'
-import { fetchShardData } from './fetch.js'
+import { fetchSegmentRows, fetchShardData } from './fetch.js'
 import { memStorage } from './storage.js'
 import type { Storage } from './types.js'
 
@@ -142,5 +142,50 @@ describe('fetchShardData: RG filtering', () => {
       },
     })
     expect(rows).toHaveLength(10_000)
+  })
+})
+
+describe('fetchShardData: tolerate404', () => {
+  test('throws on missing object by default', async () => {
+    const storage = memStorage()
+    await expect(fetchShardData(storage, 'missing.parquet')).rejects.toThrow(
+      'fetchShardData: object not found: missing.parquet',
+    )
+  })
+
+  test('returns [] for missing object when tolerate404 is true', async () => {
+    const storage = memStorage()
+    const rows = await fetchShardData(storage, 'missing.parquet', { tolerate404: true })
+    expect(rows).toEqual([])
+  })
+
+  test('still reads present objects when tolerate404 is true', async () => {
+    const storage = memStorage()
+    await storage.put('present.parquet', multiRgParquet())
+    const rows = await fetchShardData(storage, 'present.parquet', { tolerate404: true })
+    expect(rows).toHaveLength(10_000)
+  })
+})
+
+describe('fetchSegmentRows: tolerate404', () => {
+  test('concatenates present + tolerated-missing shards', async () => {
+    const storage = memStorage()
+    await storage.put('a.parquet', multiRgParquet())
+    // 'b.parquet' intentionally missing
+    await storage.put('c.parquet', multiRgParquet())
+    const rows = await fetchSegmentRows(
+      storage,
+      ['a.parquet', 'b.parquet', 'c.parquet'],
+      { tolerate404: true },
+    )
+    expect(rows).toHaveLength(20_000)
+  })
+
+  test('throws on first missing shard by default', async () => {
+    const storage = memStorage()
+    await storage.put('a.parquet', multiRgParquet())
+    await expect(
+      fetchSegmentRows(storage, ['a.parquet', 'b.parquet']),
+    ).rejects.toThrow('fetchShardData: object not found: b.parquet')
   })
 })

@@ -209,4 +209,38 @@ describe('serveGeoQuery', () => {
     })
     expect(res.headers.get('access-control-allow-origin')).toBe('*')
   })
+
+  test('tolerateMissingShards + earliestWatermarks plumb through to the planner / fetcher', async () => {
+    // Pyramid storage with no shards at all — every fetch would 404. With
+    // tolerateMissingShards we get an empty result (200) instead of an error.
+    // earliestWatermarks pushes the planner's segment past the query range so
+    // no shard keys are emitted at all, demonstrating the planner-level skip.
+    const pyramid: Pyramid = { ...buildPyramid(), storage: memStorage() }
+    const url = 'https://serve.example/?'
+      + 'from=2026-01-01T00:00:00Z'
+      + '&to=2026-01-01T02:00:00Z'
+      + `&bbox=${BBOX_PARAM}`
+      + '&cell_budget=100'
+
+    const errRes = await serveGeoQuery({ pyramid, request: new Request(url) })
+    expect(errRes.status).toBe(400)
+
+    const tolerantRes = await serveGeoQuery({
+      pyramid,
+      request: new Request(url),
+      tolerateMissingShards: true,
+    })
+    expect(tolerantRes.status).toBe(200)
+    expect(((await tolerantRes.json()) as GeoResponse).records).toEqual([])
+
+    const clampedRes = await serveGeoQuery({
+      pyramid,
+      request: new Request(url),
+      earliestWatermarks: { h1: new Date('2030-01-01T00:00:00Z') },
+    })
+    expect(clampedRes.status).toBe(200)
+    const clampedBody = await clampedRes.json() as GeoResponse
+    expect(clampedBody.plan.segments).toEqual([])
+    expect(clampedBody.records).toEqual([])
+  })
 })

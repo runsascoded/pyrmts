@@ -33,6 +33,7 @@ export interface PlanGeoQueryInput {
   // whose cell count in `bbox` fits this budget.
   cellBudget: number
   watermarks?: Record<string, Date>
+  earliestWatermarks?: Record<string, Date>
   filter?: Record<string, string | number>
 }
 
@@ -65,6 +66,7 @@ export function planGeoQuery(
     range: input.range,
     binBudget: input.binBudget,
     ...(input.watermarks !== undefined ? { watermarks: input.watermarks } : {}),
+    ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
     ...(input.filter !== undefined ? { filter: input.filter } : {}),
   })
 

@@ -11,6 +11,7 @@ from .axis import (
     parse_duration,
     shard_periods_covering,
 )
+from .cascade import CascadeResult, cascade_tiers
 from .keys import substitute_key
 from .monoids import Monoid, Row, get_monoid, state_columns
 from .storage import FsStorage, MemStorage, S3Storage
@@ -35,6 +36,7 @@ __all__ = [
     'ParsedTimeSpan', 'ShardPeriod',
     'add_span', 'bins_in_range', 'floor_to_span', 'format_period',
     'parse_duration', 'shard_periods_covering',
+    'CascadeResult', 'cascade_tiers',
     'substitute_key',
     'Monoid', 'Row', 'get_monoid', 'state_columns',
     'FsStorage', 'MemStorage', 'S3Storage',

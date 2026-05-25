@@ -42,6 +42,9 @@ export type { Monoid, Row } from './monoids.js'
 export { stitch } from './stitch.js'
 export type { StitchInput } from './stitch.js'
 
+export { pivotTallToHistogram } from './pivot.js'
+export type { PivotTallToHistogramOptions } from './pivot.js'
+
 export { fetchShardData, fetchSegmentRows } from './fetch.js'
 
 export { memStorage } from './storage.js'

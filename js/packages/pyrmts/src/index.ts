@@ -6,6 +6,7 @@ export type {
   Bin,
   Dim,
   Duration,
+  GeoSpec,
   Metric,
   MonoidName,
   Pyramid,

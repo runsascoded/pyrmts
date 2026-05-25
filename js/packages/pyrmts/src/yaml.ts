@@ -24,6 +24,7 @@ import type {
   Axis,
   Bin,
   Dim,
+  GeoSpec,
   Metric,
   MonoidName,
   Pyramid,
@@ -42,6 +43,7 @@ export interface PyramidConfig {
   dims: Dim[]
   metrics: Metric[]
   tiers: Tier[]
+  geo?: GeoSpec
 }
 
 const VALID_AXES = new Set<Axis>(['time', 'step'])
@@ -67,7 +69,7 @@ export function parsePyramidYaml(text: string): PyramidConfig {
 
   const binCol = typeof root.binCol === 'string' ? root.binCol : 'ts'
 
-  return {
+  const cfg: PyramidConfig = {
     storage: storageMeta,
     keyTemplate,
     axis,
@@ -76,11 +78,39 @@ export function parsePyramidYaml(text: string): PyramidConfig {
     metrics: parseMetrics(root.metrics),
     tiers: parseTiers(root.tiers),
   }
+  if (root.geo !== undefined) cfg.geo = parseGeo(root.geo)
+  return cfg
+}
+
+function parseGeo(raw: unknown): GeoSpec {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('parsePyramidYaml: `geo` must be a mapping')
+  }
+  const g = raw as Record<string, unknown>
+  const cellCol = typeof g.cellCol === 'string' ? g.cellCol : 'h3_cell'
+  if (!Array.isArray(g.resolutions) || g.resolutions.length === 0) {
+    throw new Error('parsePyramidYaml: `geo.resolutions` must be a non-empty array of integers')
+  }
+  const resolutions = g.resolutions.map((r, i) => {
+    if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r > 15) {
+      throw new Error(`parsePyramidYaml: geo.resolutions[${i}] must be an integer 0-15 (got ${String(r)})`)
+    }
+    return r
+  })
+  // Validate finest-first ordering (descending).
+  for (let i = 1; i < resolutions.length; i++) {
+    if (resolutions[i]! >= resolutions[i - 1]!) {
+      throw new Error(
+        `parsePyramidYaml: geo.resolutions must be finest-first (descending); got ${resolutions.join(', ')}`,
+      )
+    }
+  }
+  return { cellCol, resolutions }
 }
 
 // Materialize a full Pyramid by wiring in a Storage impl.
 export function pyramidFromConfig(cfg: PyramidConfig, storage: Storage): Pyramid {
-  return {
+  const p: Pyramid = {
     storage,
     keyTemplate: cfg.keyTemplate,
     axis: cfg.axis,
@@ -89,6 +119,8 @@ export function pyramidFromConfig(cfg: PyramidConfig, storage: Storage): Pyramid
     metrics: cfg.metrics,
     tiers: cfg.tiers,
   }
+  if (cfg.geo !== undefined) p.geo = cfg.geo
+  return p
 }
 
 function parseStorageBlock(

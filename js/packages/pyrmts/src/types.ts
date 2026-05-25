@@ -70,4 +70,15 @@ export interface Pyramid {
   // Canonical order: finest → coarsest. Planner iterates coarsest-first
   // (reverse) when picking the tier that fits a bin budget.
   tiers: Tier[]
+  // Optional geo (h3) extension. When present, every shard contains rows
+  // at all materialized resolutions; the geo planner (in `pyrmts-geo`)
+  // picks a resolution at query time + filters by cell list.
+  geo?: GeoSpec
+}
+
+export interface GeoSpec {
+  // Parquet column holding the h3 cell ID (string form, e.g. '892a100...').
+  cellCol: string
+  // h3 resolutions materialized inside every shard. Finest first.
+  resolutions: number[]
 }

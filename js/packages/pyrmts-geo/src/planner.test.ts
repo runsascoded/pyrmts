@@ -1,0 +1,182 @@
+import { getResolution, latLngToCell } from 'h3-js'
+import { memStorage, type Pyramid } from 'pyrmts'
+import { describe, expect, test } from 'vitest'
+import { bboxToCells, filterCellsAndRes, planGeoQuery } from './planner.js'
+
+const d = (iso: string): Date => new Date(iso)
+const mockStorage = memStorage()
+
+// NYC-ish bbox (small enough to keep cell counts manageable in tests).
+const NYC: { minLat: number; maxLat: number; minLng: number; maxLng: number } = {
+  minLat: 40.70,
+  maxLat: 40.78,
+  minLng: -74.02,
+  maxLng: -73.96,
+}
+
+function ctbkPyramid(geoResolutions: number[]): Pyramid {
+  return {
+    storage: mockStorage,
+    keyTemplate: 'trips/{tier}/{period}.parquet',
+    axis: 'time',
+    binCol: 'ts',
+    dims: [
+      { name: 'station_id', type: 'string' },
+      { name: 'rideable', type: 'string' },
+    ],
+    metrics: [{ name: 'count', monoid: 'count' }],
+    tiers: [
+      { name: 'h1', bin: '1h', shard: '1mo' },
+      { name: 'd1', bin: '1d', shard: '1y' },
+      { name: 'mo1', bin: '1mo', shard: '1y' },
+    ],
+    geo: { cellCol: 'h3_cell', resolutions: geoResolutions },
+  }
+}
+
+describe('bboxToCells', () => {
+  test('returns cells at the requested resolution when bbox is large enough', () => {
+    const cells = bboxToCells(NYC, 7)
+    expect(cells.length).toBeGreaterThan(0)
+    expect(cells.every(c => getResolution(c) === 7)).toBe(true)
+  })
+
+  test('returns more cells at finer resolution', () => {
+    const coarse = bboxToCells(NYC, 7)
+    const fine = bboxToCells(NYC, 9)
+    expect(fine.length).toBeGreaterThan(coarse.length)
+  })
+
+  test('returns empty when bbox is smaller than the resolution\'s centroid spacing', () => {
+    // NYC bbox is ~6×9 km; res 4 hexes average ~1770 km². No centroid lands inside.
+    expect(bboxToCells(NYC, 4)).toEqual([])
+  })
+})
+
+describe('planGeoQuery: resolution selection', () => {
+  test('picks finest resolution whose cell count fits cellBudget', () => {
+    // At NYC scale: res 9 yields ~hundreds; res 7 yields ~tens; res 5 yields ~1.
+    const pyramid = ctbkPyramid([9, 7, 5])
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: NYC,
+      cellBudget: 30,    // res 7 should fit (~10s); res 9 won't
+    })
+    expect(plan.outputRes).toBe(7)
+    expect(plan.outputCells.length).toBeLessThanOrEqual(30)
+    expect(plan.outputCells.every(c => getResolution(c) === 7)).toBe(true)
+  })
+
+  test('falls back to coarsest resolution when nothing fits the budget', () => {
+    const pyramid = ctbkPyramid([12, 9, 7])
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: NYC,
+      cellBudget: 1,    // no resolution fits 1 cell over NYC
+    })
+    expect(plan.outputRes).toBe(7)    // coarsest available
+    expect(plan.outputCells.length).toBeGreaterThan(0)
+  })
+
+  test('skips empty-cell resolutions; falls back to bbox-center cell when no res has data', () => {
+    // Tiny bbox + coarse-only resolutions → every resolution yields 0 cells.
+    const tinyBbox = { minLat: 40.74, maxLat: 40.741, minLng: -73.99, maxLng: -73.989 }
+    const pyramid = ctbkPyramid([3, 2])
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: tinyBbox,
+      cellBudget: 100,
+    })
+    expect(plan.outputRes).toBe(2)
+    expect(plan.outputCells).toHaveLength(1)
+    expect(getResolution(plan.outputCells[0]!)).toBe(2)
+  })
+
+  test('throws on pyramid with no geo config', () => {
+    const pyramid: Pyramid = { ...ctbkPyramid([9]) }
+    delete pyramid.geo
+    expect(() => planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: NYC,
+      cellBudget: 100,
+    })).toThrow('planGeoQuery: pyramid has no `geo` config')
+  })
+})
+
+describe('planGeoQuery: segment shape', () => {
+  test('inherits time-axis segmentation from planQuery; each segment carries the cell list', () => {
+    const pyramid = ctbkPyramid([9, 7, 5])
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: NYC,
+      cellBudget: 30,
+    })
+    // 1-day range at h1 = 24 bins ≤ 100 → h1 selected. One segment, h1 shard.
+    expect(plan.outputTier.name).toBe('h1')
+    expect(plan.segments).toHaveLength(1)
+    expect(plan.segments[0]!.shardTier.name).toBe('h1')
+    expect(plan.segments[0]!.cells).toBe(plan.outputCells)
+  })
+
+  test('watermark-driven time refinement keeps the same cell list across segments', () => {
+    const pyramid = ctbkPyramid([9, 7, 5])
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: NYC,
+      cellBudget: 30,
+      watermarks: { h1: d('2026-01-01T12:00:00Z') },
+    })
+    // h1 watermark at noon → segments split (h1 for first half, no finer
+    // tier exists → tail dropped; depends on planQuery semantics).
+    // Just check that whatever segments come back share the same cell list.
+    for (const seg of plan.segments) {
+      expect(seg.cells).toBe(plan.outputCells)
+    }
+  })
+})
+
+describe('filterCellsAndRes', () => {
+  // Two NYC cells at different resolutions for fixtures.
+  const cell7 = latLngToCell(40.74, -73.99, 7)
+  const cell9 = latLngToCell(40.74, -73.99, 9)
+  const cell9Other = latLngToCell(40.72, -73.97, 9)
+
+  test('keeps only rows at the requested resolution + in the allowed set', () => {
+    const rows: Array<Record<string, unknown>> = [
+      { h3_cell: cell7, ts: 1, count: 10 },
+      { h3_cell: cell9, ts: 1, count: 5 },
+      { h3_cell: cell9Other, ts: 1, count: 3 },
+    ]
+    expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell9])).toEqual([
+      { h3_cell: cell9, ts: 1, count: 5 },
+    ])
+  })
+
+  test('drops rows at the wrong resolution even if the cell ID happens to match a string', () => {
+    const rows: Array<Record<string, unknown>> = [
+      { h3_cell: cell7, ts: 1, count: 10 },
+      { h3_cell: cell9, ts: 1, count: 5 },
+    ]
+    // outputRes=9, only cell9 should survive
+    expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell7, cell9])).toEqual([
+      { h3_cell: cell9, ts: 1, count: 5 },
+    ])
+  })
+
+  test('drops rows with non-string cell columns (defensive)', () => {
+    const rows: Array<Record<string, unknown>> = [
+      { h3_cell: null, ts: 1, count: 10 },
+      { h3_cell: 42, ts: 1, count: 10 },
+      { h3_cell: cell9, ts: 1, count: 5 },
+    ]
+    expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell9])).toEqual([
+      { h3_cell: cell9, ts: 1, count: 5 },
+    ])
+  })
+})

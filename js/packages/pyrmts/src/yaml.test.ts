@@ -154,3 +154,83 @@ describe('pyramidFromConfig', () => {
     expect(pyramid.tiers).toHaveLength(4)
   })
 })
+
+describe('parsePyramidYaml: geo block', () => {
+  const ctbkGeoYaml = `
+storage:
+  type: r2
+  bucket: ctbk
+  key: 'trips/{tier}/{period}.parquet'
+
+dims:
+  - { name: station_id, type: string }
+  - { name: gender,     type: string }
+  - { name: rideable,   type: string }
+  - { name: user_type,  type: string }
+
+metrics:
+  - { name: count, monoid: count }
+  - { name: duration_s, monoid: sum }
+
+tiers:
+  - { name: h1, bin: 1h, shard: 1mo }
+  - { name: d1, bin: 1d, shard: 1y }
+  - { name: mo1, bin: 1mo, shard: 1y }
+
+geo:
+  cellCol: h3
+  resolutions: [12, 9, 7, 4]
+`
+
+  test('parses geo block with cellCol + resolutions', () => {
+    const cfg = parsePyramidYaml(ctbkGeoYaml)
+    expect(cfg.geo).toEqual({ cellCol: 'h3', resolutions: [12, 9, 7, 4] })
+  })
+
+  test('defaults cellCol to h3_cell when omitted', () => {
+    const cfg = parsePyramidYaml(`
+storage: { type: r2, key: 'k/{tier}/{period}.parquet' }
+dims: []
+metrics: []
+tiers: [{ name: raw, bin: 1d, shard: 1y }]
+geo: { resolutions: [10, 7] }
+`)
+    expect(cfg.geo).toEqual({ cellCol: 'h3_cell', resolutions: [10, 7] })
+  })
+
+  test('omits geo field when not in YAML', () => {
+    const cfg = parsePyramidYaml(`
+storage: { type: r2, key: 'k/{tier}/{period}.parquet' }
+dims: []
+metrics: []
+tiers: [{ name: raw, bin: 1d, shard: 1y }]
+`)
+    expect(cfg.geo).toBeUndefined()
+  })
+
+  test('throws when resolutions are not finest-first (descending)', () => {
+    expect(() => parsePyramidYaml(`
+storage: { type: r2, key: 'k/{tier}/{period}.parquet' }
+dims: []
+metrics: []
+tiers: [{ name: raw, bin: 1d, shard: 1y }]
+geo: { resolutions: [4, 7, 9] }
+`)).toThrow('parsePyramidYaml: geo.resolutions must be finest-first (descending); got 4, 7, 9')
+  })
+
+  test('throws on out-of-range resolution', () => {
+    expect(() => parsePyramidYaml(`
+storage: { type: r2, key: 'k/{tier}/{period}.parquet' }
+dims: []
+metrics: []
+tiers: [{ name: raw, bin: 1d, shard: 1y }]
+geo: { resolutions: [16] }
+`)).toThrow('parsePyramidYaml: geo.resolutions[0] must be an integer 0-15 (got 16)')
+  })
+
+  test('pyramidFromConfig propagates geo to the Pyramid', () => {
+    const cfg = parsePyramidYaml(ctbkGeoYaml)
+    const pyramid = pyramidFromConfig(cfg, memStorage())
+    expect(pyramid.geo).toEqual({ cellCol: 'h3', resolutions: [12, 9, 7, 4] })
+  })
+})

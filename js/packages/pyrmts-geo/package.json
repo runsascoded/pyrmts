@@ -5,15 +5,22 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
-  "files": ["src", "dist"],
+  "files": [
+    "src",
+    "dist"
+  ],
   "license": "MIT",
   "author": "Ryan Williams <ryan@runsascoded.com>",
   "dependencies": {
+    "h3-js": "^4.4.0",
     "pyrmts": "workspace:*"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/runsascoded/pyrmts.git",
     "directory": "js/packages/pyrmts-geo"
+  },
+  "devDependencies": {
+    "hyparquet-writer": "^0.15.2"
   }
 }

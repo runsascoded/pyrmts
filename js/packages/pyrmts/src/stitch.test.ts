@@ -165,6 +165,91 @@ describe('stitch: multi-segment (output + reaggregated tail)', () => {
   })
 })
 
+describe('stitch: histogram monoid', () => {
+  // ctbk-style avail pyramid: station_id dim, single histogram metric.
+  const availPyramid: Pyramid = {
+    storage: mockStorage,
+    keyTemplate: 'avail/{tier}/{period}.parquet',
+    axis: 'time',
+    binCol: 'ts',
+    dims: [{ name: 'station_id', type: 'string' }],
+    metrics: [{ name: 'states', monoid: 'histogram' }],
+    tiers: [
+      { name: 'raw', bin: '1min', shard: '1h' },
+      { name: 'h1', bin: '1h', shard: '1mo' },
+    ],
+  }
+
+  test('reaggregates per-minute histograms into one h1 histogram', () => {
+    const plan = planQuery(availPyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T01:00:00Z') },
+      binBudget: 1,    // forces h1
+    })
+    expect(plan.outputTier.name).toBe('h1')
+
+    plan.segments[0]!.shardTier = availPyramid.tiers[0]!
+    plan.segments[0]!.reaggregate = true
+
+    // 60 raw rows for station 'A', each contributing one state-minute. Cycle
+    // the state through 0..4 → final histogram is {0:12, 1:12, 2:12, 3:12, 4:12}.
+    const rows: Row[] = []
+    for (let m = 0; m < 60; m++) {
+      rows.push({
+        ts: ms('2026-01-01T00:00:00Z') + m * 60_000,
+        station_id: 'A',
+        states: { [String(m % 5)]: 1 },
+      })
+    }
+    const out = stitch({ pyramid: availPyramid, plan, shardRows: [rows] })
+    expect(out).toEqual([
+      {
+        ts: ms('2026-01-01T00:00:00Z'),
+        station_id: 'A',
+        states: { '0': 12, '1': 12, '2': 12, '3': 12, '4': 12 },
+      },
+    ])
+  })
+
+  test('init detaches the first row\'s histogram from the source (no aliasing corruption)', () => {
+    const plan = planQuery(availPyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T01:00:00Z') },
+      binBudget: 1,
+    })
+    plan.segments[0]!.shardTier = availPyramid.tiers[0]!
+    plan.segments[0]!.reaggregate = true
+
+    const firstHist = { '0': 5 }
+    const rows: Row[] = [
+      { ts: ms('2026-01-01T00:00:00Z'), station_id: 'A', states: firstHist },
+      { ts: ms('2026-01-01T00:30:00Z'), station_id: 'A', states: { '1': 3 } },
+    ]
+    stitch({ pyramid: availPyramid, plan, shardRows: [rows] })
+    // The original source row's histogram must not have been mutated by the
+    // combine step (would have happened if init didn't shallow-copy).
+    expect(firstHist).toEqual({ '0': 5 })
+  })
+
+  test('groups by dim — separate histograms per station_id', () => {
+    const plan = planQuery(availPyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T01:00:00Z') },
+      binBudget: 1,
+    })
+    plan.segments[0]!.shardTier = availPyramid.tiers[0]!
+    plan.segments[0]!.reaggregate = true
+
+    const rows: Row[] = [
+      { ts: ms('2026-01-01T00:00:00Z'), station_id: 'A', states: { '0': 5 } },
+      { ts: ms('2026-01-01T00:10:00Z'), station_id: 'A', states: { '0': 3, '1': 2 } },
+      { ts: ms('2026-01-01T00:00:00Z'), station_id: 'B', states: { '2': 7 } },
+    ]
+    const out = stitch({ pyramid: availPyramid, plan, shardRows: [rows] })
+    expect(out).toEqual([
+      { ts: ms('2026-01-01T00:00:00Z'), station_id: 'A', states: { '0': 8, '1': 2 } },
+      { ts: ms('2026-01-01T00:00:00Z'), station_id: 'B', states: { '2': 7 } },
+    ])
+  })
+})
+
 describe('stitch: errors', () => {
   test('throws if shardRows length mismatches segments', () => {
     const plan = planQuery(awair, {

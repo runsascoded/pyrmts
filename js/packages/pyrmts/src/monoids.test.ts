@@ -79,9 +79,74 @@ describe('stateColumns', () => {
   })
 })
 
+describe('histogram monoid', () => {
+  test('combines two maps, summing overlapping keys', () => {
+    const m = getMonoid('histogram')
+    const target: Row = { states: { '0': 5, '1': 10, '2': 3 } }
+    const source: Row = { states: { '1': 4, '2': 7, '3': 1 } }
+    m.combine(target, source, 'states')
+    expect(target.states).toEqual({ '0': 5, '1': 14, '2': 10, '3': 1 })
+  })
+
+  test('parses JSON-string state on combine (parquet JSON column comes back as object, but tolerates string too)', () => {
+    const m = getMonoid('histogram')
+    const target: Row = { states: '{"a":3}' }
+    const source: Row = { states: '{"a":2,"b":5}' }
+    m.combine(target, source, 'states')
+    expect(target.states).toEqual({ a: 5, b: 5 })
+  })
+
+  test('init shallow-copies an object value (no aliasing to source row)', () => {
+    const m = getMonoid('histogram')
+    const sourceHist = { a: 1, b: 2 }
+    const target: Row = { states: sourceHist }
+    m.init!(target, 'states')
+    expect(target.states).toEqual({ a: 1, b: 2 })
+    expect(target.states).not.toBe(sourceHist)   // detached
+  })
+
+  test('init parses JSON-string state', () => {
+    const m = getMonoid('histogram')
+    const target: Row = { states: '{"a":1,"b":2}' }
+    m.init!(target, 'states')
+    expect(target.states).toEqual({ a: 1, b: 2 })
+  })
+
+  test('init normalizes missing value to empty object', () => {
+    const m = getMonoid('histogram')
+    const target: Row = {}
+    m.init!(target, 'states')
+    expect(target.states).toEqual({})
+  })
+
+  test('is associative on disjoint and overlapping keys', () => {
+    const m = getMonoid('histogram')
+    const a = { states: { x: 1 } }
+    const b = { states: { x: 2, y: 3 } }
+    const c = { states: { y: 4, z: 5 } }
+
+    const ab = { states: { ...a.states } }
+    m.combine(ab, b, 'states')
+    const abc1 = { states: { ...(ab.states as Record<string, number>) } }
+    m.combine(abc1, c, 'states')
+
+    const bc = { states: { ...b.states } }
+    m.combine(bc, c, 'states')
+    const abc2 = { states: { ...a.states } }
+    m.combine(abc2, bc, 'states')
+
+    expect(abc1.states).toEqual({ x: 3, y: 7, z: 5 })
+    expect(abc2.states).toEqual({ x: 3, y: 7, z: 5 })
+  })
+
+  test('stateColumns returns the bare metric name (single column)', () => {
+    expect(stateColumns('histogram', 'states')).toEqual(['states'])
+  })
+})
+
 describe('unimplemented monoids', () => {
-  test('throws on histogram (not yet implemented)', () => {
-    expect(() => getMonoid('histogram')).toThrow("Monoid 'histogram' not yet implemented")
+  test('throws on topk (not yet implemented)', () => {
+    expect(() => getMonoid('topk')).toThrow("Monoid 'topk' not yet implemented")
   })
 
   test('throws on tdigest', () => {

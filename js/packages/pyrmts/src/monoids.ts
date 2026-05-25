@@ -19,6 +19,11 @@ export interface Monoid {
   stateSuffixes: string[]
   // Combine `source`'s state into `target` in place, for the given metric.
   combine(target: Row, source: Row, metricName: string): void
+  // Optional: normalize this metric's state in a freshly-created aggregate
+  // row. Stitcher calls this once when an output bin first sees data, so
+  // monoids with object-typed state (`histogram`) can detach from the
+  // source row (avoid aliasing) and parse JSON-string forms transparently.
+  init?(target: Row, metricName: string): void
 }
 
 const SUM_SUFFIXES = ['_n', '_sum', '_sumsq']
@@ -44,9 +49,39 @@ const count: Monoid = {
   },
 }
 
+// Histogram: state is a `{ category: count }` map. Stored as one column
+// (JSON parquet logical type recommended — hyparquet round-trips JS objects
+// transparently). Combine merges maps, summing overlapping keys.
+//
+// Keys are coerced to strings (JS object keys are strings anyway, and JSON
+// can't represent non-string keys). Consumers with int-valued categories
+// (e.g. ctbk avail's `num_bikes_available`) should stringify when building.
+const histogram: Monoid = {
+  stateSuffixes: [''],
+  init(target, name) {
+    target[name] = parseHist(target[name])
+  },
+  combine(target, source, name) {
+    const t = parseHist(target[name])
+    const s = parseHist(source[name])
+    for (const k in s) {
+      t[k] = (t[k] ?? 0) + s[k]!
+    }
+    target[name] = t
+  },
+}
+
+function parseHist(v: unknown): Record<string, number> {
+  if (v === null || v === undefined) return {}
+  if (typeof v === 'string') return JSON.parse(v) as Record<string, number>
+  if (typeof v === 'object') return { ...(v as Record<string, number>) }
+  throw new Error(`histogram: unexpected value type ${typeof v} (got ${String(v)})`)
+}
+
 const MONOIDS = {
   sum,
   count,
+  histogram,
 } satisfies Partial<Record<MonoidName, Monoid>>
 
 export function getMonoid(name: MonoidName): Monoid {

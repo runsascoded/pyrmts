@@ -56,7 +56,13 @@ export function stitch(input: StitchInput): Row[] {
 
       const existing = agg.get(aggKey)
       if (existing === undefined) {
-        agg.set(aggKey, { ...row, [binCol]: outBinStart })
+        const fresh: Row = { ...row, [binCol]: outBinStart }
+        // Give each monoid a chance to normalize its state in the fresh row
+        // (e.g. histogram parses JSON strings + detaches from the source).
+        for (const metric of pyramid.metrics) {
+          getMonoid(metric.monoid).init?.(fresh, metric.name)
+        }
+        agg.set(aggKey, fresh)
       } else {
         for (const metric of pyramid.metrics) {
           getMonoid(metric.monoid).combine(existing, row, metric.name)

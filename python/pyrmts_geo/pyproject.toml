@@ -6,7 +6,13 @@ requires-python = ">=3.10"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Ryan Williams", email = "ryan@runsascoded.com" }]
-dependencies = ["pyrmts"]
+dependencies = [
+    "pyrmts",
+    "h3>=4",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
 
 [tool.uv.sources]
 pyrmts = { workspace = true }

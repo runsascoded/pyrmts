@@ -1,0 +1,178 @@
+"""Parse a pyramid YAML config. Mirrors `js/packages/pyrmts/src/yaml.ts`.
+
+`PyramidConfig` is storage-less; the caller wires `Storage` separately and
+constructs a `Pyramid` via `pyramid_from_config`."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+import yaml as _yaml
+
+from .types import (
+    Axis,
+    Dim,
+    DimType,
+    GeoSpec,
+    Metric,
+    MonoidName,
+    Pyramid,
+    Storage,
+    Tier,
+)
+
+
+_VALID_AXES: set[str] = {'time', 'step'}
+_VALID_DIM_TYPES: set[str] = {'int', 'string', 'h3', 'geohash'}
+_VALID_MONOIDS: set[str] = {
+    'sum', 'count', 'histogram', 'topk', 'botk', 'hll', 'tdigest',
+}
+
+
+@dataclass
+class PyramidConfig:
+    storage: dict[str, Any]
+    keyTemplate: str
+    binCol: str
+    dims: list[Dim]
+    metrics: list[Metric]
+    tiers: list[Tier]
+    axis: Axis = 'time'
+    geo: GeoSpec | None = None
+
+
+def parse_pyramid_yaml(text: str) -> PyramidConfig:
+    raw = _yaml.safe_load(text)
+    if not isinstance(raw, dict):
+        raise ValueError("parse_pyramid_yaml: top-level must be a mapping")
+
+    storage_meta, key_template = _parse_storage_block(raw.get('storage'))
+
+    axis = raw.get('axis', 'time')
+    if axis not in _VALID_AXES:
+        raise ValueError(f"parse_pyramid_yaml: invalid axis {axis!r} (want 'time' or 'step')")
+
+    bin_col = raw.get('binCol', 'ts')
+    if not isinstance(bin_col, str):
+        raise ValueError("parse_pyramid_yaml: binCol must be a string")
+
+    cfg = PyramidConfig(
+        storage=storage_meta,
+        keyTemplate=key_template,
+        axis=axis,
+        binCol=bin_col,
+        dims=_parse_dims(raw.get('dims')),
+        metrics=_parse_metrics(raw.get('metrics')),
+        tiers=_parse_tiers(raw.get('tiers')),
+    )
+    if 'geo' in raw and raw['geo'] is not None:
+        cfg.geo = _parse_geo(raw['geo'])
+    return cfg
+
+
+def pyramid_from_config(cfg: PyramidConfig, storage: Storage) -> Pyramid:
+    return Pyramid(
+        storage=storage,
+        keyTemplate=cfg.keyTemplate,
+        axis=cfg.axis,
+        binCol=cfg.binCol,
+        dims=cfg.dims,
+        metrics=cfg.metrics,
+        tiers=cfg.tiers,
+        geo=cfg.geo,
+    )
+
+
+def _parse_storage_block(raw: Any) -> tuple[dict[str, Any], str]:
+    if not isinstance(raw, dict):
+        raise ValueError("parse_pyramid_yaml: `storage` must be a mapping")
+    if not isinstance(raw.get('type'), str):
+        raise ValueError("parse_pyramid_yaml: `storage.type` must be a string")
+    if not isinstance(raw.get('key'), str):
+        raise ValueError("parse_pyramid_yaml: `storage.key` (key template) must be a string")
+    key = raw['key']
+    meta = {k: v for k, v in raw.items() if k != 'key'}
+    return meta, key
+
+
+def _parse_dims(raw: Any) -> list[Dim]:
+    if not isinstance(raw, list):
+        raise ValueError("parse_pyramid_yaml: `dims` must be a list")
+    out: list[Dim] = []
+    for i, d in enumerate(raw):
+        if not isinstance(d, dict):
+            raise ValueError(f"parse_pyramid_yaml: dims[{i}] must be a mapping")
+        name = d.get('name')
+        type_ = d.get('type')
+        if not isinstance(name, str):
+            raise ValueError(f"parse_pyramid_yaml: dims[{i}].name must be a string")
+        if type_ not in _VALID_DIM_TYPES:
+            raise ValueError(
+                f"parse_pyramid_yaml: dims[{i}].type {type_!r} invalid "
+                f"(want one of int/string/h3/geohash)"
+            )
+        out.append(Dim(name=name, type=type_))
+    return out
+
+
+def _parse_metrics(raw: Any) -> list[Metric]:
+    if not isinstance(raw, list):
+        raise ValueError("parse_pyramid_yaml: `metrics` must be a list")
+    out: list[Metric] = []
+    for i, m in enumerate(raw):
+        if not isinstance(m, dict):
+            raise ValueError(f"parse_pyramid_yaml: metrics[{i}] must be a mapping")
+        name = m.get('name')
+        monoid = m.get('monoid')
+        if not isinstance(name, str):
+            raise ValueError(f"parse_pyramid_yaml: metrics[{i}].name must be a string")
+        if monoid not in _VALID_MONOIDS:
+            raise ValueError(f"parse_pyramid_yaml: metrics[{i}].monoid {monoid!r} invalid")
+        config = m.get('config')
+        if config is not None and not isinstance(config, dict):
+            raise ValueError(f"parse_pyramid_yaml: metrics[{i}].config must be a mapping")
+        out.append(Metric(name=name, monoid=monoid, config=config))
+    return out
+
+
+def _parse_tiers(raw: Any) -> list[Tier]:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("parse_pyramid_yaml: `tiers` must be a non-empty list")
+    out: list[Tier] = []
+    for i, t in enumerate(raw):
+        if not isinstance(t, dict):
+            raise ValueError(f"parse_pyramid_yaml: tiers[{i}] must be a mapping")
+        name = t.get('name')
+        bin_ = t.get('bin')
+        shard = t.get('shard')
+        if not isinstance(name, str):
+            raise ValueError(f"parse_pyramid_yaml: tiers[{i}].name must be a string")
+        if not isinstance(bin_, str):
+            raise ValueError(f"parse_pyramid_yaml: tiers[{i}].bin must be a string")
+        if not isinstance(shard, str):
+            raise ValueError(f"parse_pyramid_yaml: tiers[{i}].shard must be a string")
+        out.append(Tier(name=name, bin=bin_, shard=shard))
+    return out
+
+
+def _parse_geo(raw: Any) -> GeoSpec:
+    if not isinstance(raw, dict):
+        raise ValueError("parse_pyramid_yaml: `geo` must be a mapping")
+    cell_col = raw.get('cellCol', 'h3_cell')
+    if not isinstance(cell_col, str):
+        raise ValueError("parse_pyramid_yaml: `geo.cellCol` must be a string")
+    resolutions = raw.get('resolutions')
+    if not isinstance(resolutions, list) or not resolutions:
+        raise ValueError("parse_pyramid_yaml: `geo.resolutions` must be a non-empty list of ints")
+    for i, r in enumerate(resolutions):
+        if not isinstance(r, int) or r < 0 or r > 15:
+            raise ValueError(
+                f"parse_pyramid_yaml: geo.resolutions[{i}] must be an int in 0-15 (got {r!r})"
+            )
+    for i in range(1, len(resolutions)):
+        if resolutions[i] >= resolutions[i - 1]:
+            raise ValueError(
+                "parse_pyramid_yaml: geo.resolutions must be finest-first (descending); "
+                f"got {resolutions}"
+            )
+    return GeoSpec(cellCol=cell_col, resolutions=tuple(resolutions))

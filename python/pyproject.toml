@@ -1,2 +1,5 @@
 [tool.uv.workspace]
 members = ["pyrmts", "pyrmts_geo"]
+
+[tool.uv]
+package = false

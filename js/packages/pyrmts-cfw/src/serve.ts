@@ -58,7 +58,10 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
   try {
     const plan = planQuery(pyramid, { range: { from, to }, binBudget, watermarks, filter })
     const shardRows = await Promise.all(
-      plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys)),
+      plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys, {
+        binCol: pyramid.binCol,
+        range: { from: seg.from, to: seg.to },
+      })),
     )
     const records = stitch({ pyramid, plan, shardRows })
     result = {

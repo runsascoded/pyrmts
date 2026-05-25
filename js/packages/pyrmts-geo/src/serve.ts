@@ -78,7 +78,10 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
     })
 
     const shardRows = await Promise.all(
-      plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys)),
+      plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys, {
+        binCol: pyramid.binCol,
+        range: { from: seg.from, to: seg.to },
+      })),
     )
     const filteredRows = shardRows.map(rows =>
       filterCellsAndRes(rows, pyramid.geo!.cellCol, plan.outputRes, plan.outputCells),

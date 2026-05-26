@@ -8,13 +8,10 @@
   "files": [
     "dist"
   ],
-  "scripts": {
-    "build": "tsc -b"
-  },
   "license": "MIT",
   "author": "Ryan Williams <ryan@runsascoded.com>",
   "dependencies": {
-    "pyrmts": "workspace:*"
+    "pyrmts": "https://github.com/runsascoded/pyrmts#dist&path:/js/packages/pyrmts"
   },
   "repository": {
     "type": "git",
@@ -24,5 +21,8 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260524.1",
     "hyparquet-writer": "^0.15.2"
+  },
+  "scripts": {
+    "build": "tsc -b"
   }
 }

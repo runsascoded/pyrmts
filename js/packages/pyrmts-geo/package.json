@@ -8,14 +8,11 @@
   "files": [
     "dist"
   ],
-  "scripts": {
-    "build": "tsc -b"
-  },
   "license": "MIT",
   "author": "Ryan Williams <ryan@runsascoded.com>",
   "dependencies": {
     "h3-js": "^4.4.0",
-    "pyrmts": "workspace:*"
+    "pyrmts": "https://github.com/runsascoded/pyrmts#dist&path:/js/packages/pyrmts"
   },
   "repository": {
     "type": "git",
@@ -31,6 +28,11 @@
     "react": ">=18"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true }
+    "react": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
   }
 }

@@ -8,9 +8,6 @@
   "files": [
     "dist"
   ],
-  "scripts": {
-    "build": "tsc -b"
-  },
   "license": "MIT",
   "author": "Ryan Williams <ryan@runsascoded.com>",
   "repository": {
@@ -31,6 +28,11 @@
     "react": ">=18"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true }
+    "react": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
   }
 }

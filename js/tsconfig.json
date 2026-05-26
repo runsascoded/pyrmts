@@ -1,8 +1,0 @@
-{
-  "files": [],
-  "references": [
-    { "path": "./packages/pyrmts" },
-    { "path": "./packages/pyrmts-cfw" },
-    { "path": "./packages/pyrmts-geo" }
-  ]
-}

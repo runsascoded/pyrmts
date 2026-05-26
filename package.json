@@ -1,0 +1,9 @@
+{
+  "name": "pyrmts-dist",
+  "private": true,
+  "description": "Built dist branch for pyrmts packages. See js/packages/*/package.json.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/runsascoded/pyrmts.git"
+  }
+}

@@ -47,8 +47,8 @@ def _default_sort_cols(pyramid: Pyramid) -> list[str]:
 
 def write_tier_parquet(
     rows: Iterable[Row] | pa.Table,
-    pyramid: Pyramid,
-    out: BinaryIO | str | Path,
+    pyramid: Pyramid | None = None,
+    out: BinaryIO | str | Path | None = None,
     *,
     row_group_size: int | None = None,
     sort: Sequence[str] | None = None,
@@ -58,9 +58,11 @@ def write_tier_parquet(
 
     Defaults are tuned for hyparquet consumption:
 
-    - **Sort**: `(bin_col, *dims, geo.cellCol)`. The bin-col-first sort
-      gives each RG tight `bin_col` stats, which is the property
-      `fetchShardData` uses to skip RGs.
+    - **Sort**: when `pyramid` is supplied, defaults to
+      `(bin_col, *dims, geo.cellCol)` — the bin-col-first sort gives each
+      RG tight `bin_col` stats, which is the property `fetchShardData`
+      uses to skip RGs. When `pyramid` is `None`, the caller must pass
+      `sort=[...]` explicitly (or `sort=[]` for no sort).
     - **Row-group size**: `max(4096, min(16384, total_rows // 100))`.
       Small enough that a decoded RG fits in ~1 MB for typical schemas;
       big enough to amortize per-RG overhead.
@@ -69,22 +71,38 @@ def write_tier_parquet(
 
     Args:
         rows: Row iterable or a pre-built `pa.Table`.
-        pyramid: Used to derive default `sort` cols (`bin_col`, dim cols,
-            optional `geo.cellCol`).
+        pyramid: When given, used only to derive default `sort` cols
+            (`bin_col`, dim cols, optional `geo.cellCol`). Optional —
+            callers without a Python `Pyramid` declaration can pass
+            `sort=[...]` explicitly instead.
         out: Destination — a binary file-like, path-string, or `Path`.
+            Required (only typed `None` to allow `pyramid` to be omitted
+            positionally; pass via keyword if you don't supply `pyramid`).
         row_group_size: Override the default sizing.
         sort: Override the default sort cols. Pass `[]` to skip sorting.
+            Required when `pyramid` is `None`.
         compression: Passed through to `pq.write_table` (default `snappy`).
 
     Returns:
         Bytes written.
     """
+    if out is None:
+        raise TypeError("write_tier_parquet: `out` is required")
+    if pyramid is None and sort is None:
+        raise TypeError(
+            "write_tier_parquet: `sort` is required when `pyramid` is not "
+            "supplied (or pass `sort=[]` for no sort)"
+        )
+
     if isinstance(rows, pa.Table):
         table = rows
     else:
         table = pa.Table.from_pylist(list(rows))
 
-    sort_cols = list(sort) if sort is not None else _default_sort_cols(pyramid)
+    sort_cols = (
+        list(sort) if sort is not None
+        else _default_sort_cols(pyramid)  # type: ignore[arg-type]  # pyramid is non-None here
+    )
     # Tolerate sort cols not present (e.g. dim columns the writer didn't
     # populate); pa.Table.sort_by errors on missing columns.
     schema_names = set(table.schema.names)

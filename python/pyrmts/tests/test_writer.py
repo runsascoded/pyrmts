@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from pyrmts import (
     Dim,
@@ -252,3 +253,53 @@ def test_skips_sort_cols_missing_from_schema():
     assert n > 0
     table, _ = _read_parquet(buf.getvalue())
     assert table.column('ts').to_pylist() == sorted(table.column('ts').to_pylist())
+
+
+def test_pyramid_optional_when_sort_explicit():
+    """Caller without a Python `Pyramid` declaration can still use the
+    writer by passing `sort=[...]` explicitly (the ctbk avail_v2 path)."""
+    base = _ms(datetime(2026, 1, 1, tzinfo=UTC))
+    rows = [
+        {'dt': base + h * 3_600_000, 'cell': cell, 'count': 1}
+        for cell in ('cellC', 'cellA', 'cellB')
+        for h in (1, 0)
+    ]
+    buf = io.BytesIO()
+    n = write_tier_parquet(rows, out=buf, sort=['dt', 'cell'])
+    assert n > 0
+    table, _ = _read_parquet(buf.getvalue())
+    # dt-major, cell-minor.
+    dt_col = table.column('dt').to_pylist()
+    cell_col = table.column('cell').to_pylist()
+    assert dt_col == sorted(dt_col)
+    by_dt: dict[int, list[str]] = {}
+    for t, c in zip(dt_col, cell_col):
+        by_dt.setdefault(t, []).append(c)
+    for cells in by_dt.values():
+        assert cells == sorted(cells)
+
+
+def test_no_pyramid_no_sort_raises():
+    """Either `pyramid` or `sort` must be supplied; bare `rows + out` errors."""
+    rows = [{'ts': 0, 'value': 1}]
+    buf = io.BytesIO()
+    with pytest.raises(TypeError, match="`sort` is required when `pyramid` is not supplied"):
+        write_tier_parquet(rows, out=buf)
+
+
+def test_missing_out_raises():
+    pyramid = _awair_pyramid()
+    with pytest.raises(TypeError, match="`out` is required"):
+        write_tier_parquet([], pyramid)
+
+
+def test_pyramid_optional_sort_empty_explicit():
+    """`sort=[]` is a valid pyramid-free invocation: skip sorting entirely."""
+    base = _ms(datetime(2026, 1, 1, tzinfo=UTC))
+    # Rows in an unsorted order; with sort=[] they should stay that way.
+    rows = [{'ts': base + 60_000, 'value': 1}, {'ts': base, 'value': 0}]
+    buf = io.BytesIO()
+    n = write_tier_parquet(rows, out=buf, sort=[])
+    assert n > 0
+    table, _ = _read_parquet(buf.getvalue())
+    assert table.column('value').to_pylist() == [1, 0]

@@ -12,10 +12,15 @@
 >   `Iterable[Row]` or `pa.Table`; writes to file-like or path. Returns
 >   bytes written. Tolerates sort cols missing from the actual table
 >   schema (skips them) so dim-declaring pyramids don't break on rows
->   that don't populate every dim. 11 tests covering sort order, RG
->   sizing clamps, per-RG bin-col stats tightness, snappy compression,
->   geo cell ordering, pa.Table input, overrides, path output, empty
->   rows, missing-dim schema tolerance.
+>   that don't populate every dim. **`pyramid` is optional** — callers
+>   without a Python `Pyramid` declaration can pass `sort=[...]`
+>   explicitly (added after ctbk feedback: declaring a Python Pyramid
+>   just to mirror the TS pyramid was meaningful new wiring for a pure
+>   refactor; `sort=` keeps the API usable without it). 15 tests covering
+>   sort order, RG sizing clamps, per-RG bin-col stats tightness, snappy
+>   compression, geo cell ordering, pa.Table input, overrides, path
+>   output, empty rows, missing-dim schema tolerance, pyramid-less
+>   invocations, and the error cases for missing `out` / `sort`.
 > - **§2 Arbitrary-column RG pruning** (`js/packages/pyrmts/src/fetch.ts`):
 >   `FetchOptions.filters: ColumnFilter[]` plumbed through. Refactored
 >   `selectRowGroupRuns` around a generic `RgPredicate` interface;
@@ -33,7 +38,8 @@
 > ## Migration after this lands
 >
 > - ctbk avail v2 writer (`ctbk/avail_v2.py:296`): replace `pq.write_table(...)`
->   with `write_tier_parquet(table, AVAIL_V2_PYRAMID, buf)`. Then
+>   with `write_tier_parquet(table, out=buf, sort=['dt', 'cell'])`. No
+>   Python `Pyramid` declaration needed; `sort=` is explicit. Then
 >   `ctbk avail-v2-build --force` to rewrite R2 shards. Unblocks v2 OOM.
 > - ctbk shadow (`gbfs/api/src/avail_pyrmts.ts:251`): pass
 >   `filters: [{ col: 'station_id', values: p.filterStationId }]` to

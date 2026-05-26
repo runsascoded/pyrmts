@@ -10,6 +10,7 @@ export type { StitchInput } from './stitch.js';
 export { pivotTallToHistogram } from './pivot.js';
 export type { PivotTallToHistogramOptions } from './pivot.js';
 export { fetchShardData, fetchSegmentRows } from './fetch.js';
+export type { ColumnFilter, FetchOptions } from './fetch.js';
 export { memStorage } from './storage.js';
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js';
 export type { PyramidConfig } from './yaml.js';

@@ -60,7 +60,4 @@ export type {
   PyramidQueryResult,
 } from './query.js'
 
-export { usePyramid } from './use-pyramid.js'
-export type { UsePyramidInput, UsePyramidResult } from './use-pyramid.js'
-
 export const VERSION = '0.0.0'

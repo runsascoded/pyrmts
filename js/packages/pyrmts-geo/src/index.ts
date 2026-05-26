@@ -23,10 +23,4 @@ export type {
   PyramidGeoQueryResult,
 } from './query.js'
 
-export { usePyramidGeo } from './use-pyramid-geo.js'
-export type {
-  UsePyramidGeoInput,
-  UsePyramidGeoResult,
-} from './use-pyramid-geo.js'
-
 export const VERSION = '0.0.0'

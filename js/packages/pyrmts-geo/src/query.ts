@@ -2,7 +2,7 @@
 // Mirrors `fetchPyramidQuery` in `pyrmts` but adds bbox + cell_budget params
 // and exposes outputRes/outputCells in the response.
 
-import type { Row } from 'pyrmts'
+import type { Duration, Row, SmoothMode } from 'pyrmts'
 import type { BBox } from './planner.js'
 
 export interface FetchPyramidGeoQueryInput {
@@ -12,6 +12,8 @@ export interface FetchPyramidGeoQueryInput {
   bbox: BBox
   cellBudget: number
   filter?: Record<string, string | number>
+  smoothing?: Duration | 'auto' | `auto${number}`
+  smoothMode?: SmoothMode
   signal?: AbortSignal
   fetchImpl?: typeof fetch
 }
@@ -22,6 +24,12 @@ export interface GeoPlanMeta {
   outputRes: number
   outputCells: string[]
   authoritativeEnd: string | null
+  smoothing: {
+    smoothBin: string
+    smoothBinCount: number
+    smoothMode: SmoothMode
+    smoothSourceTier: string
+  } | null
   segments: Array<{
     tier: string
     from: string
@@ -50,7 +58,7 @@ export async function fetchPyramidGeoQuery(
 }
 
 export function buildGeoQueryUrl(
-  input: Pick<FetchPyramidGeoQueryInput, 'url' | 'range' | 'binBudget' | 'bbox' | 'cellBudget' | 'filter'>,
+  input: Pick<FetchPyramidGeoQueryInput, 'url' | 'range' | 'binBudget' | 'bbox' | 'cellBudget' | 'filter' | 'smoothing' | 'smoothMode'>,
 ): string {
   const u = new URL(input.url, 'http://placeholder')
   u.searchParams.set('from', input.range.from.toISOString())
@@ -63,6 +71,8 @@ export function buildGeoQueryUrl(
       u.searchParams.set(name, String(value))
     }
   }
+  if (input.smoothing !== undefined) u.searchParams.set('smooth', input.smoothing)
+  if (input.smoothMode !== undefined) u.searchParams.set('smooth_mode', input.smoothMode)
   return input.url.startsWith('http')
     ? u.toString()
     : `${u.pathname}${u.search}`

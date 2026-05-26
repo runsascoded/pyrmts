@@ -81,6 +81,12 @@ interface ResponseBody {
     outputTier: string
     outputBin: string
     authoritativeEnd: string | null
+    smoothing: {
+      smoothBin: string
+      smoothBinCount: number
+      smoothMode: 'centered' | 'trailing'
+      smoothSourceTier: string
+    } | null
     segments: Array<{
       tier: string
       from: string
@@ -111,6 +117,7 @@ describe('serveQuery', () => {
       outputTier: 'h1',
       outputBin: '1h',
       authoritativeEnd: null,
+      smoothing: null,
       segments: [{
         tier: 'h1',
         from: '2026-01-01T00:00:00.000Z',
@@ -289,5 +296,91 @@ describe('serveQuery', () => {
       { ts: ms('2026-01-01T01:00:00Z'), device_id: 17617, temp_n: 60, temp_sum: 1260, temp_sumsq: 26800 },
       { ts: ms('2026-01-01T02:00:00Z'), device_id: 17617, temp_n: 60, temp_sum: 1260, temp_sumsq: 26460 },
     ])
+  })
+
+  test('?smooth plumbs through to plan + emits _smooth_<state> columns', async () => {
+    // 3 visible bins at h1 → cap floor(3/4)=0 → maxCount<1 → snaps to 1 (no-op).
+    // So `?smooth=2h` snaps down to 1h (count=1, no-op). Smooth cols still
+    // appear, equal to raw cols.
+    const res = await serveQuery({
+      pyramid: buildPyramid(),
+      request: new Request(
+        'https://serve.example/?'
+        + 'from=2026-01-01T00:00:00Z'
+        + '&to=2026-01-01T03:00:00Z'
+        + '&bin_budget=100'
+        + '&device_id=17617'
+        + '&smooth=2h',
+      ),
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as ResponseBody
+    expect(body.plan.smoothing).toEqual({
+      smoothBin: '1h',
+      smoothBinCount: 1,
+      smoothMode: 'centered',
+      smoothSourceTier: 'h1',
+    })
+    // count=1 → smooth cols mirror raw cols.
+    expect(body.records[0]).toMatchObject({
+      ts: ms('2026-01-01T00:00:00Z'),
+      temp_n: 60,
+      temp_sum: 1200,
+      temp_smooth_n: 60,
+      temp_smooth_sum: 1200,
+      temp_smooth_sumsq: 24500,
+    })
+  })
+
+  test('?smooth_mode=trailing plumbs through to plan', async () => {
+    const res = await serveQuery({
+      pyramid: buildPyramid(),
+      request: new Request(
+        'https://serve.example/?'
+        + 'from=2026-01-01T00:00:00Z'
+        + '&to=2026-01-01T03:00:00Z'
+        + '&bin_budget=100'
+        + '&device_id=17617'
+        + '&smooth=1h'
+        + '&smooth_mode=trailing',
+      ),
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as ResponseBody
+    expect(body.plan.smoothing?.smoothMode).toBe('trailing')
+  })
+
+  test('invalid ?smooth returns 400', async () => {
+    const res = await serveQuery({
+      pyramid: buildPyramid(),
+      request: new Request(
+        'https://serve.example/?'
+        + 'from=2026-01-01T00:00:00Z'
+        + '&to=2026-01-01T03:00:00Z'
+        + '&device_id=17617'
+        + '&smooth=garbage',
+      ),
+    })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({
+      error: "invalid smooth 'garbage' (expected Duration like '4h' or 'auto[N]')",
+    })
+  })
+
+  test('invalid ?smooth_mode returns 400', async () => {
+    const res = await serveQuery({
+      pyramid: buildPyramid(),
+      request: new Request(
+        'https://serve.example/?'
+        + 'from=2026-01-01T00:00:00Z'
+        + '&to=2026-01-01T03:00:00Z'
+        + '&device_id=17617'
+        + '&smooth_mode=sideways',
+      ),
+    })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({
+      error: "invalid smooth_mode 'sideways' (centered|trailing)",
+    })
   })
 })

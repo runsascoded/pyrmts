@@ -272,3 +272,147 @@ describe('stitch: errors', () => {
       .toThrow("stitch: row missing numeric 'ts' column (got undefined)")
   })
 })
+
+describe('stitch: smoothing', () => {
+  // Build an h1 row sequence covering several days with `device_id=17617`,
+  // so the planner picks h1 as the output tier and the stitcher's smoothing
+  // pass can roll over it.
+  function makeH1Rows(fromIso: string, hours: number): Row[] {
+    const startMs = ms(fromIso)
+    const rows: Row[] = []
+    for (let i = 0; i < hours; i++) {
+      rows.push(sumRow(startMs + i * 3_600_000, 17617, {
+        // temp_n=1, temp_sum=i, temp_sumsq=i² → easy to verify rolling sums
+        temp: [1, i, i * i],
+      }))
+    }
+    return rows
+  }
+
+  test('4-bin centered window writes _smooth_<state> columns; trims to visible range', () => {
+    // Visible: 1d at 1h bin → 24 visible bins; smoothing cap floor(24/4)=6.
+    // `4h` (count=4) sails through. Centered: lead=2, tail=1.
+    const from = d('2026-01-02T00:00:00Z')
+    const to = d('2026-01-03T00:00:00Z')
+    const plan = planQuery(awair, {
+      range: { from, to },
+      binBudget: 100,
+      filter,
+      smoothing: '4h',
+    })
+    expect(plan.smoothing).toEqual({
+      smoothBin: '4h', smoothBinCount: 4, smoothMode: 'centered', smoothSourceTier: 'h1',
+    })
+    // Source covers extended range [22:00 day-1, 01:00 day+1) = 27h.
+    const allRows = makeH1Rows('2026-01-01T22:00:00Z', 27)
+    const out = stitch({ pyramid: awair, plan, shardRows: [allRows] })
+    expect(out).toHaveLength(24)
+    // Visible 00:00 is source index 2. Window [max(0,0), min(26,3)] = [0..3].
+    // n=4, sum=0+1+2+3=6, sumsq=0+1+4+9=14.
+    expect(out[0]).toMatchObject({
+      ts: ms('2026-01-02T00:00:00Z'),
+      device_id: 17617,
+      temp_n: 1, temp_sum: 2, temp_sumsq: 4,
+      temp_smooth_n: 4, temp_smooth_sum: 6, temp_smooth_sumsq: 14,
+    })
+    // Visible 23:00 is source index 25. Window [23..26] → sum=23+24+25+26=98.
+    expect(out[23]).toMatchObject({
+      ts: ms('2026-01-02T23:00:00Z'),
+      temp_smooth_n: 4,
+      temp_smooth_sum: 98,
+    })
+  })
+
+  test('trailing mode uses [i-N+1, i] window; no future context', () => {
+    const from = d('2026-01-02T00:00:00Z')
+    const to = d('2026-01-03T00:00:00Z')
+    const plan = planQuery(awair, {
+      range: { from, to },
+      binBudget: 100,
+      filter,
+      smoothing: '3h',
+      smoothMode: 'trailing',
+    })
+    expect(plan.smoothing).toMatchObject({ smoothBinCount: 3, smoothMode: 'trailing' })
+    // 3h trailing: lead=2, tail=0. Source spans [22:00 day-1, 24:00 day0) = 26h.
+    const allRows = makeH1Rows('2026-01-01T22:00:00Z', 26)
+    const out = stitch({ pyramid: awair, plan, shardRows: [allRows] })
+    expect(out).toHaveLength(24)
+    // Visible 00:00 is source index 2. Window [0, 1, 2] → sum=0+1+2=3.
+    expect(out[0]).toMatchObject({ temp_smooth_n: 3, temp_smooth_sum: 3 })
+    // Visible 23:00 is source index 25. Window [23, 24, 25] → 23+24+25=72.
+    expect(out[23]).toMatchObject({ temp_smooth_n: 3, temp_smooth_sum: 72 })
+  })
+
+  test('window shrinks naturally at edges when buffer data is missing', () => {
+    // No buffer data supplied: visible bins near edges get truncated windows.
+    const from = d('2026-01-02T00:00:00Z')
+    const to = d('2026-01-03T00:00:00Z')
+    const plan = planQuery(awair, {
+      range: { from, to },
+      binBudget: 100,
+      filter,
+      smoothing: '4h',   // count=4, lead=2, tail=1
+    })
+    const rows = makeH1Rows('2026-01-02T00:00:00Z', 24)  // visible-only
+    const out = stitch({ pyramid: awair, plan, shardRows: [rows] })
+    expect(out).toHaveLength(24)
+    // Visible 00:00 (idx 0): window [max(0,-2), min(23,1)] = [0,1] → n=2, sum=0+1=1.
+    expect(out[0]).toMatchObject({ temp_smooth_n: 2, temp_smooth_sum: 1 })
+    // Visible 10:00 (idx 10): full window [8,11] → n=4, sum=8+9+10+11=38.
+    expect(out[10]).toMatchObject({ temp_smooth_n: 4, temp_smooth_sum: 38 })
+    // Visible 23:00 (idx 23): window [21, min(23,24)] = [21,23] → n=3, sum=21+22+23=66.
+    expect(out[23]).toMatchObject({ temp_smooth_n: 3, temp_smooth_sum: 66 })
+  })
+
+  test('smoothBinCount=1 acts as no-op (mirrors raw cols into _smooth_)', () => {
+    // smooth=1h at 1h output bin → count=1 → degenerate. Smoothed cols
+    // should equal raw cols so consumers can read `_smooth_*` unconditionally.
+    const from = d('2026-01-02T00:00:00Z')
+    const to = d('2026-01-02T03:00:00Z')
+    const plan = planQuery(awair, {
+      range: { from, to },
+      binBudget: 100,
+      filter,
+      smoothing: '1h',
+    })
+    expect(plan.smoothing?.smoothBinCount).toBe(1)
+    const rows = makeH1Rows('2026-01-02T00:00:00Z', 3)
+    const out = stitch({ pyramid: awair, plan, shardRows: [rows] })
+    expect(out).toHaveLength(3)
+    for (const row of out) {
+      expect(row.temp_smooth_n).toBe(row.temp_n)
+      expect(row.temp_smooth_sum).toBe(row.temp_sum)
+      expect(row.temp_smooth_sumsq).toBe(row.temp_sumsq)
+    }
+  })
+
+  test('groups by dim — separate smoothing series per device', () => {
+    const from = d('2026-01-02T00:00:00Z')
+    const to = d('2026-01-03T00:00:00Z')
+    const plan = planQuery(awair, {
+      range: { from, to },
+      binBudget: 100,
+      filter,
+      smoothing: '3h',
+    })
+    expect(plan.smoothing?.smoothBinCount).toBe(3)
+    // 26h of source for each of 2 devices, interleaved by ts.
+    const rows: Row[] = []
+    const startMs = ms('2026-01-01T23:00:00Z')
+    for (let i = 0; i < 26; i++) {
+      const ts = startMs + i * 3_600_000
+      rows.push(sumRow(ts, 17617, { temp: [1, i, i * i] }))
+      rows.push(sumRow(ts, 99999, { temp: [1, 100 + i, (100 + i) ** 2] }))
+    }
+    const out = stitch({ pyramid: awair, plan, shardRows: [rows] })
+    expect(out).toHaveLength(48)  // 24h × 2 devices
+    // Device 17617 at visible 00:00 (source idx 1 in its slice): 3h centered
+    // lead=1, tail=1 → window [0,1,2] → sum=0+1+2=3.
+    const dev17617 = out.filter(r => r.device_id === 17617).sort((a, b) => (a.ts as number) - (b.ts as number))
+    expect(dev17617[0]).toMatchObject({ ts: ms('2026-01-02T00:00:00Z'), temp_smooth_sum: 3 })
+    // Same slot for device 99999: sum = 100+101+102 = 303.
+    const dev99999 = out.filter(r => r.device_id === 99999).sort((a, b) => (a.ts as number) - (b.ts as number))
+    expect(dev99999[0]).toMatchObject({ ts: ms('2026-01-02T00:00:00Z'), temp_smooth_sum: 303 })
+  })
+})

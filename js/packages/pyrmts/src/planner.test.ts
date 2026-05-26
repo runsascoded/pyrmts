@@ -382,3 +382,125 @@ describe('planQuery: errors', () => {
     })).toThrow('planQuery: missing key template value for {device_id}')
   })
 })
+
+describe('planQuery: smoothing', () => {
+  test('no smoothing → plan.smoothing is null, visibleRange == input range', () => {
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      filter: { device_id: 17617 },
+    })
+    expect(plan.smoothing).toBeNull()
+    expect(plan.visibleRange.from.toISOString()).toBe('2026-01-01T00:00:00.000Z')
+    expect(plan.visibleRange.to.toISOString()).toBe('2026-01-02T00:00:00.000Z')
+  })
+
+  test('explicit duration snaps to nearest nice width that divides outputBin (centered)', () => {
+    // 1d range at budget 100 → outputBin = 1h (24 bins). `smooth=4h` → snap to 4h
+    // (exact: 4 × 1h). Centered extension: lead=2, tail=1 (past-biased for even).
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-02T00:00:00Z'), to: d('2026-01-03T00:00:00Z') },
+      binBudget: 100,
+      filter: { device_id: 17617 },
+      smoothing: '4h',
+    })
+    expect(plan.smoothing).toEqual({
+      smoothBin: '4h',
+      smoothBinCount: 4,
+      smoothMode: 'centered',
+      smoothSourceTier: 'h1',
+    })
+    // Extension: [02:00 - 2h, 03:00 + 1h) = [2026-01-01T22:00, 2026-01-03T01:00)
+    expect(plan.segments[0]!.from.toISOString()).toBe('2026-01-01T22:00:00.000Z')
+    expect(plan.segments[plan.segments.length - 1]!.to.toISOString()).toBe('2026-01-03T01:00:00.000Z')
+    // Visible range stays as caller asked.
+    expect(plan.visibleRange.from.toISOString()).toBe('2026-01-02T00:00:00.000Z')
+    expect(plan.visibleRange.to.toISOString()).toBe('2026-01-03T00:00:00.000Z')
+  })
+
+  test('snaps off-nice request to nearest nice width', () => {
+    // 1d at budget 100 → h1 (1h). `smooth=37min` < 1h → snap to 1h (smallest
+    // candidate that's an integer multiple of the output bin).
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-02T00:00:00Z'), to: d('2026-01-03T00:00:00Z') },
+      binBudget: 100,
+      filter: { device_id: 17617 },
+      smoothing: '37min',
+    })
+    expect(plan.smoothing?.smoothBin).toBe('1h')
+    expect(plan.smoothing?.smoothBinCount).toBe(1)
+  })
+
+  test('auto picks multiplier × outputBin (default 50, snapped)', () => {
+    // 1d at budget 100 → h1 (1h). 50 × 1h = 50h → snap nearest: closest nice
+    // widths above 1h that divide 1h are 1h/2h/3h/4h/6h/8h/12h/1d/2d/3d/7d/14d/30d.
+    // 50h closest → 2d (48h, dist 2h) vs 3d (72h, dist 22h) → 2d.
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-02T00:00:00Z'), to: d('2026-01-03T00:00:00Z') },
+      binBudget: 100,
+      filter: { device_id: 17617 },
+      smoothing: { auto: true },
+    })
+    // 1d range, 1h output bin → 24 visible bins; maxCount = floor(24/4) = 6.
+    // 50× ms target = 50h, snap nearest among {1h..6h} (count ≤ 6) = 6h.
+    expect(plan.smoothing?.smoothBin).toBe('6h')
+    expect(plan.smoothing?.smoothBinCount).toBe(6)
+  })
+
+  test('auto with explicit multiplier', () => {
+    // 7d range at budget 1000 → h1 (168 bins). 25 × 1h = 25h → snap to 1d (24h,
+    // closest among ≤ 42 = floor(168/4)).
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-08T00:00:00Z') },
+      binBudget: 1000,
+      filter: { device_id: 17617 },
+      smoothing: { auto: true, multiplier: 25 },
+    })
+    expect(plan.smoothing?.smoothBin).toBe('1d')
+    expect(plan.smoothing?.smoothBinCount).toBe(24)
+  })
+
+  test('trailing mode extends only the leading edge', () => {
+    // smooth=2h trailing at 1h output: lead = N-1 = 1, tail = 0.
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-02T00:00:00Z'), to: d('2026-01-03T00:00:00Z') },
+      binBudget: 100,
+      filter: { device_id: 17617 },
+      smoothing: '2h',
+      smoothMode: 'trailing',
+    })
+    expect(plan.smoothing?.smoothMode).toBe('trailing')
+    expect(plan.segments[0]!.from.toISOString()).toBe('2026-01-01T23:00:00.000Z')
+    expect(plan.segments[plan.segments.length - 1]!.to.toISOString()).toBe('2026-01-03T00:00:00.000Z')
+  })
+
+  test('window clamped to max(1, floor(visibleBins/4)) to prevent pathological cases', () => {
+    // 4h range at budget 100 → raw (1min, 240 bins). visibleBins/4 = 60.
+    // smoothing 30d → way past clamp → smoothBinCount capped at 60 → snap nearest
+    // nice width whose count ≤ 60 = 30min (count 30) or 1h (count 60). Closest
+    // to 30d is 1h (bigger).
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T04:00:00Z') },
+      binBudget: 100,
+      filter: { device_id: 17617 },
+      smoothing: '30d',
+    })
+    expect(plan.smoothing?.smoothBinCount).toBeLessThanOrEqual(60)
+    expect(plan.smoothing?.smoothBinCount).toBeGreaterThanOrEqual(1)
+  })
+
+  test('earliestWatermark clamps the smoothing-buffer extension (degrades gracefully)', () => {
+    // smoothing wants to extend ~2h before the visible from, but the earliest
+    // watermark cuts it off — no error, just less context near the edge.
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-02T00:00:00Z'), to: d('2026-01-03T00:00:00Z') },
+      binBudget: 100,
+      filter: { device_id: 17617 },
+      smoothing: '4h',
+      earliestWatermarks: { h1: d('2026-01-02T00:00:00Z') },
+    })
+    // Without clamp, segment from would be 2026-01-01T22:00. With clamp it
+    // shifts forward to the earliest watermark.
+    expect(plan.segments[0]!.from.toISOString()).toBe('2026-01-02T00:00:00.000Z')
+  })
+})

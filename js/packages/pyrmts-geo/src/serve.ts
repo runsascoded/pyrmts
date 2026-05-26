@@ -15,6 +15,8 @@ import {
   stitch,
   type Pyramid,
   type QueryPlan,
+  type SmoothingSpec,
+  type SmoothMode,
 } from 'pyrmts'
 import { filterCellsAndRes, planGeoQuery, type BBox } from './planner.js'
 
@@ -71,6 +73,18 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
     if (v !== null) filter[dim.name] = v
   }
 
+  let smoothing: SmoothingSpec | undefined
+  try {
+    smoothing = parseSmoothing(url.searchParams.get('smooth'))
+  } catch (err) {
+    return errorResponse(400, (err as Error).message, cors)
+  }
+  const smoothModeRaw = url.searchParams.get('smooth_mode')
+  if (smoothModeRaw !== null && smoothModeRaw !== 'centered' && smoothModeRaw !== 'trailing') {
+    return errorResponse(400, `invalid smooth_mode '${smoothModeRaw}' (centered|trailing)`, cors)
+  }
+  const smoothMode: SmoothMode | undefined = smoothModeRaw === null ? undefined : smoothModeRaw
+
   const watermarks = await resolveWatermarks(opts.watermarks, request)
   const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request)
 
@@ -84,6 +98,8 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
       watermarks,
       earliestWatermarks,
       filter,
+      ...(smoothing !== undefined ? { smoothing } : {}),
+      ...(smoothMode !== undefined ? { smoothMode } : {}),
     })
 
     const shardRows = await Promise.all(
@@ -110,6 +126,8 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
         reaggregate: s.reaggregate,
       })),
       authoritativeEnd: plan.authoritativeEnd,
+      visibleRange: plan.visibleRange,
+      smoothing: plan.smoothing,
     }
     const records = stitch({ pyramid, plan: timePlan, shardRows: filteredRows })
 
@@ -121,6 +139,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
         outputRes: plan.outputRes,
         outputCells: plan.outputCells,
         authoritativeEnd: plan.authoritativeEnd?.toISOString() ?? null,
+        smoothing: plan.smoothing,
         segments: plan.segments.map(s => ({
           tier: s.shardTier.name,
           from: s.from.toISOString(),
@@ -160,6 +179,24 @@ async function resolveWatermarks(
   if (src === undefined) return {}
   if (typeof src === 'function') return await src(request)
   return src
+}
+
+// Same shape as pyrmts-cfw's parser (deliberately duplicated rather than
+// extracted to a shared util — the two serve handlers are small and
+// independent surface areas).
+const AUTO_RE = /^auto(\d+)?$/
+const DURATION_RE = /^\d+(min|h|d|mo|y)$/
+function parseSmoothing(raw: string | null): SmoothingSpec | undefined {
+  if (raw === null) return undefined
+  const autoMatch = AUTO_RE.exec(raw)
+  if (autoMatch) {
+    if (autoMatch[1] === undefined) return { auto: true }
+    return { auto: true, multiplier: Number.parseInt(autoMatch[1], 10) }
+  }
+  if (!DURATION_RE.test(raw)) {
+    throw new Error(`invalid smooth '${raw}' (expected Duration like '4h' or 'auto[N]')`)
+  }
+  return raw as SmoothingSpec
 }
 
 function jsonResponse(status: number, body: unknown, cors?: boolean): Response {

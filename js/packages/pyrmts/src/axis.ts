@@ -22,6 +22,17 @@ export function parseDuration(s: Duration | string): ParsedTimeSpan {
   return { count: parseInt(m[1]!, 10), unit: m[2] as TimeUnit }
 }
 
+// Fixed-width Duration in ms. Throws for mo/y (calendar-variable).
+// Use for arithmetic where calendar drift doesn't matter — e.g. snapping
+// a smoothing window against an output bin's stride.
+export function fixedDurationMs(d: Duration | string): number {
+  const { count, unit } = parseDuration(d)
+  if (unit === 'mo' || unit === 'y') {
+    throw new Error(`fixedDurationMs: '${d}' is calendar-variable; not representable as ms`)
+  }
+  return count * MS[unit]
+}
+
 // Add `span` to a UTC instant. Calendar-aware for mo/y.
 export function addSpan(t: Date, span: ParsedTimeSpan): Date {
   const { count, unit } = span

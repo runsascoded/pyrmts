@@ -1,5 +1,8 @@
 // Stitcher. Merges per-segment shard rows into the output bin shape, applying
-// monoid combines when a segment is at a finer-than-output granularity.
+// monoid combines when a segment is at a finer-than-output granularity. When
+// `plan.smoothing` is set, runs a rolling-window combine pass after stitching
+// to produce `<metric>_smooth_<suffix>` columns, then trims to the visible
+// range.
 //
 // Input rows must contain the bin column (`pyramid.binCol`, an int64 UTC ms
 // timestamp for time-axis pyramids), dim columns, and metric state columns
@@ -71,7 +74,79 @@ export function stitch(input: StitchInput): Row[] {
     }
   }
 
-  return sortRows([...agg.values()], binCol, dimNames)
+  const sorted = sortRows([...agg.values()], binCol, dimNames)
+  if (plan.smoothing) {
+    smoothInPlace(sorted, pyramid, plan)
+  }
+  // Trim to the caller's visible range (buffer rows from smoothing extension
+  // get dropped here). For non-smoothed plans visibleRange === input range,
+  // so this is a no-op (segments don't extend past the range).
+  const visFrom = plan.visibleRange.from.getTime()
+  const visTo = plan.visibleRange.to.getTime()
+  return sorted.filter(r => {
+    const ts = r[binCol] as number
+    return ts >= visFrom && ts < visTo
+  })
+}
+
+// Rolling-window combine pass. For each output row, combines the surrounding
+// N rows of its own dim slice using each metric's monoid, writing the result
+// into `<metric>_smooth_<suffix>` columns. O(rows × N) per metric — see
+// `specs/done/server-side-smoothing.md` §4 for the optimization roadmap.
+function smoothInPlace(rows: Row[], pyramid: Pyramid, plan: QueryPlan): void {
+  const s = plan.smoothing!
+  const N = s.smoothBinCount
+  if (N <= 1) {
+    // 1-bin window = no-op; just mirror the raw state into the smooth cols
+    // so consumers can always read `_smooth_*` without conditional plumbing.
+    for (const row of rows) {
+      for (const metric of pyramid.metrics) {
+        const monoid = getMonoid(metric.monoid)
+        for (const suffix of monoid.stateSuffixes) {
+          row[`${metric.name}_smooth${suffix}`] = row[`${metric.name}${suffix}`]
+        }
+      }
+    }
+    return
+  }
+
+  const lead = s.smoothMode === 'centered' ? Math.ceil((N - 1) / 2) : N - 1
+  const tail = s.smoothMode === 'centered' ? Math.floor((N - 1) / 2) : 0
+  const dimNames = pyramid.dims.map(d => d.name)
+
+  // Group rows by dim slice; rows within each slice remain in time order
+  // (sortRows above sorted by binStart first, then dims).
+  const slices = new Map<string, Row[]>()
+  for (const row of rows) {
+    let key = ''
+    for (const name of dimNames) {
+      key += '\x00'
+      key += String(row[name])
+    }
+    let arr = slices.get(key)
+    if (!arr) { arr = []; slices.set(key, arr) }
+    arr.push(row)
+  }
+
+  for (const slice of slices.values()) {
+    for (let i = 0; i < slice.length; i++) {
+      const startIdx = Math.max(0, i - lead)
+      const endIdx = Math.min(slice.length - 1, i + tail)
+      const acc: Row = {}
+      for (let j = startIdx; j <= endIdx; j++) {
+        for (const metric of pyramid.metrics) {
+          getMonoid(metric.monoid).combine(acc, slice[j]!, metric.name)
+        }
+      }
+      const row = slice[i]!
+      for (const metric of pyramid.metrics) {
+        const monoid = getMonoid(metric.monoid)
+        for (const suffix of monoid.stateSuffixes) {
+          row[`${metric.name}_smooth${suffix}`] = acc[`${metric.name}${suffix}`]
+        }
+      }
+    }
+  }
 }
 
 function aggKeyFor(binStart: number, dimNames: string[], row: Row): string {

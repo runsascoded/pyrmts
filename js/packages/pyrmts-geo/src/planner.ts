@@ -14,6 +14,8 @@ import {
   type PlanSegment,
   type Pyramid,
   type QueryPlan,
+  type SmoothingSpec,
+  type SmoothMode,
   type Tier,
 } from 'pyrmts'
 
@@ -35,6 +37,9 @@ export interface PlanGeoQueryInput {
   watermarks?: Record<string, Date>
   earliestWatermarks?: Record<string, Date>
   filter?: Record<string, string | number>
+  // Server-side rolling-window smoothing (see `pyrmts` `PlanQueryInput`).
+  smoothing?: import('pyrmts').SmoothingSpec
+  smoothMode?: import('pyrmts').SmoothMode
 }
 
 export interface GeoPlanSegment extends PlanSegment {
@@ -68,6 +73,8 @@ export function planGeoQuery(
     ...(input.watermarks !== undefined ? { watermarks: input.watermarks } : {}),
     ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
     ...(input.filter !== undefined ? { filter: input.filter } : {}),
+    ...(input.smoothing !== undefined ? { smoothing: input.smoothing } : {}),
+    ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),
   })
 
   // Pick the finest materialized resolution whose cells-in-bbox fits the
@@ -93,6 +100,8 @@ export function planGeoQuery(
     outputCells,
     segments,
     authoritativeEnd: timePlan.authoritativeEnd,
+    visibleRange: timePlan.visibleRange,
+    smoothing: timePlan.smoothing,
   }
 }
 

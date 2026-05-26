@@ -38,6 +38,8 @@ export function usePyramid(input: UsePyramidInput): UsePyramidResult {
     to: input.range.to.toISOString(),
     binBudget: input.binBudget,
     filter: input.filter ?? {},
+    smoothing: input.smoothing ?? null,
+    smoothMode: input.smoothMode ?? null,
   })
 
   useEffect(() => {

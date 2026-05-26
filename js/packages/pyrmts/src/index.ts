@@ -30,11 +30,13 @@ export {
 
 export type { ParsedTimeSpan } from './axis.js'
 
-export { planQuery } from './planner.js'
+export { DEFAULT_AUTO_MULTIPLIER, planQuery } from './planner.js'
 export type {
   PlanQueryInput,
   PlanSegment,
   QueryPlan,
+  SmoothMode,
+  SmoothingSpec,
 } from './planner.js'
 
 export { getMonoid, stateColumns } from './monoids.js'

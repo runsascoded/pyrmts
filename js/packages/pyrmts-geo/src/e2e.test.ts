@@ -113,6 +113,8 @@ describe('pyrmts-geo end-to-end', () => {
           from: s.from, to: s.to, shardTier: s.shardTier, keys: s.keys, reaggregate: s.reaggregate,
         })),
         authoritativeEnd: plan.authoritativeEnd,
+        visibleRange: plan.visibleRange,
+        smoothing: plan.smoothing,
       },
       shardRows: [filtered],
     })
@@ -154,6 +156,8 @@ describe('pyrmts-geo end-to-end', () => {
           from: s.from, to: s.to, shardTier: s.shardTier, keys: s.keys, reaggregate: s.reaggregate,
         })),
         authoritativeEnd: plan.authoritativeEnd,
+        visibleRange: plan.visibleRange,
+        smoothing: plan.smoothing,
       },
       shardRows: [filtered],
     })

@@ -26,6 +26,7 @@ from .types import (
     Storage,
     Tier,
 )
+from .writer import write_tier_parquet
 from .yaml import PyramidConfig, parse_pyramid_yaml, pyramid_from_config
 
 __version__ = "0.0.0"
@@ -40,5 +41,6 @@ __all__ = [
     'substitute_key',
     'Monoid', 'Row', 'get_monoid', 'state_columns',
     'FsStorage', 'MemStorage', 'S3Storage',
+    'write_tier_parquet',
     'PyramidConfig', 'parse_pyramid_yaml', 'pyramid_from_config',
 ]

@@ -4,6 +4,7 @@ export interface ParsedTimeSpan {
     unit: TimeUnit;
 }
 export declare function parseDuration(s: Duration | string): ParsedTimeSpan;
+export declare function fixedDurationMs(d: Duration | string): number;
 export declare function addSpan(t: Date, span: ParsedTimeSpan): Date;
 export declare function floorToSpan(t: Date, span: ParsedTimeSpan): Date;
 export declare function binsInRange(from: Date, to: Date, bin: Duration): number;

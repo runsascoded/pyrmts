@@ -18,6 +18,8 @@ export function usePyramidGeo(input) {
         bbox: input.bbox,
         cellBudget: input.cellBudget,
         filter: input.filter ?? {},
+        smoothing: input.smoothing ?? null,
+        smoothMode: input.smoothMode ?? null,
     });
     useEffect(() => {
         const ctrl = new AbortController();

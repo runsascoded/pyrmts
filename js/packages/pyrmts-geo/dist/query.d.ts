@@ -1,4 +1,4 @@
-import type { Row } from 'pyrmts';
+import type { Duration, Row, SmoothMode } from 'pyrmts';
 import type { BBox } from './planner.js';
 export interface FetchPyramidGeoQueryInput {
     url: string;
@@ -10,6 +10,8 @@ export interface FetchPyramidGeoQueryInput {
     bbox: BBox;
     cellBudget: number;
     filter?: Record<string, string | number>;
+    smoothing?: Duration | 'auto' | `auto${number}`;
+    smoothMode?: SmoothMode;
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
 }
@@ -19,6 +21,12 @@ export interface GeoPlanMeta {
     outputRes: number;
     outputCells: string[];
     authoritativeEnd: string | null;
+    smoothing: {
+        smoothBin: string;
+        smoothBinCount: number;
+        smoothMode: SmoothMode;
+        smoothSourceTier: string;
+    } | null;
     segments: Array<{
         tier: string;
         from: string;
@@ -32,5 +40,5 @@ export interface PyramidGeoQueryResult {
     plan: GeoPlanMeta;
 }
 export declare function fetchPyramidGeoQuery(input: FetchPyramidGeoQueryInput): Promise<PyramidGeoQueryResult>;
-export declare function buildGeoQueryUrl(input: Pick<FetchPyramidGeoQueryInput, 'url' | 'range' | 'binBudget' | 'bbox' | 'cellBudget' | 'filter'>): string;
+export declare function buildGeoQueryUrl(input: Pick<FetchPyramidGeoQueryInput, 'url' | 'range' | 'binBudget' | 'bbox' | 'cellBudget' | 'filter' | 'smoothing' | 'smoothMode'>): string;
 //# sourceMappingURL=query.d.ts.map

@@ -20,6 +20,8 @@ export function usePyramid(input) {
         to: input.range.to.toISOString(),
         binBudget: input.binBudget,
         filter: input.filter ?? {},
+        smoothing: input.smoothing ?? null,
+        smoothMode: input.smoothMode ?? null,
     });
     useEffect(() => {
         const ctrl = new AbortController();

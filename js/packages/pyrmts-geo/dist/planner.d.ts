@@ -16,6 +16,8 @@ export interface PlanGeoQueryInput {
     watermarks?: Record<string, Date>;
     earliestWatermarks?: Record<string, Date>;
     filter?: Record<string, string | number>;
+    smoothing?: import('pyrmts').SmoothingSpec;
+    smoothMode?: import('pyrmts').SmoothMode;
 }
 export interface GeoPlanSegment extends PlanSegment {
     cells: string[];

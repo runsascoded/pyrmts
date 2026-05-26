@@ -24,6 +24,8 @@ export function planGeoQuery(pyramid, input) {
         ...(input.watermarks !== undefined ? { watermarks: input.watermarks } : {}),
         ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
         ...(input.filter !== undefined ? { filter: input.filter } : {}),
+        ...(input.smoothing !== undefined ? { smoothing: input.smoothing } : {}),
+        ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),
     });
     // Pick the finest materialized resolution whose cells-in-bbox fits the
     // cell budget. `resolutions` is finest-first.
@@ -46,6 +48,8 @@ export function planGeoQuery(pyramid, input) {
         outputCells,
         segments,
         authoritativeEnd: timePlan.authoritativeEnd,
+        visibleRange: timePlan.visibleRange,
+        smoothing: timePlan.smoothing,
     };
 }
 function pickResolution(bbox, resolutions, cellBudget) {

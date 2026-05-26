@@ -23,6 +23,10 @@ export function buildQueryUrl(input) {
             u.searchParams.set(name, String(value));
         }
     }
+    if (input.smoothing !== undefined)
+        u.searchParams.set('smooth', input.smoothing);
+    if (input.smoothMode !== undefined)
+        u.searchParams.set('smooth_mode', input.smoothMode);
     // Strip the placeholder origin if the original URL was relative.
     return input.url.startsWith('http')
         ? u.toString()

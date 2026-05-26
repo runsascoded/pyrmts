@@ -49,6 +49,7 @@ export { pivotTallToHistogram } from './pivot.js'
 export type { PivotTallToHistogramOptions } from './pivot.js'
 
 export { fetchShardData, fetchSegmentRows } from './fetch.js'
+export type { ColumnFilter, FetchOptions } from './fetch.js'
 
 export { memStorage } from './storage.js'
 

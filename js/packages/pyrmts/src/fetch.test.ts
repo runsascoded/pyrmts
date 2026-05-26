@@ -189,3 +189,144 @@ describe('fetchSegmentRows: tolerate404', () => {
     ).rejects.toThrow('fetchShardData: object not found: b.parquet')
   })
 })
+
+// Fixture for arbitrary-column filter tests. Rows are sorted by `station_id`,
+// not `ts`, so per-RG `ts` stats span the whole day (typical of ctbk's
+// `(station_id, dt)`-sorted shadow shards). station_id stats are tight per-RG
+// and prunable; ts stats are not.
+//
+// 10,000 rows × 4 RGs × 2500 rows. station_id = 's00000'..'s09999'. device_id
+// numeric column with same ordering (so device_id stats are also per-RG-tight).
+function stationSortedParquet(): Uint8Array {
+  const baseMs = ms('2026-01-01T00:00:00Z')
+  const ts: bigint[] = []
+  const stationId: string[] = []
+  const deviceId: number[] = []
+  const value: number[] = []
+  for (let i = 0; i < 10_000; i++) {
+    // ts cycles within the day so every RG spans the full day; binCol can't prune.
+    ts.push(BigInt(baseMs + (i % 1440) * 60_000))
+    stationId.push(`s${i.toString().padStart(5, '0')}`)
+    deviceId.push(i)
+    value.push(i)
+  }
+  const buf = parquetWriteBuffer({
+    columnData: [
+      { name: 'ts', type: 'INT64', data: ts },
+      { name: 'station_id', type: 'STRING', data: stationId },
+      { name: 'device_id', type: 'INT32', data: deviceId },
+      { name: 'value', type: 'INT32', data: value },
+    ],
+    rowGroupSize: 2500,
+    statistics: true,
+  })
+  return new Uint8Array(buf)
+}
+
+describe('fetchShardData: arbitrary-column filters', () => {
+  const KEY = 'stations.parquet'
+
+  async function setup() {
+    const storage = memStorage()
+    await storage.put(KEY, stationSortedParquet())
+    return storage
+  }
+
+  test('values filter on string col prunes to the matching RG', async () => {
+    const storage = await setup()
+    // 's03000' lives in RG1 (rows 2500..4999) — only RG1 should be returned.
+    const rows = await fetchShardData(storage, KEY, {
+      filters: [{ col: 'station_id', values: ['s03000'] }],
+    })
+    expect(rows).toHaveLength(2500)
+    const stations = rows.map(r => r.station_id as string)
+    expect(stations[0]).toBe('s02500')
+    expect(stations[stations.length - 1]).toBe('s04999')
+  })
+
+  test('values filter with multiple values selects multiple RGs', async () => {
+    const storage = await setup()
+    // 's00010' (RG0) + 's08000' (RG3) → RG0 + RG3, skipping RG1+RG2.
+    const rows = await fetchShardData(storage, KEY, {
+      filters: [{ col: 'station_id', values: ['s00010', 's08000'] }],
+    })
+    expect(rows).toHaveLength(5000)
+    const stations = rows.map(r => r.station_id as string).sort()
+    expect(stations[0]).toBe('s00000')
+    expect(stations[2499]).toBe('s02499')
+    expect(stations[2500]).toBe('s07500')
+    expect(stations[4999]).toBe('s09999')
+  })
+
+  test('range filter on numeric col prunes to the matching RG', async () => {
+    const storage = await setup()
+    // device_id 5500..6000 lives entirely in RG2 (5000..7499).
+    const rows = await fetchShardData(storage, KEY, {
+      filters: [{ col: 'device_id', range: { min: 5500, max: 6000 } }],
+    })
+    expect(rows).toHaveLength(2500)
+    const ids = rows.map(r => r.device_id as number)
+    expect(ids[0]).toBe(5000)
+    expect(ids[ids.length - 1]).toBe(7499)
+  })
+
+  test('no-match filter returns []', async () => {
+    const storage = await setup()
+    const rows = await fetchShardData(storage, KEY, {
+      filters: [{ col: 'station_id', values: ['s99999'] }],
+    })
+    expect(rows).toEqual([])
+  })
+
+  test('filter + binCol range AND-combine (intersection)', async () => {
+    // Pyramid query that wants devices 5500-6000 AND ts in the (single-day)
+    // range. station_id stats prune to RG2; ts stats don't prune (every RG
+    // spans the day). End result = RG2's rows.
+    const storage = await setup()
+    const rows = await fetchShardData(storage, KEY, {
+      binCol: 'ts',
+      range: {
+        from: new Date('2026-01-01T00:00:00Z'),
+        to: new Date('2026-01-02T00:00:00Z'),
+      },
+      filters: [{ col: 'device_id', range: { min: 5500, max: 6000 } }],
+    })
+    expect(rows).toHaveLength(2500)
+  })
+
+  test('filter on column missing from schema falls through (no prune)', async () => {
+    const storage = await setup()
+    const rows = await fetchShardData(storage, KEY, {
+      filters: [{ col: 'not_a_column', values: ['anything'] }],
+    })
+    // Filter ineffective → reads everything.
+    expect(rows).toHaveLength(10_000)
+  })
+
+  test('multiple filters AND together', async () => {
+    const storage = await setup()
+    // station_id matches RG1; device_id range matches RG2. Intersection: empty.
+    const rows = await fetchShardData(storage, KEY, {
+      filters: [
+        { col: 'station_id', values: ['s03000'] },
+        { col: 'device_id', range: { min: 5500, max: 6000 } },
+      ],
+    })
+    expect(rows).toEqual([])
+  })
+
+  test('byte savings observable when filter prunes effectively', async () => {
+    const storage = await setup()
+    const inst1 = instrumented(storage)
+    await fetchShardData(inst1.storage, KEY)
+    const fullBytes = inst1.bytesRead()
+
+    const inst2 = instrumented(storage)
+    await fetchShardData(inst2.storage, KEY, {
+      filters: [{ col: 'station_id', values: ['s00010'] }],
+    })
+    const prunedBytes = inst2.bytesRead()
+    // 1 RG out of 4 → ~1/4 the data column bytes. Allow 60% to cover metadata.
+    expect(prunedBytes).toBeLessThan(fullBytes * 0.6)
+  })
+})

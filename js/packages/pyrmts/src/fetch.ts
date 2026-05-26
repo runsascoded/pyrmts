@@ -31,7 +31,18 @@ export interface FetchOptions {
   // this lets the query succeed with empty bins for those gaps instead of
   // erroring. Default: false (fail loudly — usually a config bug).
   tolerate404?: boolean
+  // Arbitrary-column RG pruning. AND-combined with the `binCol + range`
+  // filter (if any) and with each other. Each filter is either set
+  // membership (`values`) or a closed numeric range (`range`). An RG is
+  // skipped only if its stats *prove* no row could match; missing stats
+  // default to "must read" (safer than throwing or omitting data —
+  // downstream per-row filters can still drop unwanted rows).
+  filters?: ColumnFilter[]
 }
+
+export type ColumnFilter =
+  | { col: string; values: readonly string[] | readonly number[] }
+  | { col: string; range: { min: number; max: number } }
 
 const DEFAULT_INITIAL_FETCH_SIZE = 64 * 1024
 
@@ -57,13 +68,15 @@ export async function fetchShardData(
   const initialFetchSize = opts?.initialFetchSize ?? DEFAULT_INITIAL_FETCH_SIZE
   const metadata = await parquetMetadataAsync(file, { initialFetchSize })
 
-  // No filter → read everything.
-  if (opts?.binCol === undefined || opts.range === undefined) {
+  const hasBinPrune = opts?.binCol !== undefined && opts.range !== undefined
+  const hasFilters = opts?.filters !== undefined && opts.filters.length > 0
+  if (!hasBinPrune && !hasFilters) {
+    // No prune → read everything.
     const rows = await parquetReadObjects({ file, metadata })
     return rows.map(normalizeRow)
   }
 
-  const runs = selectRowGroupRuns(metadata, opts.binCol, opts.range)
+  const runs = selectRowGroupRuns(metadata, opts!)
   if (runs.length === 0) return []
 
   // Read each contiguous run of matching RGs in one parquetReadObjects call.
@@ -86,22 +99,32 @@ export async function fetchSegmentRows(
   return perShard.flat()
 }
 
-// Walk the file's row groups, pick those whose `binCol` stats overlap
-// `range`, and coalesce adjacent picked RGs into runs of (rowStart, rowEnd).
-// Returns an array of zero or more runs.
+// One RG predicate: given a row group's stats for `colIdx`, decide whether
+// that RG could contain a matching row. Returns true if the RG *must* be
+// read (either the predicate provably overlaps, or stats are missing /
+// undecodable). Predicates AND together.
+interface RgPredicate {
+  colIdx: number
+  check(rawMin: unknown, rawMax: unknown): boolean
+}
+
+// Walk the file's row groups, pick those whose stats AND-satisfy every
+// predicate built from `opts`, and coalesce adjacent picked RGs into runs
+// of (rowStart, rowEnd). Returns zero or more runs.
 function selectRowGroupRuns(
   metadata: FileMetaData,
-  binCol: string,
-  range: { from: Date; to: Date },
+  opts: FetchOptions,
 ): { rowStart: number; rowEnd: number }[] {
-  const fromMs = range.from.getTime()
-  const toMs = range.to.getTime()
-  const colIdx = findColumnIndex(metadata, binCol)
-  if (colIdx === -1) {
-    // Column not found — fall back to reading everything (safer than throwing
-    // mid-pipeline; downstream stitch's per-row range filter will still drop
-    // out-of-range rows).
-    return [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
+  const predicates: RgPredicate[] = []
+  if (opts.binCol !== undefined && opts.range !== undefined) {
+    const p = makeBinRangePredicate(metadata, opts.binCol, opts.range)
+    // Column missing → can't prune by binCol; just skip this predicate
+    // (the per-row range filter in stitch still drops out-of-range rows).
+    if (p) predicates.push(p)
+  }
+  for (const filter of opts.filters ?? []) {
+    const p = makeFilterPredicate(metadata, filter)
+    if (p) predicates.push(p)
   }
 
   const runs: { rowStart: number; rowEnd: number }[] = []
@@ -114,20 +137,18 @@ function selectRowGroupRuns(
     const rgEnd = rowCursor + numRows
     rowCursor = rgEnd
 
-    const stats = rg.columns[colIdx]?.meta_data?.statistics
-    const min = decodeStatValue(stats?.min_value)
-    const max = decodeStatValue(stats?.max_value)
+    const pass = predicates.every(p => {
+      const stats = rg.columns[p.colIdx]?.meta_data?.statistics
+      return p.check(stats?.min_value, stats?.max_value)
+    })
 
-    // Stats present + provably outside range → skip.
-    if (min !== null && max !== null && (max < fromMs || min >= toMs)) {
+    if (!pass) {
       if (currentRun) {
         runs.push(currentRun)
         currentRun = null
       }
       continue
     }
-
-    // Either overlaps or stats missing (must read defensively).
     if (currentRun === null) {
       currentRun = { rowStart: rgStart, rowEnd: rgEnd }
     } else {
@@ -136,6 +157,64 @@ function selectRowGroupRuns(
   }
   if (currentRun) runs.push(currentRun)
   return runs
+}
+
+function makeBinRangePredicate(
+  metadata: FileMetaData,
+  binCol: string,
+  range: { from: Date; to: Date },
+): RgPredicate | null {
+  const colIdx = findColumnIndex(metadata, binCol)
+  if (colIdx === -1) return null
+  const fromMs = range.from.getTime()
+  const toMs = range.to.getTime()
+  return {
+    colIdx,
+    check(rawMin, rawMax) {
+      const min = decodeStatValue(rawMin)
+      const max = decodeStatValue(rawMax)
+      if (min === null || max === null) return true   // stats missing → must read
+      return !(max < fromMs || min >= toMs)
+    },
+  }
+}
+
+function makeFilterPredicate(
+  metadata: FileMetaData,
+  filter: ColumnFilter,
+): RgPredicate | null {
+  const colIdx = findColumnIndex(metadata, filter.col)
+  if (colIdx === -1) return null
+  if ('range' in filter) {
+    const { min: rMin, max: rMax } = filter.range
+    return {
+      colIdx,
+      check(rawMin, rawMax) {
+        const min = decodeStatValue(rawMin)
+        const max = decodeStatValue(rawMax)
+        if (min === null || max === null) return true
+        return !(rMax < min || rMin > max)
+      },
+    }
+  }
+  // values: set membership. String values compared lex; numeric compared
+  // numerically. Mixed-type stats (e.g. string values vs numeric stats)
+  // fall back to "must read".
+  const values = filter.values
+  return {
+    colIdx,
+    check(rawMin, rawMax) {
+      if (rawMin === undefined || rawMin === null) return true
+      if (rawMax === undefined || rawMax === null) return true
+      const min = decodeArbitraryStatValue(rawMin)
+      const max = decodeArbitraryStatValue(rawMax)
+      if (min === null || max === null) return true
+      return (values as readonly (string | number)[]).some(v => {
+        if (typeof v !== typeof min || typeof v !== typeof max) return true
+        return v >= min && v <= max
+      })
+    },
+  }
 }
 
 function findColumnIndex(metadata: FileMetaData, name: string): number {
@@ -160,6 +239,17 @@ function decodeStatValue(v: unknown): number | null {
     const t = new Date(v)
     return Number.isNaN(t.getTime()) ? null : t.getTime()
   }
+  return null
+}
+
+// Decode a non-timestamp stat value (string column → string; numeric column
+// → number). Used by arbitrary-column filters where the type is unknown.
+// Distinct from `decodeStatValue` (which tries to parse strings as dates).
+function decodeArbitraryStatValue(v: unknown): string | number | null {
+  if (v === undefined || v === null) return null
+  if (typeof v === 'string') return v
+  if (typeof v === 'number') return v
+  if (typeof v === 'bigint') return Number(v)
   return null
 }
 

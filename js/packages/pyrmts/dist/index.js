@@ -9,6 +9,5 @@ export { fetchShardData, fetchSegmentRows } from './fetch.js';
 export { memStorage } from './storage.js';
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js';
 export { buildQueryUrl, fetchPyramidQuery } from './query.js';
-export { usePyramid } from './use-pyramid.js';
 export const VERSION = '0.0.0';
 //# sourceMappingURL=index.js.map

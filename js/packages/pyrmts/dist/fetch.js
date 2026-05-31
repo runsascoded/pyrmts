@@ -22,9 +22,16 @@ export async function fetchShardData(storage, key, opts) {
             return [];
         throw new Error(`fetchShardData: object not found: ${key}`);
     }
-    const file = asyncBufferFromStorage(storage, key, head.size);
+    // Phase tag flips from `metadata` → `data` after metadata is read. The
+    // trace wrapper consults this mutable cell on each slice so the same
+    // AsyncBuffer instance can emit correctly-tagged entries across phases.
+    const phaseRef = { current: 'metadata' };
+    const file = opts?.trace !== undefined
+        ? asyncBufferFromStorageTraced(storage, key, head.size, opts.trace, phaseRef)
+        : asyncBufferFromStorage(storage, key, head.size);
     const initialFetchSize = opts?.initialFetchSize ?? DEFAULT_INITIAL_FETCH_SIZE;
     const metadata = await parquetMetadataAsync(file, { initialFetchSize });
+    phaseRef.current = 'data';
     const hasBinPrune = opts?.binCol !== undefined && opts.range !== undefined;
     const hasFilters = opts?.filters !== undefined && opts.filters.length > 0;
     if (!hasBinPrune && !hasFilters) {
@@ -198,6 +205,26 @@ function normalizeRow(row) {
         out[k] = typeof v === 'bigint' ? Number(v) : v;
     }
     return out;
+}
+function asyncBufferFromStorageTraced(storage, key, byteLength, trace, phaseRef) {
+    return {
+        byteLength,
+        async slice(start, end) {
+            const effectiveEnd = end ?? byteLength;
+            const t0 = performance.now();
+            const bytes = await storage.getRange(key, start, effectiveEnd);
+            const ms = performance.now() - t0;
+            trace.push({
+                key,
+                start,
+                end: effectiveEnd,
+                length: effectiveEnd - start,
+                ms: Math.round(ms * 100) / 100,
+                phase: phaseRef.current,
+            });
+            return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        },
+    };
 }
 function asyncBufferFromStorage(storage, key, byteLength) {
     return {

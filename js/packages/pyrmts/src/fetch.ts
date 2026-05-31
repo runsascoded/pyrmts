@@ -38,6 +38,31 @@ export interface FetchOptions {
   // default to "must read" (safer than throwing or omitting data —
   // downstream per-row filters can still drop unwanted rows).
   filters?: ColumnFilter[]
+  // Optional byte-range trace. If supplied, every `slice(start, end)` call
+  // on the underlying parquet file appends a `FetchTrace` entry. Used by
+  // worker `?debug=1` paths to surface the actual request pattern (count,
+  // sizes, gaps) so callers can spot RG-prune misses, over-fetched
+  // columns, footer-read churn, etc.
+  trace?: FetchTrace[]
+}
+
+/** One observed `slice(start, end)` against a parquet file. */
+export interface FetchTrace {
+  /** Storage key (parquet path) the slice was against. */
+  key: string
+  /** Inclusive lower byte offset. */
+  start: number
+  /** Exclusive upper byte offset. */
+  end: number
+  /** `end - start`. Length in bytes of the range that came back. */
+  length: number
+  /** Wall-clock milliseconds for the slice (storage call). */
+  ms: number
+  /** Bucketed phase the slice happened in: `metadata` (footer / metadata
+   *  read) or `data` (column-chunk reads after planning). Heuristic — the
+   *  first 1-2 slices per file are the footer; subsequent slices are
+   *  column chunks. */
+  phase: 'metadata' | 'data'
 }
 
 export type ColumnFilter =
@@ -63,10 +88,17 @@ export async function fetchShardData(
     if (opts?.tolerate404) return []
     throw new Error(`fetchShardData: object not found: ${key}`)
   }
-  const file = asyncBufferFromStorage(storage, key, head.size)
+  // Phase tag flips from `metadata` → `data` after metadata is read. The
+  // trace wrapper consults this mutable cell on each slice so the same
+  // AsyncBuffer instance can emit correctly-tagged entries across phases.
+  const phaseRef: { current: 'metadata' | 'data' } = { current: 'metadata' }
+  const file = opts?.trace !== undefined
+    ? asyncBufferFromStorageTraced(storage, key, head.size, opts.trace, phaseRef)
+    : asyncBufferFromStorage(storage, key, head.size)
 
   const initialFetchSize = opts?.initialFetchSize ?? DEFAULT_INITIAL_FETCH_SIZE
   const metadata = await parquetMetadataAsync(file, { initialFetchSize })
+  phaseRef.current = 'data'
 
   const hasBinPrune = opts?.binCol !== undefined && opts.range !== undefined
   const hasFilters = opts?.filters !== undefined && opts.filters.length > 0
@@ -260,6 +292,36 @@ function normalizeRow(row: Record<string, unknown>): Row {
     out[k] = typeof v === 'bigint' ? Number(v) : v
   }
   return out
+}
+
+function asyncBufferFromStorageTraced(
+  storage: Storage,
+  key: string,
+  byteLength: number,
+  trace: FetchTrace[],
+  phaseRef: { current: 'metadata' | 'data' },
+): AsyncBuffer {
+  return {
+    byteLength,
+    async slice(start: number, end?: number): Promise<ArrayBuffer> {
+      const effectiveEnd = end ?? byteLength
+      const t0 = performance.now()
+      const bytes = await storage.getRange(key, start, effectiveEnd)
+      const ms = performance.now() - t0
+      trace.push({
+        key,
+        start,
+        end: effectiveEnd,
+        length: effectiveEnd - start,
+        ms: Math.round(ms * 100) / 100,
+        phase: phaseRef.current,
+      })
+      return bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer
+    },
+  }
 }
 
 function asyncBufferFromStorage(

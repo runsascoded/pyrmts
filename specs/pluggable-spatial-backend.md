@@ -65,7 +65,7 @@ tight representation. We'd need a custom set-cover-flavored greedy
 that considers both `+` and `−` ops on cells at every materialized
 resolution.
 
-## Two paths
+## Three paths (H13, S2; T4 deferred)
 
 ### Path B: H13 — H3 with 13-disjoint-subregions addressing
 
@@ -179,6 +179,49 @@ Cons: full migration. Need:
 Estimated effort: 4-8 weeks. Storage: probably similar (more
 levels in a 4-children tree, but each cell smaller).
 
+### Path D: T4 (equilateral-triangle rep-tile) — deferred
+
+Implement only if H13's bake-off vs S2 reveals practical problems
+worth a third comparison point.
+
+T4 = 4-way midpoint subdivision of equilateral triangles. Connect
+the midpoints of a parent triangle's three sides to get 4 children:
+3 "corner" children sharing the parent's orientation, 1 "center"
+child flipped (apex-down if parent apex-up). All exactly 1/4 of
+parent area. Disjoint. Perfect tiling. No BTs, no SR addressing
+extension, no special cases.
+
+(T2 — 2-way bisection — doesn't preserve equilateral property
+since splitting an equilateral triangle in half by midpoint-to-
+vertex yields two 30-60-90 right triangles. T4 is the right name
+for the rep-tile / midpoint-subdivision operation.)
+
+**Why it's interesting**: simplest of the three backends. The H13
+BT-area asymmetry (6 incoming-BT SRs at ≈1.2% each) likely leaves
+those SRs sparsely-populated at high-resolution levels — paying
+complexity (mixed-area children, two ordering conventions, 13-ary
+tree) for SRs that rarely have data. T4 dodges this entirely: every
+child is 25%, populated-vs-empty is purely data-driven, not
+geometry-driven.
+
+**Why deferred**: no TS lib ecosystem. `latLngToCell`, `bboxToCells`,
+and viz integration are all hand-rolled. For ctbk's NYC scale (lat
+range ~0.5°), the geometric distortion difference between S2 squares
+and T4 triangles is below measurement noise — the bake-off would
+mostly measure library quality, not geometry.
+
+**Cheap once the abstraction is solid**: the `SpatialIndex` interface
+and `minimalCover` DP are branching-factor-parameterized; T4
+(branching 4) shares ~95% of code with S2 (branching 4) and reuses
+the H13 DP verbatim. The marginal cost of *adding* T4 is small once
+H13 + S2 are in. The big cost is the from-scratch geo primitives.
+
+**Decision trigger**: include T4 if either (a) H13's BT-SRs prove
+operationally noisy (planner edge cases, monoid-identity surprises,
+RG-stats blowup from sparse SR rows), or (b) S2's WASM bundle or API
+surface becomes a deployment problem. Otherwise skip — H13/S2 cover
+the design space adequately.
+
 ## Recommendation: implement both, bake off
 
 `pyrmts-geo` abstracts on a `SpatialIndex` interface. H13 and S2
@@ -205,6 +248,9 @@ This way:
   is just the SR addressing layer + 13-ary tree algorithms.
 - **S2 ships second** — for the bake-off on the cleaner geometry,
   and as backstop if H13 turns out to have a pitfall in practice.
+- **T4 third (optional)** — only if the H13 vs S2 verdict leaves
+  the design space unclear, or if H13's BT-area asymmetry shows
+  up as a practical issue. See Path D.
 - ctbk picks per dataset: rides-v3 (H13) goes head-to-head with
   rides-v4 (S2), both bake against existing rides-v2 (vanilla H3
   single-res).
@@ -271,8 +317,109 @@ behavior (preserves rides-v1 / avail-v2 / etc).
 4. **S2 backend** (`pyrmts-spatial-s2`). Square quadtree, library
    bindings. ~3 weeks (mostly library porting / wrapping).
 5. **ctbk rides-v4 (S2)** rebuild. Bake off. ~1 week.
-6. **Decide**: based on perf + precision + maintainability, pick
-   the long-term backend. Retire the loser. ~1 week.
+6. **Decide H13 vs S2**: based on perf + precision +
+   maintainability, pick the long-term backend. Retire the loser.
+   ~1 week.
+7. **(Optional) T4 backend** (`pyrmts-spatial-t4`). Only if step 6's
+   verdict leaves the design space unclear, or H13's BT-SR
+   asymmetry shows up as a real problem. T4's geo primitives are
+   hand-rolled (no lib); its DP + interface conformance comes
+   nearly free from H13/S2 work. ~1-2 weeks.
+
+## Test plan
+
+Phased to match the implementation phasing in `## Phasing`. Each phase
+must land green before the next one starts.
+
+### Phase 1 — Interface scaffolding
+
+- **Back-compat**: every existing `pyrmts-geo` test (planner.test,
+  query.test, serve.test, e2e.test) passes unchanged. The h3 default
+  impl is a pure refactor — no observable behavior change.
+- **Default-index inference**: a pyramid declared without `geo.index`
+  resolves to the h3 default; querying it produces identical results
+  pre/post the refactor (snapshotted as a small e2e case).
+- **Interface conformance**: a tiny `assertSpatialIndex(idx)` helper
+  exercises every method on the h3 impl with known inputs; serves as
+  the contract any future backend (H13, S2) must satisfy.
+
+### Phase 2 — H13 addressing primitives
+
+- **BT mass-action** (statistical): uniform-random points across a
+  large bbox, count what fraction land in incoming-BT SRs (idx 7-12)
+  at each (r → r-1) transition. Expect 1/14 ≈ 7.14% ± Monte Carlo
+  noise (N≥10k → 3σ band ≈ ±0.8pp). Confirms `srIdxFor` correctly
+  identifies BTs and the SR-index space is exhaustive.
+- **13 SRs tile parent** (Monte Carlo): for a sampled set of parents,
+  uniform points in parent's bbox each land in exactly one of P's
+  13 SRs (no double-assignment, no orphans — every point inside P
+  gets a valid `(P, sr_idx)`).
+- **Exact lineage** (property): `∀ L, r:
+  cellToParent(latLngToH13(L, r), r-1) === latLngToH13(L, r-1)`.
+  No BT artifacts in H13 lineage by construction.
+- **Round-trip**: `H13(lat, lng)` → cell — and the SR's geometric
+  region contains `(lat, lng)`. (Geometric containment via h3
+  boundary polygon ∩ BT slivers.)
+- **Direction enum consistency**: fringe SRs 1-6 and incoming BTs
+  7-12 use the same `Direction` ordering (K, J, JK, I, IK, IJ). A
+  table-test pins the mapping so future refactors can't silently
+  permute it.
+
+### Phase 3 — `minimalCover` DP
+
+- **Small hand-cases** (exact-equality):
+  - All-included (R == system): result is `[(root, +)]`.
+  - All-excluded singleton: `[(root, +), (excluded_leaf, -)]`
+    when `|excluded| < |root_children|`.
+  - Single included leaf out of a sparse tree: `[(leaf, +)]`
+    (no via-parent win available).
+- **Cross-level win** (regression test): constructed input where
+  swap composition at the grandparent wins (e.g., 3 of 7 children
+  at level r-1 fully-include, but their grandparent's other 4
+  children all exclude — DP should pick `(gp, +) - (4 children, -)`
+  vs greedy's 3 separate `(child, +)`s). Asserts DP `|ops|` strictly
+  less than bottom-up greedy `|ops|`.
+- **DP optimality** (brute-force property): for trees with ≤3
+  levels (≤7³ = 343 leaves on H3, ≤13³ = 2197 on H13 — keep test
+  bounded to ~50 random leaves), enumerate every cover (subsets of
+  the tree's cells × {+, -}) that produces the same include set,
+  take the minimum `|ops|`, assert DP matches. Repeat across N
+  random include-sets.
+- **Lineage-disjoint output** (property): no cell in `result.include`
+  is a descendant of another `result.include` cell, and same for
+  `result.exclude`. (Lineage cleanness is a correctness property of
+  the encoding, not a separate constraint.)
+- **`allowSubtraction = false` mode**: result has empty `exclude[]`,
+  matches the standard `compactCells`-like greedy union.
+
+### Phase 4 — `cellInSet` + planner integration
+
+- **`cellInSet` semantics** (property): for random L and a random
+  `{include, exclude}` set, `cellInSet(latLngToCell(L, r), r, set)`
+  iff L is in `(∪ include's regions) \ (∪ exclude's regions)`.
+- **End-to-end H13 pyramid**: small synthetic in-memory pyramid
+  (10s of cells across 2-3 levels), bbox query returns correct
+  aggregates. Includes the `mempty` sparse-row case (excluded SR
+  with no materialized data reads as 0 and the subtraction still
+  composes correctly).
+- **Back-compat E2E**: existing rides-v1 / avail-v2-style pyramid
+  configs (no `geo.index`) produce byte-identical query output
+  pre/post the refactor.
+- **Smoothing × geo**: a windowed query that triggers both
+  server-side smoothing and a multi-resolution geo cover stays
+  consistent. (Smoothing operates per-cell, not across cells, so
+  this is mostly a wiring check.)
+
+### Cross-cutting
+
+- **Both backends share `minimalCover` DP tests**: the DP is
+  branching-factor-parameterized, so the optimality + cross-level-win
+  tests run against both H3 (branching 7) and H13 (branching 13).
+  When S2 lands (branching 4) it joins the same suite.
+- **Performance smoke** (Phase 4): a "full system" bbox query
+  (e.g., 2339 stations, 6 H13 levels) completes in <1s end-to-end
+  on synthetic data. Not a real benchmark — just catches O(n²)
+  regressions in the DP or filter path.
 
 ## Out of scope
 
@@ -287,21 +434,27 @@ behavior (preserves rides-v1 / avail-v2 / etc).
 
 ## Open questions
 
-- **H13 SR encoding on disk**: do we store `(parent_id, sr_idx)` as
-  two columns (cleaner) or pack into the existing 64-bit cell id by
-  reserving 4 bits for sr_idx (denser; loses H3 compatibility for
-  that column)? Lean toward two columns at first; revisit if size
-  matters.
-- **H13 sr_idx ordering**: 0 = central is obvious; ordering of 1-6
-  fringes and 7-12 incoming BTs — by direction (N, NE, SE, S, SW,
-  NW) or by H3 child index. Direction is more human-readable;
-  index is cheaper to compute. Probably H3 child index for cells +
-  sibling-parent direction for BTs.
-- **Empty SRs**: at build time, do we materialize SR rows even
-  when no points are in them (consistency / monoid identity), or
-  only when populated (size optimization)? Sparse-only is the
-  obvious win on storage; lookup logic just treats missing rows
-  as count=0.
+- **H13 SR encoding on disk**: two columns (`parent_id`, `sr_idx`).
+  Packing into the H3 64-bit cell id (reserving 4 bits for `sr_idx`)
+  saves ~5 bytes/row but breaks native h3-lib lookups on that column
+  — which kills the main H13 win (staying in the H3 ecosystem). Two
+  columns also gives RG stats on `sr_idx` for free, which the
+  arbitrary-column pruner (`FetchOptions.filters`) can use directly.
+- **H13 sr_idx ordering**: 0 = central; 1-6 = fringe children in
+  canonical H3 direction order (K, J, JK, I, IK, IJ — h3-js's
+  `Direction` enum); 7-12 = incoming BTs ordered by donor
+  sibling-parent direction (same enum). One ordering convention
+  across both ranges (direction throughout) — avoids "is sr_idx 3
+  the SE fringe or the SE-direction BT?" ambiguity when reading
+  rows. Marginally more compute at addressing time (translate H3
+  child index → direction) than using raw H3 child indices for
+  1-6, but the convention payoff outweighs the cost.
+- **Empty SRs**: sparse-only at build time. Missing rows read as
+  monoid identity. The planner contract must document the canonical
+  `mempty` for each monoid (`count: 0`, `sum: 0`, `histogram: {}`,
+  `minmax: (+∞, −∞)`) so that `count(P) − Σ excluded_SR_counts`
+  composes correctly when some excluded SRs are absent (treated
+  as 0).
 - **Cross-backend tooling**: `ctbk region-cells` output is backend-
   agnostic: it outputs the station set; the backend's `minimalCover`
   is called client- or build-time as needed.

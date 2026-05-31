@@ -67,30 +67,91 @@ resolution.
 
 ## Two paths
 
-### Path B: H3 with BT bookkeeping
+### Path B: H13 — H3 with 13-disjoint-subregions addressing
 
-Stay on H3. Materialize every relevant resolution (4-9 for
-ctbk scales; more if needed). Model BTs as first-class storage
-buckets — each BT gets its own row(s) in the pyramid at the
-appropriate aggregation. Queries that span multiple resolutions
-declare their precision-vs-cost preference: "ignore BTs (~7%/level
-error acceptable)" or "include BT cells explicitly (exact)."
+Stay on H3 geometrically. Treat every parent P at resolution r-1 as
+having **13 disjoint subregions (SRs) that perfectly tile P's area**:
 
-Pros: keeps the H3 viz ecosystem accessible; matches existing
-ctbk pyramid layouts.
+- 1× central child hex (fully inside P)
+- 6× fringe children (each = an H3 child hex minus its outward-
+  protruding BT, ≈ 11/84 of P's area)
+- 6× incoming BTs (1 from each of P's 6 sibling parents' children,
+  ≈ 1/84 of P's area each)
 
-Cons: substantial pyrmts-geo work. Need:
-- BT addressing (a 64-bit id space distinct from H3 cells, since
-  BTs aren't H3-addressable directly)
-- BT computation (which BT a point is in)
-- BT-aware `compactCells` / `minimalCover`
-- BT-aware `filterCellsAndRes` (rows match either a hex cell or
-  an enclosing BT)
-- BT-aware aggregation in builds (rides in BTs get their own rows)
+Total = 12/84 + 6 × 11/84 + 6 × 1/84 = **84/84 = parent area exactly**.
 
-Estimated effort: 2-4 weeks. Per-query overhead: 5-15% extra
-storage (7-8% BT prevalence × 6 levels, minus empty BTs), 20-30%
-extra cells in the worst case for minimalCover.
+Addressing at level r becomes `(parent_id_at_r-1, sr_idx ∈ 0..12)`
+where 0 = central, 1-6 = fringes (ordered by direction), 7-12 =
+incoming BTs (ordered by donating sibling direction). Computable
+from any lat/lng via direct H3 ops:
+
+```
+P = h3.latlng_to_cell(L, r-1)            # exact parent
+C = h3.latlng_to_cell(L, r)              # exact H3 child hex
+lineage_P = h3.cell_to_parent(C, r-1)
+if lineage_P == P:
+    sr_idx = fringe_idx(C, P)            # 0-6, central or fringe
+else:
+    sr_idx = 7 + bt_direction(P, lineage_P)  # 7-12, incoming BT
+```
+
+The hierarchy is now **exactly a 13-ary tree** with no Pauli
+exclusion, no BT-handling edge cases, no double-counting. Every
+operation (parent, child, contains, aggregate) is structurally
+clean.
+
+**Critical insight: monoid sums + query-time subtraction make
+"all SRs populated" irrelevant for compaction.** For a region R
+that contains *most* of P's SRs:
+
+```
+count(R, P) = count(P) - Σ count(SR_i)  for SR_i ∉ R
+```
+
+So minimalCover is **mutually-recursive tree DP over include/
+exclude states** — the dual of the standard "min-ops to encode this
+subset of a hierarchy":
+
+```
+def encode_include(C):
+    # Min-ops encoding of "include I-stations under C, nothing else"
+    if C is pure_I or empty:     return [(C, +)]  if C has I else []
+    explicit  = sum(encode_include(child) for child in C.children)
+    via_parent = [(C, +)] + sum(encode_exclude(child) for child in C.children)
+    return min(explicit, via_parent, key=len)
+
+def encode_exclude(C):  # dual
+    if C is pure_E:              return [(C, -)]
+    if C has no E:               return []
+    explicit  = sum(encode_exclude(child) for child in C.children)
+    via_parent = [(C, -)] + sum(encode_include(child) for child in C.children)
+    return min(explicit, via_parent, key=len)
+```
+
+Two visits per cell ⇒ O(|relevant tree|) total. Always exact,
+always optimal for the op-count objective. Note: a naive bottom-up
+greedy (decide swap-or-not at each parent level independently)
+misses higher-level wins where multiple sibling swaps would
+compose into a single grandparent-level swap. DP catches these.
+
+The exact same DP applies identically to S2 (branching factor 4
+instead of 13). The algorithm doesn't care about the geometry,
+just the tree structure — so the H13 vs S2 bake-off compares
+geometric properties only.
+
+Pros: keeps the H3 ecosystem (h3-py, h3-js, viz tooling) accessible.
+The addressing extension is small (~4 bits per row for `sr_idx`).
+13-ary tree algorithms are mechanically identical to the standard
+ones — they just have branching factor 13 instead of 7.
+
+Cons: 13-children compaction is slightly less effective than S2's
+4-children on dense data (more SRs need to be "right" to collapse).
+For sparse-station regions, this doesn't matter — monoid subtraction
+at query time handles partial coverage cleanly.
+
+Estimated effort: 2-3 weeks. Per-query overhead: ~1 extra byte per
+row (sr_idx). No row blow-up — each ride still contributes one row
+per materialized resolution; it just carries the SR tag.
 
 ### Path C: S2
 
@@ -120,22 +181,33 @@ levels in a 4-children tree, but each cell smaller).
 
 ## Recommendation: implement both, bake off
 
-`pyrmts-geo` abstracts on a `SpatialIndex` interface. H3 and S2
+`pyrmts-geo` abstracts on a `SpatialIndex` interface. H13 and S2
 become two implementations. Pyramids in pyrmts-geo declare which
 index they're built against; queries route to the matching backend.
 
+Both paths share the same query model: tree decomposition over the
+disjoint subregion structure, with monoid arithmetic at each parent
+(`P_count − Σ excluded_SR_counts`) handling partial coverage exactly.
+The choice between H13 and S2 is now **purely about geometry +
+library availability**, not about architectural complexity:
+
+| | H13 | S2 |
+|---|---|---|
+| Branching factor | 13 | 4 |
+| Lib | h3-js + small SR addressing wrapper | s2-geometry-js or hand port |
+| Geometry | hexagonal (uniform 6-neighbor) | square (4-cardinal + 4-diagonal) |
+| Ecosystem | Kepler.gl/deck.gl/Carto all native | sparse FE tooling |
+| Migration risk | low (stay on H3 ops + add SR tag) | medium (replace planner geometry) |
+
 This way:
 
-- **Path C ships first** (S2 backend, smaller surface, exact by
-  construction). Validates the abstraction on a clean case.
-- **Path B ships second** (H3-with-BTs). Validates the abstraction
-  on the messy case + lets us measure whether the 1/14 BT mass is
-  actually impactful at ctbk-scale aggregation, or if H3 without
-  BT bookkeeping is "close enough" and the migration to S2 was the
-  right move.
-- ctbk picks per dataset: rides-v3 (S2) goes head-to-head with
-  rides-v4 (H3+BT), both bake against existing rides-v2 (H3 single-
-  res).
+- **H13 ships first** — keeps us on H3 ops + tooling; the extension
+  is just the SR addressing layer + 13-ary tree algorithms.
+- **S2 ships second** — for the bake-off on the cleaner geometry,
+  and as backstop if H13 turns out to have a pitfall in practice.
+- ctbk picks per dataset: rides-v3 (H13) goes head-to-head with
+  rides-v4 (S2), both bake against existing rides-v2 (vanilla H3
+  single-res).
 
 ## Interface sketch (TS)
 
@@ -191,13 +263,14 @@ behavior (preserves rides-v1 / avail-v2 / etc).
 
 1. **Sketch the abstraction** (this spec). Get sign-off on interface
    shape before implementing either backend. ~3 days.
-2. **S2 backend** (`pyrmts-spatial-s2`). Includes Python build helper
+2. **H13 backend** (`pyrmts-spatial-h13`). SR addressing + 13-ary
+   tree algorithms on top of h3-js. Includes Python build helper
    (ctbk uses Python to write parquet shards). ~2 weeks.
-3. **ctbk rides-v3 (S2)** rebuild. Bake off against v1/v2 on the
+3. **ctbk rides-v3 (H13)** rebuild. Bake off against v1/v2 on the
    `/v2?pyramid=v3` toggle. ~1 week.
-4. **H3-with-BTs backend** (`pyrmts-spatial-h3-bt`). Full BT
-   bookkeeping. ~3 weeks.
-5. **ctbk rides-v4 (H3+BT)** rebuild. Bake off. ~1 week.
+4. **S2 backend** (`pyrmts-spatial-s2`). Square quadtree, library
+   bindings. ~3 weeks (mostly library porting / wrapping).
+5. **ctbk rides-v4 (S2)** rebuild. Bake off. ~1 week.
 6. **Decide**: based on perf + precision + maintainability, pick
    the long-term backend. Retire the loser. ~1 week.
 
@@ -214,16 +287,24 @@ behavior (preserves rides-v1 / avail-v2 / etc).
 
 ## Open questions
 
-- **BT addressing**: do BTs get their own 64-bit ids in a parallel
-  space (cleanest), or do we tag BTs as `(cell_id, edge_idx)`
-  pairs (cheaper but messier query routing)?
-- **Empty BTs**: at build time, do we materialize BT rows even
-  when no points are in them (consistency), or only when populated
-  (size optimization)?
-- **Cross-backend tooling**: should `ctbk region-cells` output be
-  backend-specific or backend-agnostic? (Probably backend-agnostic:
-  it outputs the station set; the backend's `minimalCover` is called
-  client- or build-time as needed.)
+- **H13 SR encoding on disk**: do we store `(parent_id, sr_idx)` as
+  two columns (cleaner) or pack into the existing 64-bit cell id by
+  reserving 4 bits for sr_idx (denser; loses H3 compatibility for
+  that column)? Lean toward two columns at first; revisit if size
+  matters.
+- **H13 sr_idx ordering**: 0 = central is obvious; ordering of 1-6
+  fringes and 7-12 incoming BTs — by direction (N, NE, SE, S, SW,
+  NW) or by H3 child index. Direction is more human-readable;
+  index is cheaper to compute. Probably H3 child index for cells +
+  sibling-parent direction for BTs.
+- **Empty SRs**: at build time, do we materialize SR rows even
+  when no points are in them (consistency / monoid identity), or
+  only when populated (size optimization)? Sparse-only is the
+  obvious win on storage; lookup logic just treats missing rows
+  as count=0.
+- **Cross-backend tooling**: `ctbk region-cells` output is backend-
+  agnostic: it outputs the station set; the backend's `minimalCover`
+  is called client- or build-time as needed.
 - **S2 library choice**: build a thin wrapper around the WASM port,
   or hand-port the essential math? WASM is simpler but ~50KB
   bundle; hand-port is rouge but tractable since we only need a

@@ -13,15 +13,16 @@
 import {
   fetchSegmentRows,
   stitch,
-  type Pyramid,
   type QueryPlan,
   type SmoothingSpec,
   type SmoothMode,
 } from 'pyrmts'
+import { getSpatialIndex } from './h3-index.js'
 import { filterCellsAndRes, planGeoQuery, type BBox } from './planner.js'
+import type { GeoPyramid } from './spatial-index.js'
 
 export interface ServeGeoOptions {
-  pyramid: Pyramid
+  pyramid: GeoPyramid
   request: Request
   watermarks?:
     | Record<string, Date>
@@ -102,6 +103,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
       ...(smoothMode !== undefined ? { smoothMode } : {}),
     })
 
+    const index = getSpatialIndex(pyramid)
     const shardRows = await Promise.all(
       plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys, {
         binCol: pyramid.binCol,
@@ -110,7 +112,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
       })),
     )
     const filteredRows = shardRows.map(rows =>
-      filterCellsAndRes(rows, pyramid.geo!.cellCol, plan.outputRes, plan.outputCells),
+      filterCellsAndRes(rows, pyramid.geo!.cellCol, plan.outputRes, plan.outputCells, index),
     )
 
     // Project the geo plan down to a plain QueryPlan for stitch (which

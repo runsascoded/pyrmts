@@ -23,4 +23,13 @@ export type {
   PyramidGeoQueryResult,
 } from './query.js'
 
+export { getSpatialIndex, h3Index } from './h3-index.js'
+export type {
+  GeoPyramid,
+  GeoSpecWithIndex,
+  MinimalCoverOpts,
+  SpatialIndex,
+  SpatialSet,
+} from './spatial-index.js'
+
 export const VERSION = '0.0.0'

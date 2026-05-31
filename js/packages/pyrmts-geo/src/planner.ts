@@ -1,29 +1,36 @@
-// Joint time-×-space query planner. Layers h3 cell selection on top of
-// pyrmts core's time-axis planner.
+// Joint time-×-space query planner. Layers spatial-index cell selection on
+// top of pyrmts core's time-axis planner.
 //
 // Storage model (shared with the core planner): one shard per (time_tier,
 // period). Geo resolutions are not separate shards — every materialized
-// resolution lives inside every shard, sorted by `h3_cell` (h3 cell IDs
-// encode resolution in their high bits, so the sort naturally clusters
-// rows by resolution-then-spatial-locality). Predicate pushdown handles
-// the spatial filter at read time.
+// resolution lives inside every shard, sorted by the spatial cell column
+// (cell IDs encode resolution so the sort naturally clusters rows by
+// resolution-then-spatial-locality). Predicate pushdown handles the
+// spatial filter at read time.
+//
+// The planner consumes `Pyramid.geo` via the `SpatialIndex` abstraction
+// (`spatial-index.ts`); pyramids without an explicit `index` default to
+// `h3Index` (back-compat for rides-v1 / avail-v2 / etc).
 
-import { getResolution, latLngToCell, polygonToCells } from 'h3-js'
 import {
   planQuery,
   type PlanSegment,
-  type Pyramid,
   type QueryPlan,
   type SmoothingSpec,
   type SmoothMode,
   type Tier,
 } from 'pyrmts'
+import { getSpatialIndex, h3Index } from './h3-index.js'
+import type { BBox, GeoPyramid, SpatialIndex } from './spatial-index.js'
 
-export interface BBox {
-  minLat: number
-  maxLat: number
-  minLng: number
-  maxLng: number
+export type { BBox } from './spatial-index.js'
+
+// Standalone bbox→cells helper. Thin wrapper over `h3Index.bboxToCells`
+// for back-compat; pyramids with a non-H3 `index` should call
+// `pyramid.geo.index.bboxToCells(...)` directly (or rely on the planner,
+// which already does).
+export function bboxToCells(bbox: BBox, level: number): string[] {
+  return h3Index.bboxToCells(bbox, level)
 }
 
 export interface PlanGeoQueryInput {
@@ -55,7 +62,7 @@ export interface GeoQueryPlan extends Omit<QueryPlan, 'segments'> {
 }
 
 export function planGeoQuery(
-  pyramid: Pyramid,
+  pyramid: GeoPyramid,
   input: PlanGeoQueryInput,
 ): GeoQueryPlan {
   if (pyramid.geo === undefined) {
@@ -65,6 +72,7 @@ export function planGeoQuery(
   if (resolutions.length === 0) {
     throw new Error('planGeoQuery: pyramid.geo.resolutions is empty')
   }
+  const index = getSpatialIndex(pyramid)
 
   // Delegate the time-axis decisions to the core planner.
   const timePlan = planQuery(pyramid, {
@@ -79,7 +87,7 @@ export function planGeoQuery(
 
   // Pick the finest materialized resolution whose cells-in-bbox fits the
   // cell budget. `resolutions` is finest-first.
-  const { outputRes, outputCells } = pickResolution(input.bbox, resolutions, input.cellBudget)
+  const { outputRes, outputCells } = pickResolution(index, input.bbox, resolutions, input.cellBudget)
 
   // Each segment carries the same cell list — every materialized resolution
   // lives in every shard, so the cell predicate is the same regardless of
@@ -106,6 +114,7 @@ export function planGeoQuery(
 }
 
 function pickResolution(
+  index: SpatialIndex,
   bbox: BBox,
   resolutions: number[],
   cellBudget: number,
@@ -116,7 +125,7 @@ function pickResolution(
   // spacing — skip; coarser will catch it.
   let lastNonEmpty: { res: number; cells: string[] } | undefined
   for (const res of resolutions) {
-    const cells = bboxToCells(bbox, res)
+    const cells = index.bboxToCells(bbox, res)
     if (cells.length === 0) continue
     if (cells.length <= cellBudget) {
       return { outputRes: res, outputCells: cells }
@@ -135,38 +144,27 @@ function pickResolution(
   const centerLng = (bbox.minLng + bbox.maxLng) / 2
   return {
     outputRes: coarsest,
-    outputCells: [latLngToCell(centerLat, centerLng, coarsest)],
+    outputCells: [index.latLngToCell(centerLat, centerLng, coarsest)],
   }
-}
-
-// Convert a bbox to the h3 cells covering it at the given resolution.
-// h3-js `polygonToCells` takes a closed polygon in [lat, lng] order by
-// default.
-export function bboxToCells(bbox: BBox, res: number): string[] {
-  const polygon: number[][] = [
-    [bbox.minLat, bbox.minLng],
-    [bbox.minLat, bbox.maxLng],
-    [bbox.maxLat, bbox.maxLng],
-    [bbox.maxLat, bbox.minLng],
-    [bbox.minLat, bbox.minLng],
-  ]
-  return polygonToCells(polygon, res)
 }
 
 // Filter fetched rows to a chosen geo resolution + allowed cell set. Drops
 // rows whose cell is at a different resolution (every shard has multiple)
 // or whose cell isn't in the bbox-covering set. Stitch consumes the result.
+// `index` defaults to `h3Index` for back-compat with pre-SpatialIndex
+// callers; pyrmts-geo's planner threads the pyramid's actual index through.
 export function filterCellsAndRes(
   rows: Array<Record<string, unknown>>,
   cellCol: string,
   outputRes: number,
   allowedCells: string[],
+  index: SpatialIndex = h3Index,
 ): Array<Record<string, unknown>> {
   const allowed = new Set(allowedCells)
   return rows.filter(r => {
     const cell = r[cellCol]
     if (typeof cell !== 'string') return false
-    if (getResolution(cell) !== outputRes) return false
+    if (index.cellLevel(cell) !== outputRes) return false
     return allowed.has(cell)
   })
 }

@@ -272,8 +272,15 @@ export interface SpatialIndex<C extends string = string> {
   /** Cell id at the given level for a lat/lng. Exact. */
   latLngToCell(lat: number, lng: number, level: number): C
 
-  /** Parent cell id at level - 1. For H3-bt: may return a BT id
-   *  instead of a hex id for points in a BT. */
+  /** Resolution / level of a cell id. Most backends encode this in
+   *  the id (H3, S2); H13 derives it from the parent component.
+   *  Used by `filterCellsAndRes` to drop wrong-level rows. */
+  cellLevel(cell: C): number
+
+  /** Parent cell id at level - 1 (or at `level` if provided). For
+   *  H3 (default backend) this calls h3-js's `cellToParent` and is
+   *  BT-affected for points in a BT; for H13 it's exact by
+   *  construction. */
   cellToParent(cell: C, level?: number): C
 
   /** Bounding box → covering cells at given level. Used by

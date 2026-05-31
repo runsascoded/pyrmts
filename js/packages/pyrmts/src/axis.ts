@@ -51,13 +51,25 @@ export function addSpan(t: Date, span: ParsedTimeSpan): Date {
 
 // Floor a UTC instant to the start of its span. Supports count=1 for all
 // units, and count>1 for fixed-width units (min/h/d) via ms division.
-// Multi-unit calendar bins (e.g. `2mo`) aren't supported yet — alignment
-// semantics aren't well-defined without an anchor.
+// Multi-unit calendar bins (`Nmo`, `Ny`) anchor at year-0 boundaries:
+//   3mo  → Jan, Apr, Jul, Oct       (Gregorian quarters)
+//   6mo  → Jan, Jul                  (semesters)
+//   2y   → year aligned to floor(yyyy / 2) * 2
+//   etc.
+// 12 must be divisible by `count` for month spans (only 1, 2, 3, 4, 6, 12
+// are valid `Nmo` widths — others don't tile a year evenly).
 export function floorToSpan(t: Date, span: ParsedTimeSpan): Date {
   const { count, unit } = span
   if (count !== 1) {
-    if (unit === 'mo' || unit === 'y') {
-      throw new Error(`Multi-unit calendar bins not supported: ${count}${unit}`)
+    if (unit === 'mo') {
+      if (12 % count !== 0) {
+        throw new Error(`Month-span ${count}mo doesn't tile a year evenly (12 % ${count} !== 0)`)
+      }
+      const flooredMo = Math.floor(t.getUTCMonth() / count) * count
+      return new Date(Date.UTC(t.getUTCFullYear(), flooredMo))
+    }
+    if (unit === 'y') {
+      return new Date(Date.UTC(Math.floor(t.getUTCFullYear() / count) * count, 0))
     }
     const binMs = count * MS[unit]
     return new Date(Math.floor(t.getTime() / binMs) * binMs)

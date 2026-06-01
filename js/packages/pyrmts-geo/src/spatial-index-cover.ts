@@ -181,7 +181,7 @@ function encodeIncludePureUnion(node: CellNode): Op[] {
 // hit. (The nearest ancestor in the cover decides — that's what makes
 // `[(P,+), (child,-)]` work: stations under `child` hit `-` first.)
 //
-// Used by tests + Phase 4's `cellInSet` mixed-resolution upgrade.
+// Powers the mixed-resolution `cellInSet`.
 export function isCellInCover(
   index: SpatialIndex,
   cell: string,

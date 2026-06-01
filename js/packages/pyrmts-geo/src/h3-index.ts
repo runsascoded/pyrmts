@@ -1,10 +1,12 @@
-// H3 default `SpatialIndex` implementation. Wraps `h3-js` so the planner +
-// serve handler can stay backend-agnostic. This is the back-compat path —
-// pyramids without an explicit `geo.index` use this.
+// H3 `SpatialIndex` implementation. Wraps `h3-js`. Default for pyramids
+// without an explicit `geo.index` (preserves existing rides-v1 / avail-v2
+// / etc behavior).
 //
-// Phase 1 scope: `latLngToCell`, `cellLevel`, `cellToParent`, `bboxToCells`,
-// and single-level `cellInSet`. `minimalCover` is Phase 3 work; it throws
-// here until that lands.
+// **Recommended for**: fixed-level queries (single-resolution pyramids).
+// **Mixed-resolution caveats**: H3 lineage walks have BT mismatches at
+// every level transition for ~7% of points, so multi-level covers via
+// `minimalCover` here are approximate. For exact mixed-resolution work,
+// use `s2Index`.
 
 import {
   cellToParent as h3CellToParent,
@@ -51,23 +53,22 @@ export const h3Index: SpatialIndex<string> = {
 
   // Lineage-aware membership: walks up from `cell`, returning true on
   // first include hit, false on first exclude hit. The `level` parameter
-  // still gates wrong-level rows (every shard has multiple resolutions;
-  // `filterCellsAndRes` uses this to drop them).
+  // still gates wrong-level rows.
   //
   // Caveat: H3's parent chain is BT-affected for ~7% of points at every
-  // level transition. For exact lineage walks against a geographically-
-  // defined cover, prefer s2Index. For lineage walks against a cover
-  // built from H3-lineage operations (e.g., the `minimalCover` DP from
-  // `spatial-index-cover.ts`), behavior is self-consistent.
+  // level transition. Exact for covers built from H3-lineage operations
+  // (e.g., `minimalCover`'s tree DP, which uses the same parent chain)
+  // but approximate against geographically-defined covers — use s2Index
+  // for that.
   cellInSet(cell, level, set: SpatialSet<string>) {
     if (getResolution(cell) !== level) return false
     return isCellInCover(h3Index, cell, set)
   },
 
   minimalCover(include, system, opts?: MinimalCoverOpts) {
-    // Backend-agnostic DP. NOTE: H3's parent chain has BT mismatches at
-    // every level transition for ~7% of points — lineage walks here are
-    // best-effort. For an exact mixed-resolution cover, prefer s2Index.
+    // Backend-agnostic DP. H3 lineage walks have BT mismatches at every
+    // level transition (~7% of points) — outputs are approximate. Use
+    // s2Index for exact mixed-resolution covers.
     return runMinimalCover(h3Index, include, system, opts)
   },
 }

@@ -2,6 +2,8 @@ import { getResolution, latLngToCell } from 'h3-js'
 import { memStorage, type Pyramid } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
 import { bboxToCells, filterCellsAndRes, planGeoQuery } from './planner.js'
+import { s2Index } from './s2-index.js'
+import type { GeoPyramid } from './spatial-index.js'
 
 const d = (iso: string): Date => new Date(iso)
 const mockStorage = memStorage()
@@ -178,5 +180,61 @@ describe('filterCellsAndRes', () => {
     expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell9])).toEqual([
       { h3_cell: cell9, ts: 1, count: 5 },
     ])
+  })
+})
+
+describe('planGeoQuery: s2-backed pyramid', () => {
+  // Mirror the h3 fixture above but with `s2Index` declared explicitly.
+  // S2 levels: 10 ~3km, 8 ~25km, 6 ~250km. Pick 10/8/6 for a NYC-fit
+  // pyramid that roughly matches the h3 [9, 7, 5] tier widths.
+  function ctbkPyramidS2(geoResolutions: number[]): GeoPyramid {
+    return {
+      storage: mockStorage,
+      keyTemplate: 'trips/{tier}/{period}.parquet',
+      axis: 'time',
+      binCol: 'ts',
+      dims: [{ name: 'station_id', type: 'string' }],
+      metrics: [{ name: 'count', monoid: 'count' }],
+      tiers: [
+        { name: 'h1', bin: '1h', shard: '1mo' },
+        { name: 'd1', bin: '1d', shard: '1y' },
+        { name: 'mo1', bin: '1mo', shard: '1y' },
+      ],
+      geo: { cellCol: 's2_cell', resolutions: geoResolutions, index: s2Index },
+    }
+  }
+
+  test('picks the finest s2 level whose bbox cell count fits the budget', () => {
+    const pyramid = ctbkPyramidS2([12, 10, 8])
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: NYC,
+      cellBudget: 50,
+    })
+    expect(plan.outputCells.length).toBeGreaterThan(0)
+    expect(plan.outputCells.length).toBeLessThanOrEqual(50)
+    // Every output cell at the chosen S2 level
+    for (const cell of plan.outputCells) {
+      expect(s2Index.cellLevel(cell)).toBe(plan.outputRes)
+    }
+  })
+
+  test('threads s2Index through to filterCellsAndRes (different resolutions correctly dropped)', () => {
+    const pyramid = ctbkPyramidS2([12, 10, 8])
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: NYC,
+      cellBudget: 1024,
+    })
+    const cellAtPlan = plan.outputCells[0]!
+    const cellAtCoarser = s2Index.cellToParent(cellAtPlan, plan.outputRes - 2)
+    const rows = [
+      { s2_cell: cellAtPlan, ts: 1, count: 5 },
+      { s2_cell: cellAtCoarser, ts: 1, count: 99 },  // wrong level, should drop
+    ]
+    const filtered = filterCellsAndRes(rows, 's2_cell', plan.outputRes, [cellAtPlan], s2Index)
+    expect(filtered).toEqual([{ s2_cell: cellAtPlan, ts: 1, count: 5 }])
   })
 })

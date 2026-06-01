@@ -27,9 +27,8 @@ export interface ConformanceOpts {
   coarserLevel: number
 }
 
-// Spec test plan §Phase 1 "Interface conformance": every method on a
-// SpatialIndex exercised with known inputs; serves as the contract any
-// future backend must satisfy.
+// The interface contract: every method on a SpatialIndex exercised with
+// known inputs. Any new backend must pass this suite.
 export function assertSpatialIndex(
   index: SpatialIndex,
   opts: ConformanceOpts,
@@ -90,9 +89,9 @@ export function assertSpatialIndex(
     expect(index.cellInSet(cell, coarserLevel, { include: [cell], exclude: [] })).toBe(false)
   })
 
-  // Phase 4: lineage-aware membership for mixed-resolution sets.
-  // (`minimalCover`'s output cells live at varying levels; consumers
-  // filter rows against this output via `cellInSet`.)
+  // Lineage-aware membership for mixed-resolution sets (`minimalCover`
+  // output is at varying levels; row filters check membership against it
+  // via `cellInSet`).
   test('cellInSet: parent in include covers descendant (lineage walk up)', () => {
     const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
     const parent = index.cellToParent(cell)

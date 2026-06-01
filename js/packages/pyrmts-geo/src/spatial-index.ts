@@ -1,9 +1,8 @@
 // Pluggable spatial-index abstraction. The planner consumes this interface
-// rather than calling h3-js directly, so future backends (H13, S2, T4) can
-// drop in without changing planner/serve/query code.
-//
-// See `specs/done/pluggable-spatial-backend.md` (once Phase 4 lands) for
-// the architectural framing + per-backend rationale.
+// rather than calling h3-js directly, so backends drop in without changing
+// planner/serve/query code. Concrete impls: `h3Index` (fixed-level legacy),
+// `s2Index` (prod-ready multi-resolution). See
+// `specs/done/pluggable-spatial-backend.md` for the architectural framing.
 
 import type { GeoSpec, Pyramid } from 'pyrmts'
 
@@ -17,7 +16,7 @@ export interface BBox {
 // A set of cells declared in mixed-resolution (lineage-aware) form:
 // every point in (∪ include's regions) \ (∪ exclude's regions) is "in"
 // the set. `include` cells may be at different levels; same for `exclude`.
-// Phase 4 reader uses `SpatialIndex.cellInSet` to check row membership.
+// Row-membership checks via `SpatialIndex.cellInSet`.
 export interface SpatialSet<C extends string = string> {
   include: C[]
   exclude: C[]
@@ -58,13 +57,13 @@ export interface SpatialIndex<C extends string = string> {
   bboxToCells(bbox: BBox, level: number): C[]
 
   // Whether a row's cell (at the given level) is in the mixed-resolution
-  // set. For Phase-1 single-level sets, equivalent to `cell ∈ set.include`
-  // with no exclude support; Phase 4 extends to lineage-aware checks.
+  // set. Lineage-aware: walks up from `cell`, returning true on the
+  // first include hit, false on the first exclude hit.
   cellInSet(cell: C, level: number, set: SpatialSet<C>): boolean
 
   // Minimal mixed-resolution cover of an include cell set within a system
   // cell set (e.g., "all stations in NYC"). Returns lineage-disjoint
-  // include + exclude cells. Implemented in Phase 3; Phase 1 throws.
+  // include + exclude cells. Optimal for the |ops| objective.
   minimalCover(include: C[], system: C[], opts?: MinimalCoverOpts): SpatialSet<C>
 }
 

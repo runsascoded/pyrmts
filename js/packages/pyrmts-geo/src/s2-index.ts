@@ -1,20 +1,17 @@
-// S2 backend for `SpatialIndex`. Wraps `s2js` — the pure-TS port of
+// S2 `SpatialIndex` implementation. Wraps `s2js` — the pure-TS port of
 // Google's `golang/geo` reference implementation. Runs in Cloudflare
-// Workers (s2js has no Node-only deps).
+// Workers (no Node-only deps).
 //
-// S2's structural wins over H3 (and over H13's deferred design):
-//   - Branching factor 4 (vs 7 for H3, 13 for H13).
+// **Recommended primary backend.** S2's structural wins over H3:
+//   - Branching factor 4 vs 7.
 //   - Exact lineage: `cellToParent(cellAt(L, r), r-1) === cellAt(L, r-1)`
-//     holds for every L (no BT mismatches at any level transition).
+//     for every L. No BT mismatches at any level transition.
 //   - `bboxToCells` uses S2's native `RegionCoverer`.
+//   - `minimalCover` is exact (clean quadtree DP, no approximation).
 //
 // Cell IDs are S2 hex tokens (`toToken`/`fromToken` round-trip). The
 // `SpatialIndex<string>` contract uses tokens for storage + JSON-key
-// stability; we convert to `bigint` `CellID` for the internal ops.
-//
-// Phase 2 scope: `latLngToCell`, `cellLevel`, `cellToParent`,
-// `bboxToCells`, single-level `cellInSet`. `minimalCover` is Phase 3
-// work; throws here until that lands.
+// stability; internal ops use `bigint` `CellID`.
 
 import { s2 } from 's2js'
 import { isCellInCover, minimalCover as runMinimalCover } from './spatial-index-cover.js'
@@ -69,11 +66,10 @@ export const s2Index: SpatialIndex<string> = {
   },
 
   // Lineage-aware membership: walks up from `cell`, returning true on
-  // first include hit, false on first exclude hit. Mixed-resolution
-  // sets (e.g., `minimalCover` output) work naturally — an include cell
-  // at a coarser level "covers" all its descendants at `cell`'s level.
-  // The `level` parameter still gates wrong-level rows (every shard has
-  // multiple resolutions; `filterCellsAndRes` uses this to drop them).
+  // the first include hit, false on the first exclude hit. Mixed-
+  // resolution sets (e.g., `minimalCover` output) work naturally — an
+  // include cell at a coarser level "covers" all its descendants at
+  // `cell`'s level. The `level` parameter gates wrong-level rows.
   cellInSet(cell, level, set: SpatialSet<string>) {
     if (cellid.level(cellid.fromToken(cell)) !== level) return false
     return isCellInCover(s2Index, cell, set)

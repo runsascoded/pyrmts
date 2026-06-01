@@ -1,27 +1,73 @@
 # Spec: pluggable spatial backend — S2 + BT-aware H3, baked off
 
-> Status: **draft** (2026-05-31). Architectural spec for `pyrmts-geo`,
-> motivated by ctbk's rides-v3 perf work hitting H3's hierarchical
-> approximation problem.
+> Status: **done** (pyrmts side, Phases 1-4) — 2026-05-31. Architectural
+> spec for `pyrmts-geo`, motivated by ctbk's rides-v3 perf work hitting
+> H3's hierarchical approximation problem.
 >
-> **2026-05-31 update — pivot to S2-first**: while writing Phase 2
-> (H13 addressing), found that H13's "exact lineage" property —
-> `cellToParent(latLngToH13(L, r), r-1) === latLngToH13(L, r-1)` —
-> can't hold for any reasonable `cellToParent` definition because H3
-> BT issues *compound* at every level transition. The 13-SR partition
-> at level r is clean, but parent-of-parent lookups still hit BT
-> mismatches at r-1 → r-2. The monoid subtraction algebra (the real
-> H13 win for queries) is unaffected, but the "clean tree" framing
-> oversold the lineage-walk property. Combined with S2's structural
-> simplicity (branching factor 4, exact lineage for free, standard
-> compactCells gives optimal minimalCover), the decision is now
-> **S2 first; H13 and T4 deferred** as fallbacks if S2 has deployment
-> problems. See §Phasing.
+> ## Resolution
 >
-> **Library**: `s2js` (missinglink/s2js — pure-TS port of golang/geo,
+> Phases 1-4 shipped on branch `spatial-backend`:
+>
+> - **Phase 1** (`a5c0f60`): `SpatialIndex` interface +
+>   `assertSpatialIndex` conformance suite + `h3Index` default impl.
+>   Pure refactor; existing tests pass unchanged.
+> - **Phase 2** (`6c16dbc`): `s2Index` backend on `s2js`. Exact-lineage
+>   property holds for 4000 randomized checks (1000 points × 4 levels)
+>   — the H3-BT problem that motivated the work is gone. Sole runtime
+>   dep is `bigfloat` (pure JS, CFW-compatible).
+> - **Phase 3** (`05c8cca`): backend-agnostic `minimalCover` DP. The
+>   mutually-recursive `encode_include`/`encode_exclude` is optimal
+>   for the |ops| objective; brute-force checked across 32 include
+>   subsets on small trees. **DP strictly beats bottom-up greedy by 2
+>   ops on the 14-of-16 grandchildren canonical case** (3 ops vs 5).
+> - **Phase 4** (`98944b0`): lineage-aware `cellInSet` + consumer-
+>   facing `filterCellsByCover`. Mixed-resolution sets work via
+>   parent-chain walks; cell-in-exclude beats parent-in-include (the
+>   `[(P,+), (child,-)]` motif).
+>
+> Phase 5 (ctbk rides-v3 bake-off) is downstream consumer work. H13
+> (Phase 6) and T4 (Phase 7) remain deferred per the open question
+> below.
+>
+> ## Spec-vs-impl deltas
+>
+> 1. **H13 "exact lineage" claim is wrong**: discovered during Phase 2
+>    planning that H13's `cellToParent` can't satisfy
+>    `cellToParent(latLngToH13(L, r), r-1) === latLngToH13(L, r-1)` —
+>    H3 BT mismatches compound at every level transition regardless of
+>    how H13 defines its parent function. Per-level 13-SR partition is
+>    clean, but lineage walks aren't BT-free. The monoid subtraction
+>    algebra (the real H13 win for queries) is unaffected. Pivoted to
+>    S2-first; H13 stays deferred with this finding documented in
+>    Path B.
+> 2. **`cellLevel` added to interface**: not in the original interface
+>    sketch; needed for the row-level resolution filter
+>    (`filterCellsAndRes` drops wrong-resolution rows).
+> 3. **`assertSpatialIndex` lives in `spatial-index-conformance.ts`**:
+>    initially put in `spatial-index.test.ts` but imports triggered
+>    duplicate test runs in consumer files. Moved to a non-test file.
+> 4. **DP lives in `spatial-index-cover.ts`**: backend-agnostic
+>    standalone module; both `h3Index.minimalCover` and
+>    `s2Index.minimalCover` delegate to it via `runMinimalCover(index,
+>    ...)`.
+>
+> ## Library
+>
+> `s2js` (missinglink/s2js — pure-TS port of golang/geo,
 > Cloudflare-Workers compatible, full RegionCoverer). Survey in
 > `tmp/s2-lib-survey.md`. Fallback: hand-port the RegionCoverer slice
 > on top of nodes2ts.
+>
+> ## Migration / consumer-side wiring
+>
+> ctbk rides-v3 (S2 bake-off): declare pyramid `geo.index = s2Index`;
+> at query time, compute `minimalCover(s2Index, filterStationIds,
+> allSystemStations)`; pass the resulting `SpatialSet` to
+> `filterCellsByCover` after `fetchSegmentRows`. The shadow-mode
+> parity test compares the S2 cover output to the existing H3
+> single-res output.
+>
+> 214 tests pass on the pyrmts side.
 
 ## Background
 

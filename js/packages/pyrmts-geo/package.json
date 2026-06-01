@@ -25,7 +25,8 @@
   "author": "Ryan Williams <ryan@runsascoded.com>",
   "dependencies": {
     "h3-js": "^4.4.0",
-    "pyrmts": "workspace:*"
+    "pyrmts": "workspace:*",
+    "s2js": "^1.44.0"
   },
   "repository": {
     "type": "git",
@@ -41,6 +42,8 @@
     "react": ">=18"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true }
+    "react": {
+      "optional": true
+    }
   }
 }

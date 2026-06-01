@@ -24,6 +24,7 @@ export type {
 } from './query.js'
 
 export { getSpatialIndex, h3Index } from './h3-index.js'
+export { s2Index } from './s2-index.js'
 export type {
   GeoPyramid,
   GeoSpecWithIndex,

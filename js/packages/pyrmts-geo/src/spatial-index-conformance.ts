@@ -1,0 +1,92 @@
+// Reusable conformance suite for the `SpatialIndex` interface. Backends
+// (h3, s2, h13-deferred, t4-deferred) pass their concrete impl + known-
+// good sample inputs; vitest's `describe`/`test` are imported here so
+// callers don't need to thread them.
+//
+// Kept out of any `.test.ts` file so that importing this helper doesn't
+// re-register its tests in the importing file's vitest context. (Bad
+// previous setup: helper lived in `spatial-index.test.ts`, and every
+// `import { assertSpatialIndex }` triggered the h3 suite to run twice.)
+
+import { describe, expect, test } from 'vitest'
+import type { BBox, SpatialIndex } from './spatial-index.js'
+
+export interface ConformanceOpts {
+  // A point known to be within `latLng → cell` valid input space for the
+  // backend. For h3, anywhere on the globe; for S2, same; for H13, same;
+  // for T4 (deferred), depends on icosahedral mapping.
+  samplePoint: { lat: number; lng: number }
+  // A bbox guaranteed to yield ≥1 cell at `sampleLevel` and ≥1 at
+  // `coarserLevel`.
+  sampleBBox: BBox
+  // A level where `bboxToCells` returns at least one cell for
+  // `sampleBBox`, and where `latLngToCell` is well-defined for
+  // `samplePoint`.
+  sampleLevel: number
+  // Coarser level than `sampleLevel` for parent-of tests.
+  coarserLevel: number
+}
+
+// Spec test plan §Phase 1 "Interface conformance": every method on a
+// SpatialIndex exercised with known inputs; serves as the contract any
+// future backend must satisfy.
+export function assertSpatialIndex(
+  index: SpatialIndex,
+  opts: ConformanceOpts,
+): void {
+  const { samplePoint, sampleBBox, sampleLevel, coarserLevel } = opts
+
+  test('name + maxLevel', () => {
+    expect(typeof index.name).toBe('string')
+    expect(index.name.length).toBeGreaterThan(0)
+    expect(index.maxLevel).toBeGreaterThanOrEqual(sampleLevel)
+  })
+
+  test('latLngToCell + cellLevel round-trip', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    expect(typeof cell).toBe('string')
+    expect(index.cellLevel(cell)).toBe(sampleLevel)
+  })
+
+  test('cellToParent returns a coarser-level cell', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    const parent = index.cellToParent(cell)
+    expect(index.cellLevel(parent)).toBe(sampleLevel - 1)
+  })
+
+  test('cellToParent honors explicit target level', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    const parent = index.cellToParent(cell, coarserLevel)
+    expect(index.cellLevel(parent)).toBe(coarserLevel)
+  })
+
+  test('bboxToCells returns cells at the requested level', () => {
+    const cells = index.bboxToCells(sampleBBox, sampleLevel)
+    expect(cells.length).toBeGreaterThan(0)
+    for (const c of cells) {
+      expect(index.cellLevel(c)).toBe(sampleLevel)
+    }
+  })
+
+  test('cellInSet: cell-in-include → true', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    expect(index.cellInSet(cell, sampleLevel, { include: [cell], exclude: [] })).toBe(true)
+  })
+
+  test('cellInSet: cell-not-in-include → false', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    expect(index.cellInSet(cell, sampleLevel, { include: [], exclude: [] })).toBe(false)
+  })
+
+  test('cellInSet: cell-in-exclude → false (overrides include)', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    expect(
+      index.cellInSet(cell, sampleLevel, { include: [cell], exclude: [cell] }),
+    ).toBe(false)
+  })
+
+  test('cellInSet: wrong level → false (single-resolution Phase 1)', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    expect(index.cellInSet(cell, coarserLevel, { include: [cell], exclude: [] })).toBe(false)
+  })
+}

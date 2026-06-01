@@ -1,15 +1,12 @@
-// Conformance tests for the `SpatialIndex` interface. The
-// `assertSpatialIndex` helper is reusable across backends — when H13 and
-// S2 land they'll run the same suite.
-//
-// Per spec test plan §Phase 1: "Interface conformance: a tiny
-// `assertSpatialIndex(idx)` helper exercises every method on the h3 impl
-// with known inputs; serves as the contract any future backend (H13, S2)
-// must satisfy."
+// Conformance tests for `h3Index` against the reusable
+// `assertSpatialIndex` suite (in `spatial-index-conformance.ts`); plus
+// tests for the `getSpatialIndex` pyramid resolver and structural
+// back-compat of core `Pyramid` → `GeoPyramid`.
 
 import { memStorage, type Pyramid } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
 import { getSpatialIndex, h3Index } from './h3-index.js'
+import { assertSpatialIndex } from './spatial-index-conformance.js'
 import type { BBox, GeoPyramid, SpatialIndex } from './spatial-index.js'
 
 const NYC: BBox = {
@@ -22,84 +19,6 @@ const NYC: BBox = {
 // Manhattan-ish point (Times Square area).
 const SAMPLE_LAT = 40.758
 const SAMPLE_LNG = -73.985
-
-interface ConformanceOpts {
-  // A point known to be within `latLng → cell` valid input space for the
-  // backend. For h3, anywhere on the globe; for H13, same; for T4, depends
-  // on icosahedral mapping.
-  samplePoint: { lat: number; lng: number }
-  // A bbox guaranteed to yield ≥1 cell at `sampleLevel` and ≥1 at the
-  // coarser level.
-  sampleBBox: BBox
-  // A level where bboxToCells returns at least one cell for `sampleBBox`,
-  // and where `latLngToCell` is well-defined for `samplePoint`.
-  sampleLevel: number
-  // Coarser level than `sampleLevel` for parent-of tests.
-  coarserLevel: number
-}
-
-// Reusable conformance suite. Backends pass their concrete `SpatialIndex`
-// + a set of known-good sample inputs.
-export function assertSpatialIndex(
-  index: SpatialIndex,
-  opts: ConformanceOpts,
-): void {
-  const { samplePoint, sampleBBox, sampleLevel, coarserLevel } = opts
-
-  test('name + maxLevel', () => {
-    expect(typeof index.name).toBe('string')
-    expect(index.name.length).toBeGreaterThan(0)
-    expect(index.maxLevel).toBeGreaterThanOrEqual(sampleLevel)
-  })
-
-  test('latLngToCell + cellLevel round-trip', () => {
-    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
-    expect(typeof cell).toBe('string')
-    expect(index.cellLevel(cell)).toBe(sampleLevel)
-  })
-
-  test('cellToParent returns a coarser-level cell', () => {
-    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
-    const parent = index.cellToParent(cell)
-    expect(index.cellLevel(parent)).toBe(sampleLevel - 1)
-  })
-
-  test('cellToParent honors explicit target level', () => {
-    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
-    const parent = index.cellToParent(cell, coarserLevel)
-    expect(index.cellLevel(parent)).toBe(coarserLevel)
-  })
-
-  test('bboxToCells returns cells at the requested level', () => {
-    const cells = index.bboxToCells(sampleBBox, sampleLevel)
-    expect(cells.length).toBeGreaterThan(0)
-    for (const c of cells) {
-      expect(index.cellLevel(c)).toBe(sampleLevel)
-    }
-  })
-
-  test('cellInSet: cell-in-include → true', () => {
-    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
-    expect(index.cellInSet(cell, sampleLevel, { include: [cell], exclude: [] })).toBe(true)
-  })
-
-  test('cellInSet: cell-not-in-include → false', () => {
-    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
-    expect(index.cellInSet(cell, sampleLevel, { include: [], exclude: [] })).toBe(false)
-  })
-
-  test('cellInSet: cell-in-exclude → false (overrides include)', () => {
-    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
-    expect(
-      index.cellInSet(cell, sampleLevel, { include: [cell], exclude: [cell] }),
-    ).toBe(false)
-  })
-
-  test('cellInSet: wrong level → false (single-resolution Phase 1)', () => {
-    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
-    expect(index.cellInSet(cell, coarserLevel, { include: [cell], exclude: [] })).toBe(false)
-  })
-}
 
 describe('h3Index: SpatialIndex conformance', () => {
   assertSpatialIndex(h3Index, {

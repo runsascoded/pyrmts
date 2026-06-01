@@ -17,6 +17,7 @@
 // work; throws here until that lands.
 
 import { s2 } from 's2js'
+import { minimalCover as runMinimalCover } from './spatial-index-cover.js'
 import type {
   BBox,
   MinimalCoverOpts,
@@ -76,7 +77,7 @@ export const s2Index: SpatialIndex<string> = {
     return set.include.includes(cell)
   },
 
-  minimalCover(_include, _system, _opts?: MinimalCoverOpts) {
-    throw new Error('s2Index.minimalCover: not implemented (Phase 3 work — see specs/pluggable-spatial-backend.md)')
+  minimalCover(include, system, opts?: MinimalCoverOpts) {
+    return runMinimalCover(s2Index, include, system, opts)
   },
 }

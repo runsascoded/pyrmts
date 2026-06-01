@@ -39,12 +39,6 @@ describe('s2Index: SpatialIndex conformance', () => {
   })
 })
 
-describe('s2Index: Phase 2 minimalCover throws', () => {
-  test('minimalCover throws not-implemented', () => {
-    expect(() => s2Index.minimalCover([], [])).toThrow(/not implemented/)
-  })
-})
-
 describe('s2Index: exact-lineage property (the H3-BT problem S2 fixes)', () => {
   // Plain H3 at any (r → r-1) transition: ~7% of points have
   // cellToParent(latLngToCell(L, r), r-1) ≠ latLngToCell(L, r-1).

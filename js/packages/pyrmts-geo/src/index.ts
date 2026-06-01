@@ -25,6 +25,7 @@ export type {
 
 export { getSpatialIndex, h3Index } from './h3-index.js'
 export { s2Index } from './s2-index.js'
+export { isCellInCover, minimalCover } from './spatial-index-cover.js'
 export type {
   GeoPyramid,
   GeoSpecWithIndex,

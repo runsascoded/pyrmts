@@ -29,12 +29,6 @@ describe('h3Index: SpatialIndex conformance', () => {
   })
 })
 
-describe('h3Index: Phase 1 minimalCover throws', () => {
-  test('minimalCover throws not-implemented', () => {
-    expect(() => h3Index.minimalCover([], [])).toThrow(/not implemented/)
-  })
-})
-
 describe('getSpatialIndex: pyramid resolution', () => {
   function pyramid(geo: { cellCol: string; resolutions: number[]; index?: SpatialIndex } | undefined): GeoPyramid {
     return {

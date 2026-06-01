@@ -12,6 +12,7 @@ import {
   latLngToCell as h3LatLngToCell,
   polygonToCells,
 } from 'h3-js'
+import { minimalCover as runMinimalCover } from './spatial-index-cover.js'
 import type {
   BBox,
   GeoPyramid,
@@ -58,8 +59,11 @@ export const h3Index: SpatialIndex<string> = {
     return set.include.includes(cell)
   },
 
-  minimalCover(_include, _system, _opts?: MinimalCoverOpts) {
-    throw new Error('h3Index.minimalCover: not implemented (Phase 3 work — see specs/pluggable-spatial-backend.md)')
+  minimalCover(include, system, opts?: MinimalCoverOpts) {
+    // Backend-agnostic DP. NOTE: H3's parent chain has BT mismatches at
+    // every level transition for ~7% of points — lineage walks here are
+    // best-effort. For an exact mixed-resolution cover, prefer s2Index.
+    return runMinimalCover(h3Index, include, system, opts)
   },
 }
 

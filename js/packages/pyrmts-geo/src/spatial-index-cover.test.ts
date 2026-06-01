@@ -13,6 +13,7 @@
 
 import { s2 } from 's2js'
 import { describe, expect, test } from 'vitest'
+import { filterCellsByCover } from './planner.js'
 import { s2Index } from './s2-index.js'
 import { isCellInCover, minimalCover } from './spatial-index-cover.js'
 
@@ -193,6 +194,59 @@ describe('minimalCover: allowSubtraction = false', () => {
 // Brute-force optimality: exhaustively enumerate all (cell, +/-)
 // assignments on the relevant tree and find the minimum |ops| of any
 // valid cover. The DP must match.
+describe('minimalCover → filterCellsByCover end-to-end', () => {
+  // Phase 4 integration: build a synthetic shard of rows at one level,
+  // compute a minimalCover from a station subset, filter rows by the
+  // cover, verify the kept rows are exactly the ones whose cells are in
+  // the include subset.
+  test('14-of-16 case: filterCellsByCover keeps exactly the include leaves', () => {
+    const { GC } = s2Fixture(10)
+    const allLeaves = GC.flat()
+    const include = [
+      ...GC[0]!,
+      ...GC[1]!,
+      ...GC[2]!,
+      GC[3]![0]!, GC[3]![1]!,
+    ]
+    const cover = minimalCover(s2Index, include, allLeaves)
+    // Simulate parquet rows: one per leaf, with a `cell` column.
+    const rows = allLeaves.map(leaf => ({ cell: leaf, count: 1 }))
+    const filtered = filterCellsByCover(rows, 'cell', 12, cover, s2Index)
+    const keptCells = new Set(filtered.map(r => r.cell as string))
+    expect(keptCells).toEqual(new Set(include))
+  })
+
+  test('multi-level shard rows: only level-r rows are kept (wrong-level dropped)', () => {
+    // A real pyrmts shard has rows at MULTIPLE materialized resolutions.
+    // filterCellsByCover should drop rows whose cell isn't at the query
+    // level (delegated to cellInSet's level gate).
+    const { P, C, GC } = s2Fixture(10)
+    const rows = [
+      { cell: P, level: 10, count: 100 },           // wrong level
+      ...C.map(c => ({ cell: c, level: 11, count: 25 })),  // wrong level
+      ...GC.flat().map(g => ({ cell: g, level: 12, count: 1 })),  // right level
+    ]
+    const include = GC[0]!  // all 4 grandchildren under C[0]
+    const cover = minimalCover(s2Index, include, GC.flat())
+    const filtered = filterCellsByCover(rows, 'cell', 12, cover, s2Index)
+    const keptCells = new Set(filtered.map(r => r.cell as string))
+    expect(keptCells).toEqual(new Set(include))
+  })
+
+  test('cover with one-level promotion: rows under promoted cell all kept', () => {
+    const { P, C, GC } = s2Fixture(10)
+    // include all 16 grandchildren → minimalCover promotes to P
+    const include = GC.flat()
+    const cover = minimalCover(s2Index, include, include)
+    expect(cover.include).toEqual([P])
+    // filterCellsByCover at level 12: each grandchild's lineage walks
+    // up through C[i] then to P (which is in include) → all kept.
+    const rows = include.map(g => ({ cell: g, count: 1 }))
+    const filtered = filterCellsByCover(rows, 'cell', 12, cover, s2Index)
+    expect(filtered.length).toBe(16)
+  })
+})
+
 describe('minimalCover: brute-force optimality (small trees)', () => {
   // Lineage descendant check (same as cellid.contains on S2 tokens).
   function isDescendantOf(leaf: string, ancestor: string): boolean {

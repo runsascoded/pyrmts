@@ -169,5 +169,27 @@ export function filterCellsAndRes(
   })
 }
 
+// Filter fetched rows by a mixed-resolution `SpatialSet` cover (e.g.,
+// `minimalCover` output). Each row's cell is checked against the cover
+// via lineage walks (`SpatialIndex.cellInSet`): include cells "cover"
+// their descendants; exclude cells (more specific in the lineage) win
+// over ancestor include cells.
+//
+// Use this when the query's spatial filter is defined by a station set
+// (run through `minimalCover` to compact) rather than a bbox.
+export function filterCellsByCover(
+  rows: Array<Record<string, unknown>>,
+  cellCol: string,
+  level: number,
+  cover: import('./spatial-index.js').SpatialSet,
+  index: SpatialIndex,
+): Array<Record<string, unknown>> {
+  return rows.filter(r => {
+    const cell = r[cellCol]
+    if (typeof cell !== 'string') return false
+    return index.cellInSet(cell, level, cover)
+  })
+}
+
 // Re-export the time-axis Tier type for convenience.
 export type { Tier }

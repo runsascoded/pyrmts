@@ -17,7 +17,7 @@
 // work; throws here until that lands.
 
 import { s2 } from 's2js'
-import { minimalCover as runMinimalCover } from './spatial-index-cover.js'
+import { isCellInCover, minimalCover as runMinimalCover } from './spatial-index-cover.js'
 import type {
   BBox,
   MinimalCoverOpts,
@@ -68,13 +68,15 @@ export const s2Index: SpatialIndex<string> = {
     return Array.from(union, (ci) => cellid.toToken(ci))
   },
 
-  // Phase 2: single-level set semantics (same shape as h3Index). Phase 4
-  // widens to lineage-aware mixed-resolution sets via `cellid.contains`.
+  // Lineage-aware membership: walks up from `cell`, returning true on
+  // first include hit, false on first exclude hit. Mixed-resolution
+  // sets (e.g., `minimalCover` output) work naturally — an include cell
+  // at a coarser level "covers" all its descendants at `cell`'s level.
+  // The `level` parameter still gates wrong-level rows (every shard has
+  // multiple resolutions; `filterCellsAndRes` uses this to drop them).
   cellInSet(cell, level, set: SpatialSet<string>) {
-    const ci = cellid.fromToken(cell)
-    if (cellid.level(ci) !== level) return false
-    if (set.exclude.includes(cell)) return false
-    return set.include.includes(cell)
+    if (cellid.level(cellid.fromToken(cell)) !== level) return false
+    return isCellInCover(s2Index, cell, set)
   },
 
   minimalCover(include, system, opts?: MinimalCoverOpts) {

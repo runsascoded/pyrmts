@@ -155,6 +155,38 @@ describe('s2Index: bboxToCells coverage', () => {
   })
 })
 
+describe('s2Index: cellInSet — deep mixed-resolution lineage walks', () => {
+  // Phase 4: cellInSet walks the parent chain. For S2, lineage is exact
+  // at every level → these tests have no BT caveats.
+  test('grandparent in include → grandchild matches', () => {
+    const gp = s2Index.latLngToCell(SAMPLE_LAT, SAMPLE_LNG, 8)
+    const gc = s2Index.latLngToCell(SAMPLE_LAT, SAMPLE_LNG, 12)
+    expect(s2Index.cellInSet(gc, 12, { include: [gp], exclude: [] })).toBe(true)
+  })
+
+  test('grandparent in include + parent in exclude → grandchild rejected', () => {
+    const gp = s2Index.latLngToCell(SAMPLE_LAT, SAMPLE_LNG, 8)
+    const p = s2Index.latLngToCell(SAMPLE_LAT, SAMPLE_LNG, 10)
+    const gc = s2Index.latLngToCell(SAMPLE_LAT, SAMPLE_LNG, 12)
+    expect(s2Index.cellInSet(gc, 12, { include: [gp], exclude: [p] })).toBe(false)
+  })
+
+  test('grandparent in include + parent in exclude + grandchild back in include → matches', () => {
+    const gp = s2Index.latLngToCell(SAMPLE_LAT, SAMPLE_LNG, 8)
+    const p = s2Index.latLngToCell(SAMPLE_LAT, SAMPLE_LNG, 10)
+    const gc = s2Index.latLngToCell(SAMPLE_LAT, SAMPLE_LNG, 12)
+    expect(s2Index.cellInSet(gc, 12, { include: [gp, gc], exclude: [p] })).toBe(true)
+  })
+
+  test('lineage walk terminates at root for cells with no covered ancestor', () => {
+    // Pick a level-12 cell in Manhattan, then a far-away level-10 include
+    // (e.g., Los Angeles): no lineage match anywhere.
+    const ny = s2Index.latLngToCell(SAMPLE_LAT, SAMPLE_LNG, 12)
+    const la = s2Index.latLngToCell(34.05, -118.24, 10)
+    expect(s2Index.cellInSet(ny, 12, { include: [la], exclude: [] })).toBe(false)
+  })
+})
+
 describe('s2Index: LatLng round-trip via S2', () => {
   test('latLngToCell at varying levels produces nested cell IDs', () => {
     // Coarser levels' cells should contain finer levels' cells (S2 quadtree

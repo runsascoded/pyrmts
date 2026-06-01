@@ -85,8 +85,35 @@ export function assertSpatialIndex(
     ).toBe(false)
   })
 
-  test('cellInSet: wrong level → false (single-resolution Phase 1)', () => {
+  test('cellInSet: wrong level → false (drops other-resolution rows)', () => {
     const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
     expect(index.cellInSet(cell, coarserLevel, { include: [cell], exclude: [] })).toBe(false)
+  })
+
+  // Phase 4: lineage-aware membership for mixed-resolution sets.
+  // (`minimalCover`'s output cells live at varying levels; consumers
+  // filter rows against this output via `cellInSet`.)
+  test('cellInSet: parent in include covers descendant (lineage walk up)', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    const parent = index.cellToParent(cell)
+    expect(index.cellInSet(cell, sampleLevel, { include: [parent], exclude: [] })).toBe(true)
+  })
+
+  test('cellInSet: cell in exclude beats parent in include', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    const parent = index.cellToParent(cell)
+    expect(
+      index.cellInSet(cell, sampleLevel, { include: [parent], exclude: [cell] }),
+    ).toBe(false)
+  })
+
+  test('cellInSet: no ancestor in include → false (default)', () => {
+    const cell = index.latLngToCell(samplePoint.lat, samplePoint.lng, sampleLevel)
+    const otherParent = index.cellToParent(
+      index.latLngToCell(samplePoint.lat + 5, samplePoint.lng + 5, sampleLevel),
+    )
+    expect(
+      index.cellInSet(cell, sampleLevel, { include: [otherParent], exclude: [] }),
+    ).toBe(false)
   })
 }

@@ -12,7 +12,7 @@ import {
   latLngToCell as h3LatLngToCell,
   polygonToCells,
 } from 'h3-js'
-import { minimalCover as runMinimalCover } from './spatial-index-cover.js'
+import { isCellInCover, minimalCover as runMinimalCover } from './spatial-index-cover.js'
 import type {
   BBox,
   GeoPyramid,
@@ -49,14 +49,19 @@ export const h3Index: SpatialIndex<string> = {
     return polygonToCells(polygon, level)
   },
 
-  // Phase 1: single-level set. A row's cell is "in" the set iff its level
-  // matches the set's query level AND the cell is in `include` AND not in
-  // `exclude`. Phase 4 will widen this to lineage-aware checks for
-  // mixed-resolution sets.
+  // Lineage-aware membership: walks up from `cell`, returning true on
+  // first include hit, false on first exclude hit. The `level` parameter
+  // still gates wrong-level rows (every shard has multiple resolutions;
+  // `filterCellsAndRes` uses this to drop them).
+  //
+  // Caveat: H3's parent chain is BT-affected for ~7% of points at every
+  // level transition. For exact lineage walks against a geographically-
+  // defined cover, prefer s2Index. For lineage walks against a cover
+  // built from H3-lineage operations (e.g., the `minimalCover` DP from
+  // `spatial-index-cover.ts`), behavior is self-consistent.
   cellInSet(cell, level, set: SpatialSet<string>) {
     if (getResolution(cell) !== level) return false
-    if (set.exclude.includes(cell)) return false
-    return set.include.includes(cell)
+    return isCellInCover(h3Index, cell, set)
   },
 
   minimalCover(include, system, opts?: MinimalCoverOpts) {

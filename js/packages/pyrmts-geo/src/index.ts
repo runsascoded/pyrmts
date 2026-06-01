@@ -4,6 +4,7 @@
 export {
   bboxToCells,
   filterCellsAndRes,
+  filterCellsByCover,
   planGeoQuery,
 } from './planner.js'
 export type {

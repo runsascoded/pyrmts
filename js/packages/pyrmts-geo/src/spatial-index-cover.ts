@@ -63,9 +63,14 @@ export function minimalCover(
 ): SpatialSet<string> {
   if (include.length === 0) return { include: [], exclude: [] }
   const allowSubtraction = opts.allowSubtraction ?? true
+  // `coarsestLevel`: stop the bottom-up tree walk here; the DP can emit
+  // ops at this level but won't roll up further. For pyramids that only
+  // materialize a sub-range of levels, set this to the shallowest
+  // materialized level — coarser cells wouldn't have shards to query.
+  const coarsestLevel = opts.coarsestLevel
   // Include cells are implicitly part of system.
   const systemUnion = Array.from(new Set([...system, ...include]))
-  const roots = buildTree(index, include, systemUnion)
+  const roots = buildTree(index, include, systemUnion, coarsestLevel)
   const ops: Op[] = []
   for (const root of roots) {
     ops.push(...(allowSubtraction ? encodeInclude(root) : encodeIncludePureUnion(root)))
@@ -83,6 +88,7 @@ function buildTree(
   index: SpatialIndex,
   include: string[],
   system: string[],
+  coarsestLevel?: number,
 ): CellNode[] {
   const includeSet = new Set(include)
   const nodes = new Map<string, CellNode>()
@@ -105,8 +111,9 @@ function buildTree(
     const newFrontier = new Set<string>()
     for (const cellId of frontier) {
       const node = nodes.get(cellId)!
-      if (node.level === 0) {
-        // Backend root — keep as a forest-root candidate.
+      if (node.level === 0 || (coarsestLevel !== undefined && node.level <= coarsestLevel)) {
+        // Stop the walk: hit the backend root, or the caller-imposed
+        // coarsest-level cap. Keep as a forest-root candidate.
         newFrontier.add(cellId)
         continue
       }

@@ -26,6 +26,11 @@ export interface MinimalCoverOpts {
   resolutions?: number[]
   allowSubtraction?: boolean
   maxLevel?: number
+  /** Stop the bottom-up roll-up at this level. Cover output won't contain
+   *  cells coarser than `coarsestLevel`. Pass the shallowest materialized
+   *  level of the consuming pyramid — coarser cells have no shards to
+   *  query. Undefined → walk to backend root. */
+  coarsestLevel?: number
 }
 
 // Pluggable spatial index. Concrete implementations (`h3Index`, `h13Index`,

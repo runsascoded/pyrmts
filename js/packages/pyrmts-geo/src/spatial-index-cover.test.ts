@@ -173,6 +173,60 @@ describe('minimalCover: lineage-disjoint output', () => {
   })
 })
 
+describe('minimalCover: coarsestLevel opt', () => {
+  // `coarsestLevel` caps the bottom-up walk: the cover may emit ops at
+  // that level but won't roll any coarser. Use case: pyramids that
+  // materialize only a sub-range of levels can't query coarser cells.
+  test('all 16 grandchildren, coarsestLevel = parents → 4 parents (no GP)', () => {
+    const { C, GC } = s2Fixture(10)  // P at 10, C at 11, GC at 12
+    const include = GC.flat()
+    const cover = minimalCover(s2Index, include, include, { coarsestLevel: 11 })
+    // Without cap: would roll to [P] (level 10) = 1 op.
+    // With cap at 11: rolls up to C[0..3] (level 11) but no further = 4 ops.
+    expect(new Set(cover.include)).toEqual(new Set(C))
+    expect(cover.exclude).toEqual([])
+  })
+
+  test('all 4 children, coarsestLevel = child level → no promotion', () => {
+    const { C } = s2Fixture(10)  // P at 10, C at 11
+    const cover = minimalCover(s2Index, C, C, { coarsestLevel: 11 })
+    expect(new Set(cover.include)).toEqual(new Set(C))
+    expect(cover.exclude).toEqual([])
+  })
+
+  test('all 4 children, coarsestLevel = parent level → promote', () => {
+    const { P, C } = s2Fixture(10)  // P at 10, C at 11
+    const cover = minimalCover(s2Index, C, C, { coarsestLevel: 10 })
+    expect(cover).toEqual({ include: [P], exclude: [] })
+  })
+
+  test('coarsestLevel undefined matches no-cap behavior', () => {
+    const { GC } = s2Fixture(10)
+    const include = GC.flat()
+    const noCap = minimalCover(s2Index, include, include)
+    const explicit = minimalCover(s2Index, include, include, { coarsestLevel: undefined })
+    expect(noCap).toEqual(explicit)
+  })
+
+  test('coarsestLevel preserves cover correctness (3-of-4 leaves)', () => {
+    const { C, GC } = s2Fixture(10)
+    const include = [GC[0]![0]!, GC[0]![1]!, GC[0]![2]!]  // 3 of C[0]'s 4 leaves
+    const system = GC.flat()
+    const cover = minimalCover(s2Index, include, system, { coarsestLevel: 11 })
+    // Without cap: +C[0], -GC[0][3] (2 ops at levels 11 and 12). With
+    // cap=11: same — cap permits level 11 cells, DP still picks the
+    // subtract trick. Verify membership matches.
+    const includeSet = new Set(include)
+    for (const station of system) {
+      expect(isCellInCover(s2Index, station, cover)).toBe(includeSet.has(station))
+    }
+    // And no cell in the cover is coarser than the cap.
+    for (const c of [...cover.include, ...cover.exclude]) {
+      expect(s2Index.cellLevel(c)).toBeGreaterThanOrEqual(11)
+    }
+  })
+})
+
 describe('minimalCover: allowSubtraction = false', () => {
   test('pure-union mode never emits excludes', () => {
     const { P, C } = s2Fixture()

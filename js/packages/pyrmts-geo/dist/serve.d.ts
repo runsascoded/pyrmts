@@ -1,6 +1,6 @@
-import { type Pyramid } from 'pyrmts';
+import type { GeoPyramid } from './spatial-index.js';
 export interface ServeGeoOptions {
-    pyramid: Pyramid;
+    pyramid: GeoPyramid;
     request: Request;
     watermarks?: Record<string, Date> | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>);
     earliestWatermarks?: Record<string, Date> | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>);

@@ -1,14 +1,25 @@
-// Joint time-×-space query planner. Layers h3 cell selection on top of
-// pyrmts core's time-axis planner.
+// Joint time-×-space query planner. Layers spatial-index cell selection on
+// top of pyrmts core's time-axis planner.
 //
 // Storage model (shared with the core planner): one shard per (time_tier,
 // period). Geo resolutions are not separate shards — every materialized
-// resolution lives inside every shard, sorted by `h3_cell` (h3 cell IDs
-// encode resolution in their high bits, so the sort naturally clusters
-// rows by resolution-then-spatial-locality). Predicate pushdown handles
-// the spatial filter at read time.
-import { getResolution, latLngToCell, polygonToCells } from 'h3-js';
+// resolution lives inside every shard, sorted by the spatial cell column
+// (cell IDs encode resolution so the sort naturally clusters rows by
+// resolution-then-spatial-locality). Predicate pushdown handles the
+// spatial filter at read time.
+//
+// The planner consumes `Pyramid.geo` via the `SpatialIndex` abstraction
+// (`spatial-index.ts`); pyramids without an explicit `index` default to
+// `h3Index` (back-compat for rides-v1 / avail-v2 / etc).
 import { planQuery, } from 'pyrmts';
+import { getSpatialIndex, h3Index } from './h3-index.js';
+// Standalone bbox→cells helper. Thin wrapper over `h3Index.bboxToCells`
+// for back-compat; pyramids with a non-H3 `index` should call
+// `pyramid.geo.index.bboxToCells(...)` directly (or rely on the planner,
+// which already does).
+export function bboxToCells(bbox, level) {
+    return h3Index.bboxToCells(bbox, level);
+}
 export function planGeoQuery(pyramid, input) {
     if (pyramid.geo === undefined) {
         throw new Error('planGeoQuery: pyramid has no `geo` config (use planQuery for time-only)');
@@ -17,6 +28,7 @@ export function planGeoQuery(pyramid, input) {
     if (resolutions.length === 0) {
         throw new Error('planGeoQuery: pyramid.geo.resolutions is empty');
     }
+    const index = getSpatialIndex(pyramid);
     // Delegate the time-axis decisions to the core planner.
     const timePlan = planQuery(pyramid, {
         range: input.range,
@@ -29,7 +41,7 @@ export function planGeoQuery(pyramid, input) {
     });
     // Pick the finest materialized resolution whose cells-in-bbox fits the
     // cell budget. `resolutions` is finest-first.
-    const { outputRes, outputCells } = pickResolution(input.bbox, resolutions, input.cellBudget);
+    const { outputRes, outputCells } = pickResolution(index, input.bbox, resolutions, input.cellBudget);
     // Each segment carries the same cell list — every materialized resolution
     // lives in every shard, so the cell predicate is the same regardless of
     // which (finer) time tier the segment reads from.
@@ -52,14 +64,14 @@ export function planGeoQuery(pyramid, input) {
         smoothing: timePlan.smoothing,
     };
 }
-function pickResolution(bbox, resolutions, cellBudget) {
+function pickResolution(index, bbox, resolutions, cellBudget) {
     // Try finest → coarsest (resolutions is finest-first); pick first that
     // yields a non-empty cell list within the budget. An empty result at some
     // resolution means the bbox is smaller than that resolution's centroid
     // spacing — skip; coarser will catch it.
     let lastNonEmpty;
     for (const res of resolutions) {
-        const cells = bboxToCells(bbox, res);
+        const cells = index.bboxToCells(bbox, res);
         if (cells.length === 0)
             continue;
         if (cells.length <= cellBudget) {
@@ -79,34 +91,39 @@ function pickResolution(bbox, resolutions, cellBudget) {
     const centerLng = (bbox.minLng + bbox.maxLng) / 2;
     return {
         outputRes: coarsest,
-        outputCells: [latLngToCell(centerLat, centerLng, coarsest)],
+        outputCells: [index.latLngToCell(centerLat, centerLng, coarsest)],
     };
-}
-// Convert a bbox to the h3 cells covering it at the given resolution.
-// h3-js `polygonToCells` takes a closed polygon in [lat, lng] order by
-// default.
-export function bboxToCells(bbox, res) {
-    const polygon = [
-        [bbox.minLat, bbox.minLng],
-        [bbox.minLat, bbox.maxLng],
-        [bbox.maxLat, bbox.maxLng],
-        [bbox.maxLat, bbox.minLng],
-        [bbox.minLat, bbox.minLng],
-    ];
-    return polygonToCells(polygon, res);
 }
 // Filter fetched rows to a chosen geo resolution + allowed cell set. Drops
 // rows whose cell is at a different resolution (every shard has multiple)
 // or whose cell isn't in the bbox-covering set. Stitch consumes the result.
-export function filterCellsAndRes(rows, cellCol, outputRes, allowedCells) {
+// `index` defaults to `h3Index` for back-compat with pre-SpatialIndex
+// callers; pyrmts-geo's planner threads the pyramid's actual index through.
+export function filterCellsAndRes(rows, cellCol, outputRes, allowedCells, index = h3Index) {
     const allowed = new Set(allowedCells);
     return rows.filter(r => {
         const cell = r[cellCol];
         if (typeof cell !== 'string')
             return false;
-        if (getResolution(cell) !== outputRes)
+        if (index.cellLevel(cell) !== outputRes)
             return false;
         return allowed.has(cell);
+    });
+}
+// Filter fetched rows by a mixed-resolution `SpatialSet` cover (e.g.,
+// `minimalCover` output). Each row's cell is checked against the cover
+// via lineage walks (`SpatialIndex.cellInSet`): include cells "cover"
+// their descendants; exclude cells (more specific in the lineage) win
+// over ancestor include cells.
+//
+// Use this when the query's spatial filter is defined by a station set
+// (run through `minimalCover` to compact) rather than a bbox.
+export function filterCellsByCover(rows, cellCol, level, cover, index) {
+    return rows.filter(r => {
+        const cell = r[cellCol];
+        if (typeof cell !== 'string')
+            return false;
+        return index.cellInSet(cell, level, cover);
     });
 }
 //# sourceMappingURL=planner.js.map

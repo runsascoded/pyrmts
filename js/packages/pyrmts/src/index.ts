@@ -4,17 +4,22 @@
 export type {
   Axis,
   Bin,
+  ColumnFilter,
   Dim,
   Duration,
+  FetchOptionsBase,
+  FetchSegment,
   GeoSpec,
   Metric,
   MonoidName,
   Pyramid,
+  Row,
   RunBoundary,
   Shard,
   StepCount,
   StepUnit,
   Storage,
+  StorageBackend,
   Tier,
   TimeUnit,
 } from './types.js'
@@ -40,7 +45,7 @@ export type {
 } from './planner.js'
 
 export { getMonoid, stateColumns } from './monoids.js'
-export type { Monoid, Row } from './monoids.js'
+export type { Monoid } from './monoids.js'
 
 export { stitch } from './stitch.js'
 export type { StitchInput } from './stitch.js'
@@ -48,8 +53,8 @@ export type { StitchInput } from './stitch.js'
 export { pivotTallToHistogram } from './pivot.js'
 export type { PivotTallToHistogramOptions } from './pivot.js'
 
-export { fetchShardData, fetchSegmentRows } from './fetch.js'
-export type { ColumnFilter, FetchOptions, FetchTrace } from './fetch.js'
+export { fetchShardData, parquetBackend } from './fetch.js'
+export type { FetchOptions, FetchTrace } from './fetch.js'
 
 export { memStorage } from './storage.js'
 

@@ -8,36 +8,16 @@
 // smaller decode cost.
 
 import { parquetMetadataAsync, parquetReadObjects, type AsyncBuffer, type FileMetaData } from 'hyparquet'
-import type { Row } from './monoids.js'
-import type { Storage } from './types.js'
+import type { ColumnFilter, FetchOptionsBase, FetchSegment, Row, Storage, StorageBackend } from './types.js'
 
-export interface FetchOptions {
-  // Column to use for RG-level filtering. For time-axis pyramids, this is
-  // the bin column (`pyramid.binCol`).
-  binCol?: string
-  // Range to filter to. For time-axis pyramids, supply the segment's
-  // [from, to). Only RGs whose `binCol` min/max overlaps this range are
-  // fetched + decoded.
-  range?: { from: Date; to: Date }
+// Parquet-backend-specific options. Extends the shared `FetchOptionsBase`
+// (binCol / range / filters / tolerate404) with parquet-only knobs.
+export interface FetchOptions extends FetchOptionsBase {
   // Initial bytes-from-EOF fetched to read parquet metadata. Hyparquet's
   // default is 512KB, which over-fetches small shards. 64KB is enough to
   // catch the footer of typical shards in one round trip; hyparquet falls
   // back to a second fetch if the metadata is bigger.
   initialFetchSize?: number
-  // Treat missing objects (`storage.head` → null) as empty shards instead
-  // of throwing. For pyramids with heterogeneous dim coverage (e.g. some
-  // devices haven't existed long enough to have data in older shard
-  // periods), the planner emits shard keys that don't yet exist; enabling
-  // this lets the query succeed with empty bins for those gaps instead of
-  // erroring. Default: false (fail loudly — usually a config bug).
-  tolerate404?: boolean
-  // Arbitrary-column RG pruning. AND-combined with the `binCol + range`
-  // filter (if any) and with each other. Each filter is either set
-  // membership (`values`) or a closed numeric range (`range`). An RG is
-  // skipped only if its stats *prove* no row could match; missing stats
-  // default to "must read" (safer than throwing or omitting data —
-  // downstream per-row filters can still drop unwanted rows).
-  filters?: ColumnFilter[]
   // Optional byte-range trace. If supplied, every `slice(start, end)` call
   // on the underlying parquet file appends a `FetchTrace` entry. Used by
   // worker `?debug=1` paths to surface the actual request pattern (count,
@@ -64,10 +44,6 @@ export interface FetchTrace {
    *  column chunks. */
   phase: 'metadata' | 'data'
 }
-
-export type ColumnFilter =
-  | { col: string; values: readonly string[] | readonly number[] }
-  | { col: string; range: { min: number; max: number } }
 
 const DEFAULT_INITIAL_FETCH_SIZE = 64 * 1024
 
@@ -120,15 +96,21 @@ export async function fetchShardData(
   return perRun.flat().map(normalizeRow)
 }
 
-// Read rows across all shard keys in a segment, concatenated. Keys fetched
-// in parallel; rows preserve per-shard order.
-export async function fetchSegmentRows(
-  storage: Storage,
-  keys: string[],
-  opts?: FetchOptions,
-): Promise<Row[]> {
-  const perShard = await Promise.all(keys.map(k => fetchShardData(storage, k, opts)))
-  return perShard.flat()
+// Build a `StorageBackend` that fetches parquet shards over a byte-level
+// `Storage`. Keys are interpreted as shard file paths; the planner provides
+// them in `segment.keys`. `keyTemplate` is accepted for future API symmetry
+// (D1Backend uses it for the table name) but currently unused by this
+// backend — the planner has already substituted templates into keys.
+export function parquetBackend(storage: Storage, _keyTemplate?: string): StorageBackend<FetchOptions> {
+  return {
+    name: 'parquet',
+    async fetchSegment(segment: FetchSegment, opts?: FetchOptions): Promise<Row[]> {
+      const perShard = await Promise.all(
+        segment.keys.map(k => fetchShardData(storage, k, opts)),
+      )
+      return perShard.flat()
+    },
+  }
 }
 
 // One RG predicate: given a row group's stats for `colIdx`, decide whether

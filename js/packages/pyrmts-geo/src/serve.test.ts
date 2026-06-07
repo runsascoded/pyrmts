@@ -1,6 +1,6 @@
 import { latLngToCell } from 'h3-js'
 import { parquetWriteBuffer } from 'hyparquet-writer'
-import { memStorage, type Pyramid } from 'pyrmts'
+import { memStorage, parquetBackend, type Pyramid } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
 import { serveGeoQuery } from './serve.js'
 
@@ -48,7 +48,7 @@ function buildPyramid(): Pyramid {
   const data = new Map<string, Uint8Array>()
   data.set('trips/h1/2026-01.parquet', tripsParquet())
   return {
-    storage: memStorage(data),
+    storage: parquetBackend(memStorage(data)),
     keyTemplate: 'trips/{tier}/{period}.parquet',
     axis: 'time',
     binCol: 'ts',
@@ -215,7 +215,7 @@ describe('serveGeoQuery', () => {
     // tolerateMissingShards we get an empty result (200) instead of an error.
     // earliestWatermarks pushes the planner's segment past the query range so
     // no shard keys are emitted at all, demonstrating the planner-level skip.
-    const pyramid: Pyramid = { ...buildPyramid(), storage: memStorage() }
+    const pyramid: Pyramid = { ...buildPyramid(), storage: parquetBackend(memStorage()) }
     const url = 'https://serve.example/?'
       + 'from=2026-01-01T00:00:00Z'
       + '&to=2026-01-01T02:00:00Z'

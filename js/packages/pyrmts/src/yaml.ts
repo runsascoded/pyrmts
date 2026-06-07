@@ -29,7 +29,7 @@ import type {
   MonoidName,
   Pyramid,
   Shard,
-  Storage,
+  StorageBackend,
   Tier,
 } from './types.js'
 
@@ -108,8 +108,8 @@ function parseGeo(raw: unknown): GeoSpec {
   return { cellCol, resolutions }
 }
 
-// Materialize a full Pyramid by wiring in a Storage impl.
-export function pyramidFromConfig(cfg: PyramidConfig, storage: Storage): Pyramid {
+// Materialize a full Pyramid by wiring in a StorageBackend.
+export function pyramidFromConfig(cfg: PyramidConfig, storage: StorageBackend): Pyramid {
   const p: Pyramid = {
     storage,
     keyTemplate: cfg.keyTemplate,

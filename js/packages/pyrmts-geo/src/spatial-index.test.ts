@@ -3,7 +3,7 @@
 // tests for the `getSpatialIndex` pyramid resolver and structural
 // back-compat of core `Pyramid` → `GeoPyramid`.
 
-import { memStorage, type Pyramid } from 'pyrmts'
+import { memStorage, parquetBackend, type Pyramid } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
 import { getSpatialIndex, h3Index } from './h3-index.js'
 import { assertSpatialIndex } from './spatial-index-conformance.js'
@@ -32,7 +32,7 @@ describe('h3Index: SpatialIndex conformance', () => {
 describe('getSpatialIndex: pyramid resolution', () => {
   function pyramid(geo: { cellCol: string; resolutions: number[]; index?: SpatialIndex } | undefined): GeoPyramid {
     return {
-      storage: memStorage(),
+      storage: parquetBackend(memStorage()),
       keyTemplate: 't/{tier}/{period}.parquet',
       axis: 'time',
       binCol: 'ts',
@@ -75,7 +75,7 @@ describe('getSpatialIndex: pyramid resolution', () => {
 describe('GeoPyramid structural compatibility with core Pyramid', () => {
   test('Pyramid without geo.index is assignable to GeoPyramid', () => {
     const core: Pyramid = {
-      storage: memStorage(),
+      storage: parquetBackend(memStorage()),
       keyTemplate: 't/{tier}/{period}.parquet',
       axis: 'time',
       binCol: 'ts',

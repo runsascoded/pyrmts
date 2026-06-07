@@ -1,5 +1,5 @@
 import { parquetWriteBuffer } from 'hyparquet-writer'
-import { memStorage, type Pyramid } from 'pyrmts'
+import { memStorage, parquetBackend, type Pyramid } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
 import { serveQuery } from './serve.js'
 
@@ -60,7 +60,7 @@ function buildPyramid(): Pyramid {
   data.set('awair-17617/h1/2026-01.parquet', awairH1Parquet())
   data.set('awair-17617/raw/2026-01.parquet', awairRawParquet())
   return {
-    storage: memStorage(data),
+    storage: parquetBackend(memStorage(data)),
     keyTemplate: 'awair-{device_id}/{tier}/{period}.parquet',
     axis: 'time',
     binCol: 'ts',
@@ -178,7 +178,7 @@ describe('serveQuery', () => {
     data.set('awair-17617/h1/2026-01.parquet', awairH1Parquet())
     const pyramid: Pyramid = {
       ...buildPyramid(),
-      storage: memStorage(data),
+      storage: parquetBackend(memStorage(data)),
     }
 
     // Query for device 99999 — its h1 shard doesn't exist. Without

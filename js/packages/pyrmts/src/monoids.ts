@@ -9,9 +9,9 @@
 // v0.1 ships `sum` and `count`. `histogram`/`topk`/`hll`/`tdigest` follow
 // the same shape but aren't implemented yet.
 
-import type { MonoidName } from './types.js'
+import type { MonoidName, Row } from './types.js'
 
-export type Row = Record<string, unknown>
+export type { Row } from './types.js'
 
 export interface Monoid {
   // Column suffixes for state storage. Single-column monoids use [''], so

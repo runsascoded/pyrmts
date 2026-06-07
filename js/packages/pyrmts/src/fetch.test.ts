@@ -2,9 +2,16 @@
 
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { describe, expect, test } from 'vitest'
-import { fetchSegmentRows, fetchShardData } from './fetch.js'
+import { fetchShardData, parquetBackend } from './fetch.js'
 import { memStorage } from './storage.js'
-import type { Storage } from './types.js'
+import type { FetchSegment, Storage, Tier } from './types.js'
+
+// Dummy segment fixture for parquet-backend tests — the parquet backend
+// only reads `keys`, so from/to/shardTier are placeholder values.
+const DUMMY_TIER: Tier = { name: 't', bin: '1h', shard: '1mo' }
+function seg(keys: string[]): FetchSegment {
+  return { from: new Date(0), to: new Date(0), shardTier: DUMMY_TIER, keys }
+}
 
 const ms = (iso: string): number => new Date(iso).getTime()
 
@@ -167,15 +174,15 @@ describe('fetchShardData: tolerate404', () => {
   })
 })
 
-describe('fetchSegmentRows: tolerate404', () => {
+describe('parquetBackend.fetchSegment: tolerate404', () => {
   test('concatenates present + tolerated-missing shards', async () => {
     const storage = memStorage()
     await storage.put('a.parquet', multiRgParquet())
     // 'b.parquet' intentionally missing
     await storage.put('c.parquet', multiRgParquet())
-    const rows = await fetchSegmentRows(
-      storage,
-      ['a.parquet', 'b.parquet', 'c.parquet'],
+    const backend = parquetBackend(storage)
+    const rows = await backend.fetchSegment(
+      seg(['a.parquet', 'b.parquet', 'c.parquet']),
       { tolerate404: true },
     )
     expect(rows).toHaveLength(20_000)
@@ -184,8 +191,9 @@ describe('fetchSegmentRows: tolerate404', () => {
   test('throws on first missing shard by default', async () => {
     const storage = memStorage()
     await storage.put('a.parquet', multiRgParquet())
+    const backend = parquetBackend(storage)
     await expect(
-      fetchSegmentRows(storage, ['a.parquet', 'b.parquet']),
+      backend.fetchSegment(seg(['a.parquet', 'b.parquet'])),
     ).rejects.toThrow('fetchShardData: object not found: b.parquet')
   })
 })

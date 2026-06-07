@@ -11,9 +11,9 @@
 //   <dim>=<v>    one per pyramid dim used in the key template
 
 import {
-  fetchSegmentRows,
   stitch,
   type QueryPlan,
+  type Row,
   type SmoothingSpec,
   type SmoothMode,
 } from 'pyrmts'
@@ -105,13 +105,13 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
 
     const index = getSpatialIndex(pyramid)
     const shardRows = await Promise.all(
-      plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys, {
+      plan.segments.map(seg => pyramid.storage.fetchSegment(seg, {
         binCol: pyramid.binCol,
         range: { from: seg.from, to: seg.to },
         ...(opts.tolerateMissingShards !== undefined ? { tolerate404: opts.tolerateMissingShards } : {}),
       })),
     )
-    const filteredRows = shardRows.map(rows =>
+    const filteredRows = shardRows.map((rows: Row[]) =>
       filterCellsAndRes(rows, pyramid.geo!.cellCol, plan.outputRes, plan.outputCells, index),
     )
 

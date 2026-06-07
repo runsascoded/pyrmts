@@ -1,12 +1,12 @@
 // End-to-end geo pipeline: parquet shard with multiple resolutions →
-// memStorage → planGeoQuery → fetchSegmentRows → filterCellsAndRes →
+// memStorage → planGeoQuery → pyramid.storage.fetchSegment → filterCellsAndRes →
 // stitch. Validates the full read path for a ctbk-trips-style pyramid.
 
 import { latLngToCell } from 'h3-js'
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import {
-  fetchSegmentRows,
   memStorage,
+  parquetBackend,
   stitch,
   type Pyramid,
 } from 'pyrmts'
@@ -68,7 +68,7 @@ function buildPyramid(): Pyramid {
   const data = new Map<string, Uint8Array>()
   data.set('trips/h1/2026-01.parquet', ctbkTripsParquet())
   return {
-    storage: memStorage(data),
+    storage: parquetBackend(memStorage(data)),
     keyTemplate: 'trips/{tier}/{period}.parquet',
     axis: 'time',
     binCol: 'ts',
@@ -97,7 +97,7 @@ describe('pyrmts-geo end-to-end', () => {
     expect(plan.outputRes).toBe(9)
     expect(plan.outputTier.name).toBe('h1')
 
-    const rows = await fetchSegmentRows(pyramid.storage, plan.segments[0]!.keys)
+    const rows = await pyramid.storage.fetchSegment(plan.segments[0]!)
     const filtered = filterCellsAndRes(rows, 'h3_cell', plan.outputRes, plan.outputCells)
 
     // The shard contains all 3 stations' cells at res 9 — they should all
@@ -144,7 +144,7 @@ describe('pyrmts-geo end-to-end', () => {
     })
     expect(plan.outputRes).toBe(7)
 
-    const rows = await fetchSegmentRows(pyramid.storage, plan.segments[0]!.keys)
+    const rows = await pyramid.storage.fetchSegment(plan.segments[0]!)
     const filtered = filterCellsAndRes(rows, 'h3_cell', plan.outputRes, plan.outputCells)
 
     const stitched = stitch({

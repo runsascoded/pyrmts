@@ -1,9 +1,9 @@
 // End-to-end read pipeline test: parquet shard → memStorage → planQuery →
-// fetchSegmentRows → stitch. Validates that all the slices compose.
+// pyramid.storage.fetchSegment → stitch. Validates that all the slices compose.
 
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { describe, expect, test } from 'vitest'
-import { fetchSegmentRows } from './fetch.js'
+import { parquetBackend } from './fetch.js'
 import { planQuery } from './planner.js'
 import { memStorage } from './storage.js'
 import { stitch } from './stitch.js'
@@ -34,7 +34,7 @@ function awairH1Parquet(): Uint8Array {
 }
 
 const awair: Pyramid = {
-  storage: memStorage(),  // replaced per test
+  storage: parquetBackend(memStorage()),  // replaced per test
   keyTemplate: 'awair-{device_id}/{tier}/{period}.parquet',
   axis: 'time',
   binCol: 'ts',
@@ -79,7 +79,7 @@ describe('end-to-end pipeline', () => {
     // Stand up an in-memory pyramid with one h1 shard.
     const data = new Map<string, Uint8Array>()
     data.set('awair-17617/h1/2026-01.parquet', awairH1Parquet())
-    const pyramid: Pyramid = { ...awair, storage: memStorage(data) }
+    const pyramid: Pyramid = { ...awair, storage: parquetBackend(memStorage(data)) }
 
     const plan = planQuery(pyramid, {
       range: { from: new Date('2026-01-01T00:00:00Z'), to: new Date('2026-01-01T03:00:00Z') },
@@ -91,7 +91,7 @@ describe('end-to-end pipeline', () => {
     expect(plan.segments[0]!.keys).toEqual(['awair-17617/h1/2026-01.parquet'])
 
     const shardRows = await Promise.all(
-      plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys)),
+      plan.segments.map(seg => pyramid.storage.fetchSegment(seg)),
     )
 
     const out = stitch({ pyramid, plan, shardRows })
@@ -125,7 +125,7 @@ describe('end-to-end pipeline', () => {
     const data = new Map<string, Uint8Array>()
     data.set('avail/raw/2026-01-01T00.parquet', availRawParquet())
     const pyramid: Pyramid = {
-      storage: memStorage(data),
+      storage: parquetBackend(memStorage(data)),
       keyTemplate: 'avail/{tier}/{period}.parquet',
       axis: 'time',
       binCol: 'ts',
@@ -149,7 +149,7 @@ describe('end-to-end pipeline', () => {
     expect(plan.segments[0]!.reaggregate).toBe(true)
 
     const shardRows = await Promise.all(
-      plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys)),
+      plan.segments.map(seg => pyramid.storage.fetchSegment(seg)),
     )
     const out = stitch({ pyramid, plan, shardRows })
 

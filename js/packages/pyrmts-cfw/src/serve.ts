@@ -12,7 +12,6 @@
 // them lazily on each request, or precompute and pass the map directly.
 
 import {
-  fetchSegmentRows,
   planQuery,
   stitch,
   type Pyramid,
@@ -93,7 +92,7 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
       ...(smoothMode !== undefined ? { smoothMode } : {}),
     })
     const shardRows = await Promise.all(
-      plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys, {
+      plan.segments.map(seg => pyramid.storage.fetchSegment(seg, {
         binCol: pyramid.binCol,
         range: { from: seg.from, to: seg.to },
         ...(opts.tolerateMissingShards !== undefined ? { tolerate404: opts.tolerateMissingShards } : {}),

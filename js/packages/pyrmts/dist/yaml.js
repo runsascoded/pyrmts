@@ -73,7 +73,7 @@ function parseGeo(raw) {
     }
     return { cellCol, resolutions };
 }
-// Materialize a full Pyramid by wiring in a Storage impl.
+// Materialize a full Pyramid by wiring in a StorageBackend.
 export function pyramidFromConfig(cfg, storage) {
     const p = {
         storage,

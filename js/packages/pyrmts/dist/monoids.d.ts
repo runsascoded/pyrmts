@@ -1,5 +1,5 @@
-import type { MonoidName } from './types.js';
-export type Row = Record<string, unknown>;
+import type { MonoidName, Row } from './types.js';
+export type { Row } from './types.js';
 export interface Monoid {
     stateSuffixes: string[];
     combine(target: Row, source: Row, metricName: string): void;

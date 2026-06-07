@@ -1,4 +1,4 @@
-import type { Axis, Dim, GeoSpec, Metric, Pyramid, Storage, Tier } from './types.js';
+import type { Axis, Dim, GeoSpec, Metric, Pyramid, StorageBackend, Tier } from './types.js';
 export interface PyramidConfig {
     storage: {
         type: string;
@@ -13,5 +13,5 @@ export interface PyramidConfig {
     geo?: GeoSpec;
 }
 export declare function parsePyramidYaml(text: string): PyramidConfig;
-export declare function pyramidFromConfig(cfg: PyramidConfig, storage: Storage): Pyramid;
+export declare function pyramidFromConfig(cfg: PyramidConfig, storage: StorageBackend): Pyramid;
 //# sourceMappingURL=yaml.d.ts.map

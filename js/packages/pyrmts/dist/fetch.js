@@ -46,11 +46,19 @@ export async function fetchShardData(storage, key, opts) {
     const perRun = await Promise.all(runs.map(({ rowStart, rowEnd }) => parquetReadObjects({ file, metadata, rowStart, rowEnd })));
     return perRun.flat().map(normalizeRow);
 }
-// Read rows across all shard keys in a segment, concatenated. Keys fetched
-// in parallel; rows preserve per-shard order.
-export async function fetchSegmentRows(storage, keys, opts) {
-    const perShard = await Promise.all(keys.map(k => fetchShardData(storage, k, opts)));
-    return perShard.flat();
+// Build a `StorageBackend` that fetches parquet shards over a byte-level
+// `Storage`. Keys are interpreted as shard file paths; the planner provides
+// them in `segment.keys`. `keyTemplate` is accepted for future API symmetry
+// (D1Backend uses it for the table name) but currently unused by this
+// backend — the planner has already substituted templates into keys.
+export function parquetBackend(storage, _keyTemplate) {
+    return {
+        name: 'parquet',
+        async fetchSegment(segment, opts) {
+            const perShard = await Promise.all(segment.keys.map(k => fetchShardData(storage, k, opts)));
+            return perShard.flat();
+        },
+    };
 }
 // Walk the file's row groups, pick those whose stats AND-satisfy every
 // predicate built from `opts`, and coalesce adjacent picked RGs into runs

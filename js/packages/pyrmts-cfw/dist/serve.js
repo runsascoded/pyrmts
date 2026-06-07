@@ -10,7 +10,7 @@
 // Watermarks aren't a query param — they're consumer-supplied (this worker
 // knows where its raw shards end). Pass a `watermarks` callback to compute
 // them lazily on each request, or precompute and pass the map directly.
-import { fetchSegmentRows, planQuery, stitch, } from 'pyrmts';
+import { planQuery, stitch, } from 'pyrmts';
 export async function serveQuery(opts) {
     const { pyramid, request, cors } = opts;
     const url = new URL(request.url);
@@ -55,7 +55,7 @@ export async function serveQuery(opts) {
             ...(smoothing !== undefined ? { smoothing } : {}),
             ...(smoothMode !== undefined ? { smoothMode } : {}),
         });
-        const shardRows = await Promise.all(plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys, {
+        const shardRows = await Promise.all(plan.segments.map(seg => pyramid.storage.fetchSegment(seg, {
             binCol: pyramid.binCol,
             range: { from: seg.from, to: seg.to },
             ...(opts.tolerateMissingShards !== undefined ? { tolerate404: opts.tolerateMissingShards } : {}),

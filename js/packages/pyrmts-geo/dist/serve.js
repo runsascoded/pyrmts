@@ -9,7 +9,7 @@
 //   bbox         "minLat,minLng,maxLat,maxLng" (required)
 //   cell_budget  max output cells (default 1024)
 //   <dim>=<v>    one per pyramid dim used in the key template
-import { fetchSegmentRows, stitch, } from 'pyrmts';
+import { stitch, } from 'pyrmts';
 import { getSpatialIndex } from './h3-index.js';
 import { filterCellsAndRes, planGeoQuery } from './planner.js';
 export async function serveGeoQuery(opts) {
@@ -71,12 +71,12 @@ export async function serveGeoQuery(opts) {
             ...(smoothMode !== undefined ? { smoothMode } : {}),
         });
         const index = getSpatialIndex(pyramid);
-        const shardRows = await Promise.all(plan.segments.map(seg => fetchSegmentRows(pyramid.storage, seg.keys, {
+        const shardRows = await Promise.all(plan.segments.map(seg => pyramid.storage.fetchSegment(seg, {
             binCol: pyramid.binCol,
             range: { from: seg.from, to: seg.to },
             ...(opts.tolerateMissingShards !== undefined ? { tolerate404: opts.tolerateMissingShards } : {}),
         })));
-        const filteredRows = shardRows.map(rows => filterCellsAndRes(rows, pyramid.geo.cellCol, plan.outputRes, plan.outputCells, index));
+        const filteredRows = shardRows.map((rows) => filterCellsAndRes(rows, pyramid.geo.cellCol, plan.outputRes, plan.outputCells, index));
         // Project the geo plan down to a plain QueryPlan for stitch (which
         // lives in pyrmts core and doesn't know about geo fields).
         const timePlan = {

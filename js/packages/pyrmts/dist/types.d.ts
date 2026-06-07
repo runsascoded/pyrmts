@@ -31,8 +31,38 @@ export interface Storage {
     put(key: string, bytes: Uint8Array): Promise<void>;
     list(prefix: string): AsyncIterable<string>;
 }
+export type Row = Record<string, unknown>;
+export interface FetchSegment {
+    from: Date;
+    to: Date;
+    shardTier: Tier;
+    keys: readonly string[];
+}
+export interface StorageBackend<Opts = FetchOptionsBase> {
+    readonly name: string;
+    fetchSegment(segment: FetchSegment, opts?: Opts): Promise<Row[]>;
+}
+export type ColumnFilter = {
+    col: string;
+    values: readonly string[] | readonly number[];
+} | {
+    col: string;
+    range: {
+        min: number;
+        max: number;
+    };
+};
+export interface FetchOptionsBase {
+    binCol?: string;
+    range?: {
+        from: Date;
+        to: Date;
+    };
+    filters?: ColumnFilter[];
+    tolerate404?: boolean;
+}
 export interface Pyramid {
-    storage: Storage;
+    storage: StorageBackend;
     keyTemplate: string;
     axis: Axis;
     binCol: string;

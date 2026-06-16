@@ -37,10 +37,27 @@ export interface PlanGeoQueryInput {
   range: { from: Date; to: Date }
   // Max output time bins (same as core planQuery).
   binBudget: number
-  bbox: BBox
-  // Max output h3 cells. Planner picks the finest materialized resolution
-  // whose cell count in `bbox` fits this budget.
-  cellBudget: number
+  // Exactly one of {bbox + cellBudget, outputCells} must be provided.
+  //
+  // `bbox` + `cellBudget`: planner runs `pickResolution` to pick the finest
+  // materialized resolution whose `bboxToCells` count fits `cellBudget`,
+  // and uses that cell list. The classic geo-query path.
+  //
+  // `outputCells`: caller supplies a pre-computed cover (e.g.,
+  // `minimalCover` output for an I/E station set) and the planner skips
+  // `pickResolution` entirely. `RegionCoverer` allocates aggressively
+  // (esp. on S2 at fine levels); for callers that already have a cover
+  // this short-circuits the redundant work and the V8 GC tail it triggers
+  // at the next async safepoint (see `specs/done/plan-geo-query-precomputed-cover.md`).
+  bbox?: BBox
+  cellBudget?: number
+  // Pre-computed cover; bypasses `pickResolution`. `res` is the cover's
+  // resolution if single-level (mirrors what `pickResolution` would
+  // return); pass `-1` for mixed-resolution covers (e.g., S2 `minimalCover`
+  // output with parent + leaf entries). Downstream `filterCellsAndRes`
+  // checks against `outputRes` and only works for single-level covers;
+  // mixed-resolution covers must be filtered via `filterCellsByCover`.
+  outputCells?: { res: number; cells: readonly string[] }
   watermarks?: Record<string, Date>
   earliestWatermarks?: Record<string, Date>
   filter?: Record<string, string | number>
@@ -50,14 +67,20 @@ export interface PlanGeoQueryInput {
 }
 
 export interface GeoPlanSegment extends PlanSegment {
-  // h3 cells (at outputRes) overlapping `bbox`. Same list per segment —
-  // present here for read-time predicate pushdown convenience.
+  // Spatial cells (at `outputRes`) for the segment — same list per segment;
+  // present here for read-time predicate pushdown convenience. Source is
+  // either `pickResolution(bbox)` or a caller-supplied `outputCells` cover.
   cells: string[]
 }
 
 export interface GeoQueryPlan extends Omit<QueryPlan, 'segments'> {
-  outputRes: number                  // h3 resolution chosen by the planner
-  outputCells: string[]              // h3 cells (at outputRes) covering bbox
+  // Spatial resolution chosen by `pickResolution`, or `outputCells.res`
+  // when the caller supplied a pre-computed cover. `-1` is conventional
+  // for mixed-resolution covers (see `PlanGeoQueryInput.outputCells`).
+  outputRes: number
+  // Cell list to push down at read time. Single-resolution unless
+  // `outputRes === -1`, in which case use `filterCellsByCover` downstream.
+  outputCells: string[]
   segments: GeoPlanSegment[]
 }
 
@@ -71,6 +94,17 @@ export function planGeoQuery(
   const resolutions = pyramid.geo.resolutions
   if (resolutions.length === 0) {
     throw new Error('planGeoQuery: pyramid.geo.resolutions is empty')
+  }
+  const haveBBox = input.bbox !== undefined
+  const haveCells = input.outputCells !== undefined
+  if (!haveBBox && !haveCells) {
+    throw new Error('planGeoQuery: pass either `bbox` or `outputCells`')
+  }
+  if (haveBBox && haveCells) {
+    throw new Error('planGeoQuery: pass `bbox` xor `outputCells`, not both')
+  }
+  if (haveBBox && input.cellBudget === undefined) {
+    throw new Error('planGeoQuery: `cellBudget` required when `bbox` is provided')
   }
   const index = getSpatialIndex(pyramid)
 
@@ -86,8 +120,11 @@ export function planGeoQuery(
   })
 
   // Pick the finest materialized resolution whose cells-in-bbox fits the
-  // cell budget. `resolutions` is finest-first.
-  const { outputRes, outputCells } = pickResolution(index, input.bbox, resolutions, input.cellBudget)
+  // cell budget. `resolutions` is finest-first. Skipped when the caller
+  // supplied `outputCells` directly.
+  const { outputRes, outputCells } = input.outputCells !== undefined
+    ? { outputRes: input.outputCells.res, outputCells: [...input.outputCells.cells] }
+    : pickResolution(index, input.bbox!, resolutions, input.cellBudget!)
 
   // Each segment carries the same cell list — every materialized resolution
   // lives in every shard, so the cell predicate is the same regardless of

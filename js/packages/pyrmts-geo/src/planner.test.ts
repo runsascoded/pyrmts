@@ -1,9 +1,10 @@
 import { getResolution, latLngToCell } from 'h3-js'
 import { memStorage, type Pyramid } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
+import { h3Index } from './h3-index.js'
 import { bboxToCells, filterCellsAndRes, planGeoQuery } from './planner.js'
 import { s2Index } from './s2-index.js'
-import type { GeoPyramid } from './spatial-index.js'
+import type { GeoPyramid, SpatialIndex } from './spatial-index.js'
 
 const d = (iso: string): Date => new Date(iso)
 const mockStorage = memStorage()
@@ -236,5 +237,123 @@ describe('planGeoQuery: s2-backed pyramid', () => {
     ]
     const filtered = filterCellsAndRes(rows, 's2_cell', plan.outputRes, [cellAtPlan], s2Index)
     expect(filtered).toEqual([{ s2_cell: cellAtPlan, ts: 1, count: 5 }])
+  })
+})
+
+describe('planGeoQuery: pre-computed outputCells', () => {
+  // Wrap a backend so the test can assert `bboxToCells` was never called
+  // when the caller supplies `outputCells`. Counting wrapper around
+  // `h3Index` — every other method delegates unchanged.
+  function countingIndex(): { index: SpatialIndex; calls: { bboxToCells: number } } {
+    const calls = { bboxToCells: 0 }
+    const index: SpatialIndex = {
+      name: h3Index.name,
+      maxLevel: h3Index.maxLevel,
+      latLngToCell: (lat, lng, level) => h3Index.latLngToCell(lat, lng, level),
+      cellLevel: c => h3Index.cellLevel(c),
+      cellToParent: (c, level) =>
+        level !== undefined ? h3Index.cellToParent(c, level) : h3Index.cellToParent(c),
+      bboxToCells: (bbox, level) => {
+        calls.bboxToCells += 1
+        return h3Index.bboxToCells(bbox, level)
+      },
+      cellInSet: (c, level, set) => h3Index.cellInSet(c, level, set),
+      minimalCover: (include, system, opts) => h3Index.minimalCover(include, system, opts),
+    }
+    return { index, calls }
+  }
+
+  function pyramidWithIndex(geoResolutions: number[], index: SpatialIndex): GeoPyramid {
+    return {
+      storage: mockStorage,
+      keyTemplate: 'trips/{tier}/{period}.parquet',
+      axis: 'time',
+      binCol: 'ts',
+      dims: [],
+      metrics: [{ name: 'count', monoid: 'count' }],
+      tiers: [{ name: 'h1', bin: '1h', shard: '1mo' }],
+      geo: { cellCol: 'h3_cell', resolutions: geoResolutions, index },
+    }
+  }
+
+  test('honors caller-supplied cells verbatim and reports the supplied res', () => {
+    const { index, calls } = countingIndex()
+    const pyramid = pyramidWithIndex([9, 7, 5], index)
+    const cells = [
+      latLngToCell(40.74, -73.99, 7),
+      latLngToCell(40.72, -73.97, 7),
+    ]
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      outputCells: { res: 7, cells },
+    })
+    expect(plan.outputRes).toBe(7)
+    expect(plan.outputCells).toEqual(cells)
+    // `bboxToCells` must not be invoked when the caller supplied cells —
+    // the whole point of this code path is to skip `pickResolution`.
+    expect(calls.bboxToCells).toBe(0)
+    // Each segment carries the same cell list.
+    for (const seg of plan.segments) {
+      expect(seg.cells).toEqual(cells)
+    }
+  })
+
+  test('passes through res=-1 for mixed-resolution covers', () => {
+    const { index } = countingIndex()
+    const pyramid = pyramidWithIndex([9, 7, 5], index)
+    const mixedCells = [
+      latLngToCell(40.74, -73.99, 7),    // coarse parent
+      latLngToCell(40.72, -73.97, 9),    // fine leaf
+    ]
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      outputCells: { res: -1, cells: mixedCells },
+    })
+    expect(plan.outputRes).toBe(-1)
+    expect(plan.outputCells).toEqual(mixedCells)
+  })
+
+  test('returned outputCells is a fresh array (caller can mutate its input)', () => {
+    const pyramid = pyramidWithIndex([7], countingIndex().index)
+    const cells: readonly string[] = [latLngToCell(40.74, -73.99, 7)]
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      outputCells: { res: 7, cells },
+    })
+    // Mutating the plan's outputCells must not affect the caller's
+    // readonly input (defensive copy on input).
+    plan.outputCells.push('decoy')
+    expect(cells).toHaveLength(1)
+  })
+
+  test('throws when neither `bbox` nor `outputCells` provided', () => {
+    const pyramid = pyramidWithIndex([7], countingIndex().index)
+    expect(() => planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+    })).toThrow('pass either `bbox` or `outputCells`')
+  })
+
+  test('throws when both `bbox` and `outputCells` provided', () => {
+    const pyramid = pyramidWithIndex([7], countingIndex().index)
+    expect(() => planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: NYC,
+      cellBudget: 100,
+      outputCells: { res: 7, cells: [latLngToCell(40.74, -73.99, 7)] },
+    })).toThrow('pass `bbox` xor `outputCells`, not both')
+  })
+
+  test('throws when `bbox` provided without `cellBudget`', () => {
+    const pyramid = pyramidWithIndex([7], countingIndex().index)
+    expect(() => planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
+      binBudget: 100,
+      bbox: NYC,
+    })).toThrow('`cellBudget` required when `bbox` is provided')
   })
 })

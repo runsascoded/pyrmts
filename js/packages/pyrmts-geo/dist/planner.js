@@ -28,6 +28,17 @@ export function planGeoQuery(pyramid, input) {
     if (resolutions.length === 0) {
         throw new Error('planGeoQuery: pyramid.geo.resolutions is empty');
     }
+    const haveBBox = input.bbox !== undefined;
+    const haveCells = input.outputCells !== undefined;
+    if (!haveBBox && !haveCells) {
+        throw new Error('planGeoQuery: pass either `bbox` or `outputCells`');
+    }
+    if (haveBBox && haveCells) {
+        throw new Error('planGeoQuery: pass `bbox` xor `outputCells`, not both');
+    }
+    if (haveBBox && input.cellBudget === undefined) {
+        throw new Error('planGeoQuery: `cellBudget` required when `bbox` is provided');
+    }
     const index = getSpatialIndex(pyramid);
     // Delegate the time-axis decisions to the core planner.
     const timePlan = planQuery(pyramid, {
@@ -40,8 +51,11 @@ export function planGeoQuery(pyramid, input) {
         ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),
     });
     // Pick the finest materialized resolution whose cells-in-bbox fits the
-    // cell budget. `resolutions` is finest-first.
-    const { outputRes, outputCells } = pickResolution(index, input.bbox, resolutions, input.cellBudget);
+    // cell budget. `resolutions` is finest-first. Skipped when the caller
+    // supplied `outputCells` directly.
+    const { outputRes, outputCells } = input.outputCells !== undefined
+        ? { outputRes: input.outputCells.res, outputCells: [...input.outputCells.cells] }
+        : pickResolution(index, input.bbox, resolutions, input.cellBudget);
     // Each segment carries the same cell list — every materialized resolution
     // lives in every shard, so the cell predicate is the same regardless of
     // which (finer) time tier the segment reads from.

@@ -8,8 +8,12 @@ export interface PlanGeoQueryInput {
         to: Date;
     };
     binBudget: number;
-    bbox: BBox;
-    cellBudget: number;
+    bbox?: BBox;
+    cellBudget?: number;
+    outputCells?: {
+        res: number;
+        cells: readonly string[];
+    };
     watermarks?: Record<string, Date>;
     earliestWatermarks?: Record<string, Date>;
     filter?: Record<string, string | number>;

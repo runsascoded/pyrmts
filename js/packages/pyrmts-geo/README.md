@@ -84,6 +84,22 @@ const plan = planGeoQuery(pyramid, {
 
 The planner picks the finest materialized resolution whose `bboxToCells` count fits the budget.
 
+### Pre-computed cover (skip `pickResolution`)
+
+When the caller already has a cell list — e.g., the FE ran `minimalCover` and serialized the cover in the query — pass `outputCells` instead of `bbox` + `cellBudget`. The planner skips `pickResolution` entirely; downstream still uses the cell list for predicate pushdown.
+
+```ts
+const plan = planGeoQuery(pyramid, {
+  range: { from, to },
+  binBudget: 256,
+  outputCells: { res: 12, cells: precomputedCells },        // single-level
+  // or, for a mixed-level cover (S2 `minimalCover` output):
+  // outputCells: { res: -1, cells: [...cover.include, ...cover.exclude] },
+})
+```
+
+The `bbox + cellBudget` and `outputCells` forms are mutually exclusive; pass exactly one. `pickResolution` (and its `RegionCoverer` allocation tail) only runs in the `bbox` form, so consumers that already have a cover get a real CPU + heap win — relevant for Cloudflare Workers where V8 GC compounds at the next async safepoint (e.g., `await fetchSegment(...)`).
+
 ### Station-set query (multi-resolution cover)
 
 ```ts

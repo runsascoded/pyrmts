@@ -157,7 +157,7 @@ isCellInCover(s2Index, '89c2594c4', cover)  // true if cover.include covers the 
 ## Consumers
 
 - **[`ctbk`](https://github.com/ryan-williams/ctbk)** — bike-share rides + station availability. Uses `s2Index` for multi-resolution station-set covers.
-- **[`crashes`](https://github.com/runsascoded/crashes)** — NYC vehicle-crash data. Uses `h3Index` for fixed-level viz.
+- **[`nj-crashes`](https://github.com/hudcostreets/nj-crashes)** — NJ State Police fatal + NJDOT crash data, with a Hudson County map view. Uses H3 directly today (own `h3cover.ts`); planned migration to `pyrmts-geo` (likely staying on `h3Index` for fixed-level viz).
 
 ## See also
 

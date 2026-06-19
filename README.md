@@ -36,7 +36,7 @@ js/             # pnpm workspace
 - **`s2Index`** — recommended primary. S2 quadtree (branching 4), exact lineage, optimal `minimalCover` DP. Built on [`s2js`](https://github.com/missinglink/s2js); Cloudflare-Workers compatible.
 - **`h3Index`** — default for back-compat with H3-based pyramids. Recommended for **fixed-level** queries; mixed-resolution `minimalCover` is approximate (H3 Boundary-Triangle mismatches affect ~7% of points at each level transition).
 
-Used by [ctbk](https://github.com/ryan-williams/ctbk) (S2 multi-resolution rides) and [crashes](https://github.com/runsascoded/crashes) (H3 fixed-level).
+Used by [ctbk](https://github.com/ryan-williams/ctbk) (S2 multi-resolution rides); [nj-crashes](https://github.com/hudcostreets/nj-crashes) is a planned consumer (uses H3 directly today via its own `h3cover.ts`).
 
 ## Consume from npm dist branch
 

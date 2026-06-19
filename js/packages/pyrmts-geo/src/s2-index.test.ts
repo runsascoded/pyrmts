@@ -153,6 +153,26 @@ describe('s2Index: bboxToCells coverage', () => {
       expect(s2Index.cellLevel(cell)).toBe(level)
     }
   })
+
+  // Repro for the OOM-triggering URL from `specs/done/lower-s2-coverer-maxcells.md`
+  // (200m × 220m bbox over Times Square at S2 L15 — the prod 1M cap let the
+  // `RegionCoverer` candidate-priority-queue blow the CFW 128MB heap).
+  // Asserts the cover stays small after the cap lowering: shape (level,
+  // contains-center) plus a soft size bound.
+  test('narrow bbox at fine level → small cover (post-cap-lower regression guard)', () => {
+    const narrow: BBox = { minLat: 40.749, maxLat: 40.751, minLng: -73.991, maxLng: -73.989 }
+    const level = 15
+    const cells = s2Index.bboxToCells(narrow, level)
+    expect(cells.length).toBeGreaterThan(0)
+    // 0.002° × 0.002° at lat 40.75 is ~220m × 170m. S2 L15 cells are ~150m
+    // wide → expect under 100 cells.
+    expect(cells.length).toBeLessThan(100)
+    for (const cell of cells) {
+      expect(s2Index.cellLevel(cell)).toBe(level)
+    }
+    const centerCell = s2Index.latLngToCell(40.750, -73.990, level)
+    expect(cells).toContain(centerCell)
+  })
 })
 
 describe('s2Index: cellInSet — deep mixed-resolution lineage walks', () => {

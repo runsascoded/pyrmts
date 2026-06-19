@@ -102,7 +102,7 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
     result = {
       records,
       plan: {
-        outputTier: plan.outputTier.name,
+        ...(plan.outputTier !== undefined ? { outputTier: plan.outputTier.name } : {}),
         outputBin: plan.outputBin,
         authoritativeEnd: plan.authoritativeEnd?.toISOString() ?? null,
         smoothing: plan.smoothing,

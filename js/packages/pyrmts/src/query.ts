@@ -25,7 +25,10 @@ export interface FetchPyramidQueryInput {
 }
 
 export interface PlanMeta {
-  outputTier: string
+  // Omitted when the server-side planner ran ragged decomposition (no single
+  // tier serves the query); consumers should rely on `outputBin` for the
+  // output width and treat `outputTier` as a display affordance only.
+  outputTier?: string
   outputBin: string
   authoritativeEnd: string | null
   smoothing: {

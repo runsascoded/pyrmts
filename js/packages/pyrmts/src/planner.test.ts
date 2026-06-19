@@ -504,3 +504,285 @@ describe('planQuery: smoothing', () => {
     expect(plan.segments[0]!.from.toISOString()).toBe('2026-01-02T00:00:00.000Z')
   })
 })
+
+describe('planQuery: targetBin (ragged decomposition)', () => {
+  // Pyramid used for ragged-decomp tests: closely-spaced fine-tier fixed-width
+  // bins so DP packs them across phase classes within a 5min window.
+  const ragged: Pyramid = {
+    storage: mockStorage,
+    keyTemplate: 'r/{tier}/{period}.parquet',
+    axis: 'time',
+    binCol: 'ts',
+    dims: [],
+    metrics: [{ name: 'v', monoid: 'sum' }],
+    tiers: [
+      { name: 't1', bin: '1min', shard: '1d' },
+      { name: 't2', bin: '2min', shard: '1d' },
+      { name: 't3', bin: '3min', shard: '1d' },
+      { name: 't5', bin: '5min', shard: '1d' },
+    ],
+  }
+
+  // Atomized view of segments for DP-output assertions: each entry is one
+  // tier-bin atom (no coalescing). Use to compare against the expected
+  // per-output-bin DP path.
+  interface Atom {
+    from: string
+    to: string
+    tier: string
+  }
+  function atoms(plan: ReturnType<typeof planQuery>): Atom[] {
+    const out: Atom[] = []
+    for (const s of plan.segments) {
+      const tierMs = parseInt(/^(\d+)/.exec(s.shardTier.bin)![1]!, 10) * 60_000
+      const fromMs = s.from.getTime()
+      const toMs = s.to.getTime()
+      for (let t = fromMs; t < toMs; t += tierMs) {
+        out.push({
+          from: new Date(t).toISOString(),
+          to: new Date(t + tierMs).toISOString(),
+          tier: s.shardTier.name,
+        })
+      }
+    }
+    return out
+  }
+
+  test('targetBin matching a stored tier exactly → outputTier set, single coalesced segment', () => {
+    // targetBin=5min, eligible tiers={1,2,3,5}. DP per output bin picks 5min
+    // (1 atom). After coalescing: one segment covering the full range.
+    const plan = planQuery(ragged, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T00:15:00Z') },
+      binBudget: 1000,
+      targetBin: '5min',
+    })
+    expect(plan.outputBin).toBe('5min')
+    expect(plan.outputTier?.name).toBe('t5')
+    expect(segments(plan)).toEqual([{
+      from: '2026-01-01T00:00:00.000Z',
+      to:   '2026-01-01T00:15:00.000Z',
+      tier: 't5',
+      keys: ['r/t5/2026-01-01.parquet'],
+      reaggregate: false,
+    }])
+  })
+
+  test('targetBin not in tiers → outputTier omitted, DP packs per bin', () => {
+    // targetBin=5min, eligible={1,2,3}. DP per bin (binStart at multiples of
+    // 5min mod LCM(1,2,3,5)=30min, 6 distinct phases).
+    // Phase analysis for the 6 /5min bins in [0min, 30min):
+    //   [0,5):  3@0, 1@3, 1@4
+    //   [5,10): 1@5, 3@6, 1@9
+    //   [10,15): 1@10, 1@11, 3@12
+    //   [15,20): 3@15, 1@18, 1@19
+    //   [20,25): 1@20, 3@21, 1@24
+    //   [25,30): 1@25, 1@26, 3@27
+    const ragged3: Pyramid = {
+      ...ragged,
+      tiers: ragged.tiers.filter(t => t.name !== 't5' && t.name !== 't2'),
+    }
+    const plan = planQuery(ragged3, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T00:30:00Z') },
+      binBudget: 1000,
+      targetBin: '5min',
+    })
+    expect(plan.outputBin).toBe('5min')
+    expect(plan.outputTier).toBeUndefined()
+    expect(atoms(plan)).toEqual([
+      { from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T00:03:00.000Z', tier: 't3' },
+      { from: '2026-01-01T00:03:00.000Z', to: '2026-01-01T00:04:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:04:00.000Z', to: '2026-01-01T00:05:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:05:00.000Z', to: '2026-01-01T00:06:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:06:00.000Z', to: '2026-01-01T00:09:00.000Z', tier: 't3' },
+      { from: '2026-01-01T00:09:00.000Z', to: '2026-01-01T00:10:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:10:00.000Z', to: '2026-01-01T00:11:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:11:00.000Z', to: '2026-01-01T00:12:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:12:00.000Z', to: '2026-01-01T00:15:00.000Z', tier: 't3' },
+      { from: '2026-01-01T00:15:00.000Z', to: '2026-01-01T00:18:00.000Z', tier: 't3' },
+      { from: '2026-01-01T00:18:00.000Z', to: '2026-01-01T00:19:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:19:00.000Z', to: '2026-01-01T00:20:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:20:00.000Z', to: '2026-01-01T00:21:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:21:00.000Z', to: '2026-01-01T00:24:00.000Z', tier: 't3' },
+      { from: '2026-01-01T00:24:00.000Z', to: '2026-01-01T00:25:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:25:00.000Z', to: '2026-01-01T00:26:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:26:00.000Z', to: '2026-01-01T00:27:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:27:00.000Z', to: '2026-01-01T00:30:00.000Z', tier: 't3' },
+    ])
+  })
+
+  test('coalesces adjacent same-tier atoms across output-bin boundaries', () => {
+    // The /3min atoms at [12,15) (in bin [10,15)) and [15,18) (in bin [15,20))
+    // are adjacent same-tier; they coalesce to one [12,18) segment spanning
+    // two output bins. The stitcher derives output bin from row.ts at
+    // floor-to-5min, so this is fine.
+    const ragged3: Pyramid = {
+      ...ragged,
+      tiers: ragged.tiers.filter(t => t.name !== 't5' && t.name !== 't2'),
+    }
+    const plan = planQuery(ragged3, {
+      range: { from: d('2026-01-01T00:10:00Z'), to: d('2026-01-01T00:20:00Z') },
+      binBudget: 1000,
+      targetBin: '5min',
+    })
+    // Coalesced segments for [10,20):
+    //   t1 [10,12) – bin [10,15) atoms 1@10, 1@11
+    //   t3 [12,18) – coalesced from 3@12 (bin [10,15)) and 3@15 (bin [15,20))
+    //   t1 [18,20) – bin [15,20) atoms 1@18, 1@19
+    expect(segments(plan)).toEqual([
+      {
+        from: '2026-01-01T00:10:00.000Z',
+        to:   '2026-01-01T00:12:00.000Z',
+        tier: 't1',
+        keys: ['r/t1/2026-01-01.parquet'],
+        reaggregate: true,
+      },
+      {
+        from: '2026-01-01T00:12:00.000Z',
+        to:   '2026-01-01T00:18:00.000Z',
+        tier: 't3',
+        keys: ['r/t3/2026-01-01.parquet'],
+        reaggregate: true,
+      },
+      {
+        from: '2026-01-01T00:18:00.000Z',
+        to:   '2026-01-01T00:20:00.000Z',
+        tier: 't1',
+        keys: ['r/t1/2026-01-01.parquet'],
+        reaggregate: true,
+      },
+    ])
+  })
+
+  test('DP beats greedy when coarsest-first would force more atoms (4+4+1 vs 6+1+1+1)', () => {
+    // tiers={1,4,6}, target=9min at bin start = 0 (6-aligned). Greedy
+    // coarsest-first picks 6@0 then can only fill 3 × 1min → 4 atoms total.
+    // DP picks 4@0, 4@4, 1@8 → 3 atoms. Asserting 3-atom result confirms DP.
+    const ragged9: Pyramid = {
+      ...ragged,
+      tiers: [
+        { name: 't1', bin: '1min', shard: '1d' },
+        { name: 't4', bin: '4min', shard: '1d' },
+        { name: 't6', bin: '6min', shard: '1d' },
+      ],
+    }
+    const plan = planQuery(ragged9, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T00:09:00Z') },
+      binBudget: 1000,
+      targetBin: '9min',
+    })
+    expect(atoms(plan)).toEqual([
+      { from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T00:04:00.000Z', tier: 't4' },
+      { from: '2026-01-01T00:04:00.000Z', to: '2026-01-01T00:08:00.000Z', tier: 't4' },
+      { from: '2026-01-01T00:08:00.000Z', to: '2026-01-01T00:09:00.000Z', tier: 't1' },
+    ])
+  })
+
+  test('watermark restricts coarser tiers to the older part of the range', () => {
+    // tiers={1m, 5m}, target=5m, range covers two 5m bins. Watermark for t5
+    // ends mid-range → first bin can use t5; second bin can't, falls back
+    // to 5 × t1.
+    const ragged2: Pyramid = {
+      ...ragged,
+      tiers: [
+        { name: 't1', bin: '1min', shard: '1d' },
+        { name: 't5', bin: '5min', shard: '1d' },
+      ],
+    }
+    const plan = planQuery(ragged2, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T00:10:00Z') },
+      binBudget: 1000,
+      targetBin: '5min',
+      watermarks: { t5: d('2026-01-01T00:05:00Z') },
+    })
+    expect(atoms(plan)).toEqual([
+      { from: '2026-01-01T00:00:00.000Z', to: '2026-01-01T00:05:00.000Z', tier: 't5' },
+      { from: '2026-01-01T00:05:00.000Z', to: '2026-01-01T00:06:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:06:00.000Z', to: '2026-01-01T00:07:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:07:00.000Z', to: '2026-01-01T00:08:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:08:00.000Z', to: '2026-01-01T00:09:00.000Z', tier: 't1' },
+      { from: '2026-01-01T00:09:00.000Z', to: '2026-01-01T00:10:00.000Z', tier: 't1' },
+    ])
+  })
+
+  test('throws when no eligible tier has bin ≤ targetBin', () => {
+    // tiers={1h, 1d}; targetBin=5min — both are coarser than the target, so
+    // no decomposition is possible at all.
+    const coarse: Pyramid = {
+      ...ragged,
+      tiers: [
+        { name: 'h1', bin: '1h', shard: '1mo' },
+        { name: 'd1', bin: '1d', shard: '1y' },
+      ],
+    }
+    expect(() => planQuery(coarse, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T00:30:00Z') },
+      binBudget: 1000,
+      targetBin: '5min',
+    })).toThrow(/no tier with fixed-width bin ≤ targetBin/)
+  })
+
+  test('throws when gcd of eligible tier widths does not divide targetBin', () => {
+    // tiers={2min, 4min}; targetBin=5min. gcd=2 doesn't divide 5 → no
+    // integer linear combination of tier widths equals 5, decomposition
+    // impossible.
+    const noOdd: Pyramid = {
+      ...ragged,
+      tiers: [
+        { name: 't2', bin: '2min', shard: '1d' },
+        { name: 't4', bin: '4min', shard: '1d' },
+      ],
+    }
+    expect(() => planQuery(noOdd, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T00:30:00Z') },
+      binBudget: 1000,
+      targetBin: '5min',
+    })).toThrow(/no decomposition of targetBin '5min'.*gcd 120000 doesn't divide 300000/)
+  })
+
+  test('throws for calendar-variable targetBin (mo/y)', () => {
+    expect(() => planQuery(awair, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-03-01T00:00:00Z') },
+      binBudget: 1000,
+      targetBin: '1mo',
+      filter: { device_id: 17617 },
+    })).toThrow(/calendar-variable/)
+  })
+
+  test('throws on a specific bin where alignment dead-ends (gcd ok but per-bin DP fails)', () => {
+    // tiers={2min, 3min}; targetBin=5min. gcd=1 divides 5, but per-bin DP
+    // fails: from cursor=0, the strict-equality alignment rule leaves no
+    // path to cursor=5 (every step lands on 2 or 4, with no tier of width 1).
+    const noOne: Pyramid = {
+      ...ragged,
+      tiers: [
+        { name: 't2', bin: '2min', shard: '1d' },
+        { name: 't3', bin: '3min', shard: '1d' },
+      ],
+    }
+    expect(() => planQuery(noOne, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T00:05:00Z') },
+      binBudget: 1000,
+      targetBin: '5min',
+    })).toThrow(/cannot decompose output bin/)
+  })
+
+  test('smoothing snaps against targetBin in ragged mode', () => {
+    // targetBin=5min, smoothing=15min → snap count 3 (15/5 = 3).
+    const ragged3: Pyramid = {
+      ...ragged,
+      tiers: ragged.tiers.filter(t => t.name !== 't5' && t.name !== 't2'),
+    }
+    const plan = planQuery(ragged3, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T01:00:00Z') },
+      binBudget: 1000,
+      targetBin: '5min',
+      smoothing: '15min',
+    })
+    expect(plan.smoothing?.smoothBin).toBe('15min')
+    expect(plan.smoothing?.smoothBinCount).toBe(3)
+    // No outputTier → smoothSourceTier carries a placeholder distinguishing
+    // it from a real tier name; consumers needing a real tier need to read
+    // segments[].shardTier instead.
+    expect(plan.smoothing?.smoothSourceTier).toBe('<ragged:5min>')
+  })
+})

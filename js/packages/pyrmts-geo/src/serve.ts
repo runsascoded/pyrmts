@@ -118,7 +118,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
     // Project the geo plan down to a plain QueryPlan for stitch (which
     // lives in pyrmts core and doesn't know about geo fields).
     const timePlan: QueryPlan = {
-      outputTier: plan.outputTier,
+      ...(plan.outputTier !== undefined ? { outputTier: plan.outputTier } : {}),
       outputBin: plan.outputBin,
       segments: plan.segments.map(s => ({
         from: s.from,
@@ -136,7 +136,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
     result = {
       records,
       plan: {
-        outputTier: plan.outputTier.name,
+        ...(plan.outputTier !== undefined ? { outputTier: plan.outputTier.name } : {}),
         outputBin: plan.outputBin,
         outputRes: plan.outputRes,
         outputCells: plan.outputCells,

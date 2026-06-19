@@ -139,7 +139,7 @@ export function planGeoQuery(
   }))
 
   return {
-    outputTier: timePlan.outputTier,
+    ...(timePlan.outputTier !== undefined ? { outputTier: timePlan.outputTier } : {}),
     outputBin: timePlan.outputBin,
     outputRes,
     outputCells,

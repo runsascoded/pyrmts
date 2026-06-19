@@ -19,7 +19,9 @@ export interface FetchPyramidGeoQueryInput {
 }
 
 export interface GeoPlanMeta {
-  outputTier: string
+  // Omitted when the server-side planner ran ragged decomposition (no single
+  // tier serves the query); see `PlanMeta.outputTier` in pyrmts.
+  outputTier?: string
   outputBin: string
   outputRes: number
   outputCells: string[]

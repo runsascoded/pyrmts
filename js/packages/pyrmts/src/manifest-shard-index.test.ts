@@ -2,7 +2,14 @@ import type { RecordShardInput } from './shard-index.js'
 import type { Storage } from './types.js'
 import { describe, expect, test } from 'vitest'
 import { ManifestShardIndex } from './manifest-shard-index.js'
+import { assertShardIndexConformance } from './shard-index-conformance.js'
 import { memStorage } from './storage.js'
+
+describe('ManifestShardIndex', () => {
+  // Conformance: identical observable behavior to D1ShardIndex (and any
+  // future `ShardIndex` impl). Fresh memStorage per test for isolation.
+  assertShardIndexConformance(() => new ManifestShardIndex(memStorage(), { now: () => 0 }))
+})
 
 const decoder = new TextDecoder()
 

@@ -85,6 +85,72 @@ for the design + 8 deviations from the originally-proposed spec.
 Throws if `targetBin` is calendar-variable (`mo`/`y`) or if no integer
 linear combination of fixed-width tier bins equals `targetBin`.
 
+### Partial sub-shards for fresh-data tails
+
+When a pyramid needs interactive "Latest · N" UX, the gap between the last
+sealed canonical shard and "now" is bridged by **partial sub-shards** —
+finer-cadence shards written by a cascading cron between canonical seals.
+
+Declare a pyramid-wide cadence ladder (per-tier filtering by alignment is
+automatic) and a sub-shard key template:
+
+```ts
+const avail: Pyramid = {
+  storage: parquetBackend(r2Storage(env.BUCKET), 'avail/{tier}/{period}.parquet'),
+  keyTemplate: 'avail/{tier}/{period}.parquet',
+  partialKey:  'avail/{tier}/p{shard}/{period}.parquet',  // `{shard}` = cadence label
+  axis: 'time',
+  binCol: 'ts',
+  dims: [{ name: 'station_id', type: 'int' }],
+  metrics: [{ name: 'n_bikes', monoid: 'sum' }],
+  tiers: [
+    { name: '15m', bin: '15min', shard: '15d' },
+    { name: '1h',  bin: '1h',    shard: '1mo' },
+  ],
+  partials: ['10min', '30min', '1h', '3h', '12h', '1d', '3d'],
+}
+```
+
+Then pass watermarks keyed by `${tier}` (canonical) or `${tier}@${cadence}`
+(partial) to `planQuery`. The planner walks each tier `(canonical →
+partial_coarsest → ... → partial_finest)` and emits one segment per shard
+extending the covered range:
+
+```ts
+const plan = planQuery(avail, {
+  range: { from, to },
+  binBudget: 256,
+  watermarks: {
+    '15m':     last15mCanonicalEnd,
+    '15m@1h':  last15mPartial1hEnd,
+    '15m@1d':  last15mPartial1dEnd,
+  },
+})
+// → segments: [
+//     { tier: '15m', cadence: null, ... },   // canonical
+//     { tier: '15m', cadence: '1d', ... },   // partial extends past canonical
+//     { tier: '15m', cadence: '1h', ... },   // partial extends further
+//     { tier: 'raw', cadence: null, ... },   // fall-through for the live tail
+//   ]
+```
+
+Use a `ShardIndex` impl to source watermarks at query time:
+
+```ts
+import { CachedShardIndex } from 'pyrmts'
+import { D1ShardIndex } from 'pyrmts-cfw'
+
+const shardIndex = new CachedShardIndex(new D1ShardIndex(env.DB), { ttlMs: 60_000 })
+const watermarks = Object.fromEntries(await shardIndex.getWatermarks('avail'))
+const plan = planQuery(avail, { range, binBudget, watermarks })
+```
+
+`D1ShardIndex` is the recommended impl for CFW consumers (concurrent writers,
+atomic upserts). `ManifestShardIndex` (JSON blob over any `Storage`) is a
+fallback for single-writer / non-CF deploys. See
+[`specs/done/partial-shards.md`](../../../specs/done/partial-shards.md) for
+the design + propagation rules.
+
 ### Server-side rolling-window smoothing
 
 ```ts
@@ -177,6 +243,22 @@ runs the planner + fetch + stitcher, returns
   parsed config + supplied storage. YAML configs are one constructor; apps
   with runtime-dynamic pyramids build `Pyramid` directly.
 
+### `ShardIndex` (partial-shard watermark backend)
+
+- `ShardIndex` — `{ getWatermarks(name) → Map<key, Date>, recordShard(input) }`.
+  Key encoding: `${tier}` canonical / `${tier}@${cadence}` partial.
+- `CachedShardIndex` — TTL wrapper around any `ShardIndex` (default 60s);
+  dedupes concurrent in-flight reads; `recordShard` invalidates the pyramid.
+- `ManifestShardIndex` — JSON-blob impl over `Storage` (R2, memStorage, fs).
+  Single-writer per pyramid; defensive parser (missing / bad blob → empty Map).
+- `D1ShardIndex` (in `pyrmts-cfw`) — Cloudflare D1 impl; atomic upsert per
+  shard; static `schemaSql()` for wrangler migrations. Recommended for
+  cascading-cron workloads.
+- `assertShardIndexConformance(factory)` — shared vitest suite that pins both
+  impls to identical observable semantics. Import from `pyrmts/test-utils`.
+- `encodeWatermarkKey(tier, cadence)` / `decodeWatermarkKey(key)` — codec
+  helpers, mirror the `Map<key, Date>` shape.
+
 ### FE hook
 
 - `usePyramid({ pyramidUrl, filter, range, binBudget, … }): { records, isLoading, error, plan }` — React hook around `fetchPyramidQuery`.
@@ -199,5 +281,6 @@ runs the planner + fetch + stitcher, returns
 - [`specs/done/`](../../../specs/done/) — architectural specs (per-feature). Notable:
   - `pluggable-spatial-backend.md` — `SpatialIndex` interface + S2 / H3 / H13 / T4 analysis
   - `multi-tier-bin-packing.md` — `targetBin` + ragged decomposition DP
+  - `partial-shards.md` — multi-cadence sub-shards, `ShardIndex`, planner grid walk
   - `server-side-smoothing.md` — planner-driven rolling-window smoothing
   - `plan-geo-query-precomputed-cover.md` — `outputCells` short-circuit to skip `pickResolution`

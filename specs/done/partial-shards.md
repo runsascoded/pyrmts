@@ -470,3 +470,53 @@ Consumer side (ctbk) — out of scope here, tracked in ctbk repo:
   in a separate commit) — both reads (planner) and writes (sub-shard
   CFW).
 - Worker config: declare `partials` in `configs/pyramids/avail.yaml`.
+
+## Resolution
+
+Shipped across phases 1-6 in commits `892f9b8`..HEAD — each phase a
+single commit at the natural seam. Deviations from the proposed spec:
+
+1. **No per-tier `skip:` deny-list.** The spec's optional refinement
+   to opt a tier out of a given cadence wasn't needed for ctbk's avail
+   workload — alignment filtering already prunes nonsensical pairs.
+   Easy to add later if a real workload wants it.
+2. **Missing partial watermark → SKIPPED, not FAR_FUTURE.** The spec
+   didn't explicitly call this out. Treating a declared-but-never-
+   sealed cadence as FAR_FUTURE would let within-tier propagation
+   drag canonical's effective down to 0 (because canonical = min(
+   declared, finer-within-tier.effective)). Skip-from-grid keeps
+   canonical usable until the cron writes its first sub-shard.
+3. **Manifest format is new-flat, not legacy-nested.** `ManifestShardIndex`
+   serializes `{ version: 1, watermarks: Record<encodedKey, ms>, ... }` —
+   the flat shape `getWatermarks` returns directly. The legacy ctbk
+   `{ tiers: { name: { latest_period: "2026-06", partials: ... } } }`
+   nested-label format is *not* parsed; ctbk migrates straight to D1
+   anyway per the spec's recommendation, so the legacy adapter wasn't
+   built. Defensive parser: unrecognized format → empty Map.
+4. **Empty-string sentinel for D1 cadence column.** SQLite allows
+   NULL in PRIMARY KEY without enforcing uniqueness (well-known
+   footgun); `D1ShardIndex` stores canonical rows with `cadence = ''`
+   instead of NULL. Translated at the impl boundary so the
+   `Duration | null` contract is preserved for callers.
+5. **`planRagged` (the `targetBin` ragged-decomposition path) is
+   canonical-only.** The DP doesn't currently consider partial-shard
+   atoms. Easy to add later (each `(tier, cadence)` becomes an
+   eligible atom source with its own watermark) but no workload
+   exercises it today; deferred.
+6. **`assertShardIndexConformance` shared via `pyrmts/test-utils`
+   subpath.** Both impls call the same suite to guarantee
+   observational equivalence. Required a vitest-config alias plus an
+   `exports` map entry on the `pyrmts` package.
+7. **Authoritative-end semantics updated.** Now sourced from the raw
+   tier's max effective (across canonical + partials), not just
+   canonical's — partial sub-shards extend the authoritative range.
+8. **Sort-tie rule.** When canonical and a partial share an effective
+   watermark, canonical wins (coarser shard = fewer keys to fetch).
+   Spec didn't specify; matches the "minimize fan-out" planner intent.
+9. **Cursor advances unconditionally per-entry.** Even when a shard's
+   segment is dropped (e.g. earliest > effective), cursor advances to
+   the shard's segEnd. Preserves the canonical-only earliest-watermark
+   semantics existing tests codify ("a tier owns its watermark range;
+   finer tier picks up *after*").
+
+346 tests pass across the workspace.

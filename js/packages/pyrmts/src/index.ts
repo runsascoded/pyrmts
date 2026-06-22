@@ -75,6 +75,10 @@ export type {
 export { ManifestShardIndex } from './manifest-shard-index.js'
 export type { ManifestShardIndexOptions } from './manifest-shard-index.js'
 
+// `assertShardIndexConformance` is exported separately as
+// `pyrmts/test-utils` so consumers importing the main module don't pull
+// vitest into their runtime bundle.
+
 export { memStorage } from './storage.js'
 
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js'

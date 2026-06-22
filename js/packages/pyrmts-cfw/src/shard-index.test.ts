@@ -1,7 +1,13 @@
 // D1ShardIndex unit tests. Mocks `D1Like` and records every (sql, binds)
 // tuple so tests can assert on the wire format directly.
+//
+// `mockD1WithStore` (bottom of file) goes a step further — it actually
+// executes the two SQL templates `D1ShardIndex` emits, so the shared
+// `assertShardIndexConformance` suite verifies real semantics (monotonic
+// upserts, watermark visibility), not just SQL strings.
 
 import type { RecordShardInput } from 'pyrmts'
+import { assertShardIndexConformance } from 'pyrmts/test-utils'
 import { describe, expect, test } from 'vitest'
 import type { D1Like, D1PreparedStatement } from './d1.js'
 import { D1ShardIndex } from './shard-index.js'
@@ -290,5 +296,83 @@ describe('D1ShardIndex.schemaSql', () => {
       skipInventory: true,
     })
     expect(stmts[0]).toContain('"w""ater"')
+  })
+})
+
+// In-memory `D1Like` that actually executes the two SQL templates
+// `D1ShardIndex` emits. Lets the shared `assertShardIndexConformance`
+// verify monotonic upsert behavior end-to-end, not just SQL strings.
+function mockD1WithStore(): { db: D1Like } {
+  interface WatermarkRow {
+    pyramid: string
+    tier: string
+    cadence: string
+    latest_period_end: number
+    updated_at: number
+  }
+  const watermarks = new Map<string, WatermarkRow>()
+  const wmKey = (p: string, t: string, c: string): string => `${p}|${t}|${c}`
+
+  function makeStmt(sql: string): D1PreparedStatement {
+    let binds: unknown[] = []
+    const exec = (): { results: WatermarkRow[] } => {
+      if (sql.startsWith('SELECT tier, cadence, latest_period_end')) {
+        const pyramid = binds[0] as string
+        const results: WatermarkRow[] = []
+        for (const row of watermarks.values()) {
+          if (row.pyramid === pyramid) results.push(row)
+        }
+        return { results }
+      }
+      if (sql.includes('"pyramid_watermarks"') && sql.startsWith('INSERT INTO')) {
+        const [pyramid, tier, cadence, latest_period_end, updated_at] =
+          binds as [string, string, string, number, number]
+        const key = wmKey(pyramid, tier, cadence)
+        const existing = watermarks.get(key)
+        const newEnd = existing !== undefined
+          ? Math.max(existing.latest_period_end, latest_period_end)
+          : latest_period_end
+        watermarks.set(key, { pyramid, tier, cadence, latest_period_end: newEnd, updated_at })
+        return { results: [] }
+      }
+      // pyramid_shards inventory insert — no-op for conformance (conformance
+      // verifies watermark observability, not the inventory).
+      return { results: [] }
+    }
+    const stmt: D1PreparedStatement = {
+      bind(...values: unknown[]) {
+        binds = values
+        return stmt
+      },
+      async all() {
+        return exec() as { results: never[] }
+      },
+      async run() {
+        exec()
+        return { success: true }
+      },
+    }
+    return stmt
+  }
+
+  const db: D1Like = {
+    prepare(sql: string) {
+      return makeStmt(sql)
+    },
+    async batch(stmts: D1PreparedStatement[]) {
+      const results: unknown[] = []
+      for (const s of stmts) {
+        if (s.run !== undefined) results.push(await s.run())
+      }
+      return results
+    },
+  }
+  return { db }
+}
+
+describe('D1ShardIndex', () => {
+  assertShardIndexConformance(() => {
+    const { db } = mockD1WithStore()
+    return new D1ShardIndex(db, { now: () => 0 })
   })
 })

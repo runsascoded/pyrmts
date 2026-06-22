@@ -30,11 +30,19 @@ import type { FetchOptionsBase, FetchSegment, Row, StorageBackend, Tier } from '
 // dependency loaded.
 export interface D1Like {
   prepare(query: string): D1PreparedStatement
+  // Atomically execute multiple prepared statements in one round-trip.
+  // Used by `D1ShardIndex.recordShard` to write the inventory + bump the
+  // watermark in a single transaction. Optional because `d1Backend`
+  // (read-only) doesn't need it; impls used for writes must provide it.
+  batch?(statements: D1PreparedStatement[]): Promise<unknown[]>
 }
 
 export interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement
   all<T = Record<string, unknown>>(): Promise<{ results: T[]; success?: boolean; meta?: unknown }>
+  // Execute a statement that doesn't return rows (INSERT / UPDATE /
+  // DELETE / DDL). Optional — `d1Backend` only uses `all()`.
+  run?(): Promise<{ success?: boolean; meta?: unknown }>
 }
 
 // Columns to select. Empty / undefined → SELECT * (caller responsible

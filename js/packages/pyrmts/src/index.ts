@@ -59,6 +59,19 @@ export type { FetchOptions, FetchTrace } from './fetch.js'
 export { validatePartials } from './partials.js'
 export type { ValidatedPartials } from './partials.js'
 
+export {
+  CachedShardIndex,
+  WATERMARK_KEY_SEPARATOR,
+  decodeWatermarkKey,
+  encodeWatermarkKey,
+} from './shard-index.js'
+export type {
+  CachedShardIndexOptions,
+  DecodedWatermarkKey,
+  RecordShardInput,
+  ShardIndex,
+} from './shard-index.js'
+
 export { memStorage } from './storage.js'
 
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js'

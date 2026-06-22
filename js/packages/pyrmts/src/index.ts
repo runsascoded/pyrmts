@@ -72,6 +72,9 @@ export type {
   ShardIndex,
 } from './shard-index.js'
 
+export { ManifestShardIndex } from './manifest-shard-index.js'
+export type { ManifestShardIndexOptions } from './manifest-shard-index.js'
+
 export { memStorage } from './storage.js'
 
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js'

@@ -183,9 +183,60 @@ Alternative: single template with `{shard}` always present, canonical
 gets `'canon'` or the canonical-shard label literal. Cleaner for
 template substitution; uglier paths. Prefer dual template.
 
-### Manifest format
+### Watermark index
 
-Extend the manifest to record per-`(tier, shard)` watermarks:
+Watermarks need a per-`(tier, cadence)` lookup. Two viable backends:
+
+**(a) D1 / SQLite (RECOMMENDED for Cloudflare Workers consumers).**
+
+```sql
+CREATE TABLE pyramid_watermarks (
+  pyramid TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  cadence TEXT,                       -- NULL = canonical shard
+  latest_period_end INTEGER NOT NULL, -- unix ms (the end-of-shard for the
+                                      -- latest written shard at this cadence)
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (pyramid, tier, cadence)
+);
+
+-- Optional shard inventory for verification/diagnostics
+CREATE TABLE pyramid_shards (
+  pyramid TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  cadence TEXT,
+  period_start INTEGER NOT NULL,
+  period_end INTEGER NOT NULL,
+  key TEXT NOT NULL,
+  written_at INTEGER NOT NULL,
+  PRIMARY KEY (pyramid, tier, cadence, period_start)
+);
+```
+
+Planner read: one indexed query per request returns all watermarks for
+the pyramid; client builds the `(tier, cadence) → Date` map in memory.
+
+Sub-shard write: one `INSERT OR REPLACE INTO pyramid_watermarks` per
+shard. Atomic per row. Concurrent writers don't conflict (separate
+`(tier, cadence)` rows). No read-modify-write cycle.
+
+This avoids the race window inherent to a single-blob manifest: with
+the cascading writer at /5m × ~10 tiers × up to ~5 cadences firing per
+invocation, the worst-case is ~50 watermark updates per invocation.
+A blob manifest forces 50 read-modify-write cycles serially; D1
+handles them as 50 independent upserts, and overlapping invocations
+don't clobber each other's writes.
+
+Cold-path latency caveat: D1 has a known ~5s cold-path penalty when the
+worker isolate and D1 colo diverge (see consumer notes — addressed via
+Smart Placement + a `SELECT 1` keep-warm cron + Read Replication). The
+per-cell fan-out pattern that exposed this in ctbk task #100 does NOT
+apply here — watermark read is ONE indexed query per request, the same
+pattern as the existing `lookupStation` path that runs fine in prod.
+
+**(b) JSON manifest (FALLBACK for consumers without D1).**
+
+Single blob keyed under the storage backend (e.g. `<root>/_manifest.json`):
 
 ```json
 {
@@ -210,18 +261,46 @@ Extend the manifest to record per-`(tier, shard)` watermarks:
 }
 ```
 
-Backward-compatible: clients that ignore `partials` see the existing
-canonical-shard manifest unchanged.
+Workable when (1) the consumer doesn't have D1 (non-Cloudflare deploys,
+or simpler stacks), AND (2) writers are serialized externally (single
+job, no concurrent retries), AND (3) update cadence is low enough that
+the read-modify-write cost is tolerable. Lower-write-pressure consumers
+or canonical-shard-only pyramids (no `partials`) fit cleanly. The
+current ctbk avail-v3 setup uses this and the spec preserves it for
+back-compat.
 
-The cron job writing sub-shards is responsible for atomically updating
-the manifest after each successful sub-shard write. R2 has strong
-read-after-write consistency for `put` — sufficient for our needs.
+### Pluggable `ShardIndex` interface
 
-Cache the manifest module-level in the worker with a short TTL (already
-done — 60s in ctbk's `gbfs/api/src/avail_geo.ts`). With sub-shards on a
-≤5-min cadence, manifest staleness up to 60s is acceptable: a query
-might miss a just-written sub-shard for up to a minute and fall back to
-a finer cadence (which has the same data) or to the base tier.
+To support both backends, pyrmts exposes a `ShardIndex` interface:
+
+```typescript
+export interface ShardIndex {
+  /** Read all watermarks for a pyramid. Returns a map from
+   *  (tier, cadence | null) to end-of-shard Date. */
+  getWatermarks(pyramidName: string): Promise<Map<string, Date>>
+  // Key encoding: `${tier}` for canonical; `${tier}@${cadence}` for partials.
+
+  /** Record a new shard write. Idempotent: re-recording a (tier,
+   *  cadence, period) overwrites the entry. */
+  recordShard(input: {
+    pyramidName: string
+    tier: string
+    cadence: string | null
+    periodStart: Date
+    periodEnd: Date
+    key: string
+  }): Promise<void>
+}
+```
+
+Consumers provide their own implementation: `D1ShardIndex` (one
+implementation in pyrmts-cfw), `ManifestShardIndex` (one in pyrmts-core
+for R2/S3/filesystem backends), or a hand-rolled one. The planner takes
+a `ShardIndex` and is backend-agnostic.
+
+Cache layer: a `CachedShardIndex` wrapper applies a TTL (e.g. 60s) to
+any underlying impl. Workers can use this to keep watermark reads at
+constant O(1) within a request and short-cycle stale.
 
 ### Planner algorithm
 
@@ -266,41 +345,17 @@ New: for each segment, the planner picks `(tier, shard)` pairs by:
 
 ### Discovery mechanism
 
-> > > planner needs to learn what sub-shards exist (manifest vs D1)
+The planner is `ShardIndex`-backed; "discovery" reduces to "which
+implementation backs the index." See the previous section for the two
+viable backends (D1 indexed table, JSON manifest blob) and why D1 is
+preferred when available.
 
-Three options:
-
-1. **Manifest-only (recommended).** Single source of truth. Manifest
-   declares which `(tier, shard)` pairs exist and their watermarks. The
-   sub-shard writer is responsible for keeping it current. Planner
-   trusts the manifest; missing entries = "no sub-shards at this cadence
-   yet."
-
-   Pros: O(1) read regardless of shard count; single round-trip; cleanly
-   models declared sub-shard cadences (planner knows the keyspace at
-   config time, only needs watermarks).
-
-   Cons: a stale or corrupt manifest can mask available sub-shards.
-   Mitigation: short TTL + manifest is rewritten on every sub-shard
-   build (idempotent). On parse error, return empty (no watermark
-   gating) — same defensive fallback as today.
-
-2. **R2 LIST.** Planner LISTs the shard prefix at query time. Robust
-   to manifest staleness; expensive on cold path (Workers + R2 LIST
-   round-trips; not cacheable across queries without a manifest-like
-   index anyway, which makes it a manifest by another name).
-
-3. **D1 index.** Each sub-shard write appends to a D1 table; planner
-   queries D1 for "latest covering shard for `(tier, [from, to])`."
-   Indexable. Heavier than manifest.
-
-**Pick #1.** The manifest is already in place for canonical watermarks;
-extending it costs one nested object level. D1 (#3) buys nothing the
-manifest doesn't, and adds operational surface area (the rides-v3 D1
-bakeoff — ctbk #88-101 — already established D1's cold-path latency is
-worse than parquet for cell-keyed reads). LIST (#2) is the
-fallback-of-last-resort if the manifest gets out of sync; not the
-primary path.
+A third option — **R2 LIST at query time** — is mentioned only to be
+ruled out. It works (LIST the shard prefix, parse keys to derive
+periods), but it's per-query latency on the cold path with no shared
+state, and the result has to be cached *somewhere* anyway, which makes
+it just a manifest by another name. Useful only as a one-off recovery
+tool when the primary index is broken.
 
 ### Cascading sub-shard builder
 
@@ -384,25 +439,34 @@ are unchanged. No rewrite of existing data.
 
 ## Implementation phasing
 
-1. **Pyrmts types**: extend `Tier` with optional `partialCadences:
-   Duration[]` (or accept the pyramid-wide list and compute per-tier
-   in `planQuery`). Extend `PlanSegment` with `shardCadence`.
-2. **Manifest schema**: extend the watermark loader (consumer-side
-   today) to accept `partials.{cadence}.latest_period` and produce a
-   `(tier, cadence) → Date` map. Pass as `watermarks` input (or a new
-   `partialWatermarks` input) to `planQuery`.
-3. **Planner**: update `effectiveWatermarks` to operate on the
+1. **Pyrmts types**: extend `Tier` is unnecessary if cadences are
+   pyramid-wide; just thread the cadence list through `planQuery`'s
+   pyramid argument. Extend `PlanSegment` with `shardCadence: Duration | null`.
+2. **`ShardIndex` interface**: define in pyrmts-core; provide
+   `CachedShardIndex` (TTL wrapper) in same package.
+3. **`D1ShardIndex`**: implement in pyrmts-cfw against the D1 schema
+   above. Includes the SQL migrations and a `recordShard` helper for
+   writers.
+4. **`ManifestShardIndex`**: implement in pyrmts-core against a
+   storage-backend-keyed JSON blob (backward-compat for current ctbk
+   manifest format; consumes the existing `_manifest.json`).
+5. **Planner**: update `effectiveWatermarks` to operate on the
    `(tier, cadence)` grid. Update segment emission to thread
    `shardCadence` through. Update storage backend key resolution to
    pick `partialKey` when `shardCadence != null`.
-4. **Tests**: planner unit tests for grid walk, watermark propagation
+6. **Tests**: planner unit tests for grid walk, watermark propagation
    across both axes, edge cases (single cadence, single tier, all-
-   canonical-no-partials, all-partials-no-canonical).
-5. **Docs**: add to `SPEC.md` and a short worked example.
+   canonical-no-partials, all-partials-no-canonical). Index tests for
+   both `D1ShardIndex` and `ManifestShardIndex` against the same
+   interface contract.
+7. **Docs**: add to `SPEC.md` and a short worked example for both
+   backends.
 
 Consumer side (ctbk) — out of scope here, tracked in ctbk repo:
 - Cascading sub-shard CFW (cron + cascade logic).
 - Direct /1m PQT write from the poller (separate, but unblocks
   freshness now).
-- Manifest writer update on each sub-shard build.
+- Wire `D1ShardIndex` to the worker (or migrate from manifest to D1
+  in a separate commit) — both reads (planner) and writes (sub-shard
+  CFW).
 - Worker config: declare `partials` in `configs/pyramids/avail.yaml`.

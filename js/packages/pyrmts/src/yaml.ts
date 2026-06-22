@@ -24,6 +24,7 @@ import type {
   Axis,
   Bin,
   Dim,
+  Duration,
   GeoSpec,
   Metric,
   MonoidName,
@@ -38,11 +39,13 @@ import type {
 export interface PyramidConfig {
   storage: { type: string; [key: string]: unknown }
   keyTemplate: string
+  partialKey?: string
   axis: Axis
   binCol: string
   dims: Dim[]
   metrics: Metric[]
   tiers: Tier[]
+  partials?: Duration[]
   geo?: GeoSpec
 }
 
@@ -60,7 +63,7 @@ export function parsePyramidYaml(text: string): PyramidConfig {
   const root = raw as Record<string, unknown>
 
   const storage = parseStorageBlock(root.storage)
-  const { keyTemplate, storageMeta } = storage
+  const { keyTemplate, partialKey, storageMeta } = storage
 
   const axis = (root.axis as Axis | undefined) ?? 'time'
   if (!VALID_AXES.has(axis)) {
@@ -78,8 +81,22 @@ export function parsePyramidYaml(text: string): PyramidConfig {
     metrics: parseMetrics(root.metrics),
     tiers: parseTiers(root.tiers),
   }
+  if (partialKey !== undefined) cfg.partialKey = partialKey
+  if (root.partials !== undefined) cfg.partials = parsePartials(root.partials)
   if (root.geo !== undefined) cfg.geo = parseGeo(root.geo)
   return cfg
+}
+
+function parsePartials(raw: unknown): Duration[] {
+  if (!Array.isArray(raw)) {
+    throw new Error('parsePyramidYaml: `partials` must be an array of Duration strings')
+  }
+  return raw.map((c, i) => {
+    if (typeof c !== 'string') {
+      throw new Error(`parsePyramidYaml: partials[${i}] must be a Duration string (got ${String(c)})`)
+    }
+    return c as Duration
+  })
 }
 
 function parseGeo(raw: unknown): GeoSpec {
@@ -119,13 +136,15 @@ export function pyramidFromConfig(cfg: PyramidConfig, storage: StorageBackend): 
     metrics: cfg.metrics,
     tiers: cfg.tiers,
   }
+  if (cfg.partialKey !== undefined) p.partialKey = cfg.partialKey
+  if (cfg.partials !== undefined) p.partials = cfg.partials
   if (cfg.geo !== undefined) p.geo = cfg.geo
   return p
 }
 
 function parseStorageBlock(
   raw: unknown,
-): { keyTemplate: string; storageMeta: PyramidConfig['storage'] } {
+): { keyTemplate: string; partialKey?: string; storageMeta: PyramidConfig['storage'] } {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('parsePyramidYaml: `storage` must be a mapping')
   }
@@ -136,9 +155,17 @@ function parseStorageBlock(
   if (typeof s.key !== 'string') {
     throw new Error('parsePyramidYaml: `storage.key` (key template) must be a string')
   }
-  const { key, ...rest } = s
+  let partialKey: string | undefined
+  if (s.partialKey !== undefined) {
+    if (typeof s.partialKey !== 'string') {
+      throw new Error('parsePyramidYaml: `storage.partialKey` (sub-shard key template) must be a string')
+    }
+    partialKey = s.partialKey
+  }
+  const { key, partialKey: _pk, ...rest } = s
   return {
     keyTemplate: key,
+    ...(partialKey !== undefined ? { partialKey } : {}),
     storageMeta: { ...(rest as Record<string, unknown>), type: s.type },
   }
 }

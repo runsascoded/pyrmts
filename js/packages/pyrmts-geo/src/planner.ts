@@ -133,6 +133,7 @@ export function planGeoQuery(
     from: seg.from,
     to: seg.to,
     shardTier: seg.shardTier,
+    shardCadence: seg.shardCadence,
     keys: seg.keys,
     reaggregate: seg.reaggregate,
     cells: outputCells,

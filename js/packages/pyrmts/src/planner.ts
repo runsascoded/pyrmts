@@ -3,6 +3,7 @@
 // re-aggregate. No I/O.
 
 import { addSpan, binsInRange, fixedDurationMs, floorToSpan, parseDuration, shardPeriodsCovering } from './axis.js'
+import { validatePartials } from './partials.js'
 import type { Bin, Duration, Pyramid, Tier } from './types.js'
 
 export type SmoothMode = 'centered' | 'trailing'
@@ -67,6 +68,13 @@ export interface PlanSegment {
   from: Date
   to: Date
   shardTier: Tier
+  // Sub-shard cadence (`null` = canonical shard; non-null = partial shard
+  // at this cadence). When non-null, the planner used `pyramid.partialKey`
+  // (not `keyTemplate`) to resolve the segment's `keys`. Storage backends
+  // generally don't need to read this — they consume the pre-resolved
+  // `keys` — but it's surfaced so stitchers / serializers can attribute
+  // segments to the canonical vs partial path. See `specs/partial-shards.md`.
+  shardCadence: Duration | null
   keys: string[]
   // If true, this segment uses a finer tier than the output; the stitcher
   // must monoid-coarsen its rows up to outputTier.bin.
@@ -115,6 +123,10 @@ export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
     throw new Error(`planQuery: empty range (${from.toISOString()} → ${to.toISOString()})`)
   }
 
+  // Validate `pyramid.partials` (no-op when unset). Phase 1 only validates;
+  // grid-walk over the (tier, cadence) pairs lands in phase 2.
+  validatePartials(pyramid)
+
   if (input.targetBin !== undefined) {
     return planRagged(pyramid, input, input.targetBin)
   }
@@ -155,6 +167,7 @@ export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
         from: tierStart,
         to: tierEnd,
         shardTier: tier,
+        shardCadence: null,
         keys: shardKeys(pyramid, tier, tierStart, tierEnd, input.filter ?? {}),
         reaggregate: i !== outputIdx,
       })
@@ -401,6 +414,7 @@ function emitSegment(
     from: fromDate,
     to: toDate,
     shardTier: range.tier,
+    shardCadence: null,
     keys: shardKeys(pyramid, range.tier, fromDate, toDate, filter),
     reaggregate: tierMs !== targetBinMs,
   }

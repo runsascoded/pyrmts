@@ -56,6 +56,9 @@ export type { PivotTallToHistogramOptions } from './pivot.js'
 export { fetchShardData, parquetBackend } from './fetch.js'
 export type { FetchOptions, FetchTrace } from './fetch.js'
 
+export { validatePartials } from './partials.js'
+export type { ValidatedPartials } from './partials.js'
+
 export { memStorage } from './storage.js'
 
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js'

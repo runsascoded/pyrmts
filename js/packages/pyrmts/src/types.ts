@@ -104,10 +104,17 @@ export interface FetchOptionsBase {
 
 export interface Pyramid {
   storage: StorageBackend
-  // Substitution template for shard keys. `{tier}` and `{period}` are required.
-  // Additional `{dim_name}` placeholders are allowed for dim-sharded pyramids
-  // (e.g. `awair-{device_id}/{tier}/{period}.parquet`).
+  // Substitution template for canonical-shard keys. `{tier}` and `{period}`
+  // are required. Additional `{dim_name}` placeholders are allowed for dim-
+  // sharded pyramids (e.g. `awair-{device_id}/{tier}/{period}.parquet`).
   keyTemplate: string
+  // Substitution template for partial-shard keys. Required when `partials`
+  // is non-empty; ignored otherwise. Adds a `{shard}` placeholder (the
+  // cadence label, e.g. `1h`) on top of `keyTemplate`'s placeholders. The
+  // canonical convention is to prefix the cadence with `p` so the segment
+  // can't collide with a tier name — e.g.
+  // `avail-v3/{tier}/p{shard}/{period}.parquet`.
+  partialKey?: string
   axis: Axis
   // Name of the bin column in each shard. For time-axis pyramids, this is
   // an int64 UTC millisecond timestamp; for step-axis, an int step count.
@@ -118,6 +125,21 @@ export interface Pyramid {
   // Canonical order: finest → coarsest. Planner iterates coarsest-first
   // (reverse) when picking the tier that fits a bin budget.
   tiers: Tier[]
+  // Pyramid-wide sub-shard cadence ladder. Each cadence applies to every
+  // tier whose canonical `shard > cadence` AND whose `bin` divides
+  // `cadence` (so each sub-shard contains a whole number of bins).
+  //
+  // Cadences MUST be fixed-duration (`min`/`h`/`d`). Calendar (`mo`/`y`)
+  // is canonical-shard-only — sub-shards exist to serve fresh-data queries
+  // on a regular cron, and calendar boundaries don't divide cleanly.
+  //
+  // For the cascading sub-shard builder's "break early" optimization (a
+  // /5m cron firing only the cadences that align with `now`), each cadence
+  // must divide all coarser cadences in the ladder. Validated at
+  // `planQuery` entry when `partials` is set.
+  //
+  // See `specs/partial-shards.md`.
+  partials?: Duration[]
   // Optional geo (h3) extension. When present, every shard contains rows
   // at all materialized resolutions; the geo planner (in `pyrmts-geo`)
   // picks a resolution at query time + filters by cell list.

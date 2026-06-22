@@ -234,3 +234,82 @@ geo: { resolutions: [16] }
     expect(pyramid.geo).toEqual({ cellCol: 'h3', resolutions: [12, 9, 7, 4] })
   })
 })
+
+describe('parsePyramidYaml: partials + partialKey', () => {
+  const availYaml = `
+storage:
+  type: r2
+  bucket: ctbk
+  key: 'avail-v3/{tier}/{period}.parquet'
+  partialKey: 'avail-v3/{tier}/p{shard}/{period}.parquet'
+
+partials:
+  - 10min
+  - 30min
+  - 1h
+  - 3h
+  - 12h
+  - 1d
+
+dims:
+  - { name: station_id, type: int }
+
+metrics:
+  - { name: n_bikes, monoid: sum }
+
+tiers:
+  - { name: 15m, bin: 15min, shard: 15d }
+  - { name: 1h,  bin: 1h,    shard: 1mo }
+`
+
+  test('parses partials list + storage.partialKey', () => {
+    const cfg = parsePyramidYaml(availYaml)
+    expect(cfg.partials).toEqual(['10min', '30min', '1h', '3h', '12h', '1d'])
+    expect(cfg.partialKey).toBe('avail-v3/{tier}/p{shard}/{period}.parquet')
+  })
+
+  test('storage block omits partialKey when missing', () => {
+    const cfg = parsePyramidYaml(`
+storage: { type: r2, key: 'k/{tier}/{period}.parquet' }
+dims: []
+metrics: [{ name: x, monoid: count }]
+tiers: [{ name: raw, bin: 1d, shard: 1y }]
+`)
+    expect(cfg.partials).toBeUndefined()
+    expect(cfg.partialKey).toBeUndefined()
+  })
+
+  test('pyramidFromConfig propagates partials + partialKey to the Pyramid', () => {
+    const cfg = parsePyramidYaml(availYaml)
+    const pyramid = pyramidFromConfig(cfg, memStorage())
+    expect(pyramid.partials).toEqual(['10min', '30min', '1h', '3h', '12h', '1d'])
+    expect(pyramid.partialKey).toBe('avail-v3/{tier}/p{shard}/{period}.parquet')
+  })
+
+  test('throws when partials is not an array', () => {
+    expect(() => parsePyramidYaml(`
+storage: { type: r2, key: 'k/{tier}/{period}.parquet' }
+partials: '1h'
+dims: []
+metrics: [{ name: x, monoid: count }]
+tiers: [{ name: raw, bin: 1d, shard: 1y }]
+`)).toThrow('parsePyramidYaml: `partials` must be an array of Duration strings')
+  })
+
+  test('throws when storage.partialKey is not a string', () => {
+    expect(() => parsePyramidYaml(`
+storage:
+  type: r2
+  key: 'k/{tier}/{period}.parquet'
+  partialKey: 42
+dims: []
+metrics: [{ name: x, monoid: count }]
+tiers: [{ name: raw, bin: 1d, shard: 1y }]
+`)).toThrow('parsePyramidYaml: `storage.partialKey` (sub-shard key template) must be a string')
+  })
+
+  test('storage block does not leak partialKey into storageMeta', () => {
+    const cfg = parsePyramidYaml(availYaml)
+    expect(cfg.storage).toEqual({ type: 'r2', bucket: 'ctbk' })
+  })
+})

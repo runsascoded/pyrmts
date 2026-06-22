@@ -786,3 +786,48 @@ describe('planQuery: targetBin (ragged decomposition)', () => {
     expect(plan.smoothing?.smoothSourceTier).toBe('<ragged:5min>')
   })
 })
+
+describe('planQuery: partials (phase 1 — validation only)', () => {
+  test('all emitted segments carry shardCadence: null when partials is unset', () => {
+    const plan = planQuery(awair, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-02-01T00:00:00Z') },
+      binBudget: 1000,
+      filter: { device_id: 17617 },
+    })
+    expect(plan.segments.map(s => s.shardCadence)).toEqual(
+      plan.segments.map(() => null),
+    )
+  })
+
+  test('propagates validatePartials throws (bad ladder)', () => {
+    const bad: Pyramid = {
+      ...awair,
+      partialKey: 'awair-{device_id}/{tier}/p{shard}/{period}.parquet',
+      partials: ['1h', '3h', '5h'],
+    }
+    expect(() => planQuery(bad, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-02-01T00:00:00Z') },
+      binBudget: 1000,
+      filter: { device_id: 17617 },
+    })).toThrow(/cadence ladder not divisibility-chained/)
+  })
+
+  test('valid partials config does not change today\'s segment emission', () => {
+    const withPartials: Pyramid = {
+      ...awair,
+      partialKey: 'awair-{device_id}/{tier}/p{shard}/{period}.parquet',
+      partials: ['1h', '1d'],
+    }
+    const baseline = planQuery(awair, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-02-01T00:00:00Z') },
+      binBudget: 1000,
+      filter: { device_id: 17617 },
+    })
+    const withPlan = planQuery(withPartials, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-02-01T00:00:00Z') },
+      binBudget: 1000,
+      filter: { device_id: 17617 },
+    })
+    expect(segments(withPlan)).toEqual(segments(baseline))
+  })
+})

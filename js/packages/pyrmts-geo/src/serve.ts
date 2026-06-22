@@ -124,6 +124,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
         from: s.from,
         to: s.to,
         shardTier: s.shardTier,
+        shardCadence: s.shardCadence,
         keys: s.keys,
         reaggregate: s.reaggregate,
       })),

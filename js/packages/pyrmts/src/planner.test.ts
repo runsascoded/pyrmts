@@ -831,3 +831,295 @@ describe('planQuery: partials (phase 1 — validation only)', () => {
     expect(segments(withPlan)).toEqual(segments(baseline))
   })
 })
+
+// Project plan segments to a partial-aware comparable shape.
+interface PartialSegmentSnapshot {
+  from: string
+  to: string
+  tier: string
+  cadence: string | null
+  keys: string[]
+}
+function partialSegments(plan: ReturnType<typeof planQuery>): PartialSegmentSnapshot[] {
+  return plan.segments.map(s => ({
+    from: s.from.toISOString(),
+    to: s.to.toISOString(),
+    tier: s.shardTier.name,
+    cadence: s.shardCadence,
+    keys: s.keys,
+  }))
+}
+
+describe('planQuery: partials (phase 5 — grid walk)', () => {
+  // Smaller pyramid with explicit canonical + partial cadences. h1 has
+  // 1d shards so canonical / partial_1h / partial_3h all stay
+  // alignment-valid (h1.bin = 1h divides every cadence; canonical 1d
+  // strictly larger than every cadence).
+  const availPartials: Pyramid = {
+    storage: mockStorage,
+    keyTemplate: 'avail/{tier}/{period}.parquet',
+    partialKey: 'avail/{tier}/p{shard}/{period}.parquet',
+    axis: 'time',
+    binCol: 'ts',
+    dims: [],
+    metrics: [{ name: 'n', monoid: 'sum' }],
+    tiers: [
+      // raw=1min so binBudget=1000 reliably picks h1 across multi-hour ranges
+      // (raw=1440 bins/day vs h1=24 bins/day).
+      { name: 'raw', bin: '1min', shard: '1d' },
+      { name: 'h1', bin: '1h', shard: '1d' },
+    ],
+    partials: ['1h', '3h'],
+  }
+
+  test('canonical extends through canonical watermark; partial_3h covers next chunk; partial_1h covers tail', () => {
+    // h1 canonical sealed through 2026-06-21T00:00 (end of last 1d shard).
+    // 3h-cadence partial sealed through 2026-06-21T15:00.
+    // 1h-cadence partial sealed through 2026-06-21T17:00.
+    // Query [2026-06-20T00, 2026-06-21T18). binBudget 1000 → output is h1.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-20T00:00:00Z'), to: d('2026-06-21T18:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'h1': d('2026-06-21T00:00:00Z'),
+        'h1@3h': d('2026-06-21T15:00:00Z'),
+        'h1@1h': d('2026-06-21T17:00:00Z'),
+        'raw': d('2026-06-21T18:00:00Z'),
+      },
+    })
+    expect(partialSegments(plan)).toEqual([
+      {
+        from: '2026-06-20T00:00:00.000Z',
+        to: '2026-06-21T00:00:00.000Z',
+        tier: 'h1',
+        cadence: null,
+        keys: ['avail/h1/2026-06-20.parquet'],
+      },
+      {
+        from: '2026-06-21T00:00:00.000Z',
+        to: '2026-06-21T15:00:00.000Z',
+        tier: 'h1',
+        cadence: '3h',
+        keys: [
+          'avail/h1/p3h/2026-06-21T00.parquet',
+          'avail/h1/p3h/2026-06-21T03.parquet',
+          'avail/h1/p3h/2026-06-21T06.parquet',
+          'avail/h1/p3h/2026-06-21T09.parquet',
+          'avail/h1/p3h/2026-06-21T12.parquet',
+        ],
+      },
+      {
+        from: '2026-06-21T15:00:00.000Z',
+        to: '2026-06-21T17:00:00.000Z',
+        tier: 'h1',
+        cadence: '1h',
+        keys: [
+          'avail/h1/p1h/2026-06-21T15.parquet',
+          'avail/h1/p1h/2026-06-21T16.parquet',
+        ],
+      },
+      {
+        from: '2026-06-21T17:00:00.000Z',
+        to: '2026-06-21T18:00:00.000Z',
+        tier: 'raw',
+        cadence: null,
+        keys: ['avail/raw/2026-06-21.parquet'],
+      },
+    ])
+  })
+
+  test('partial watermark identical to canonical produces just one canonical segment (sort tie → coarser first)', () => {
+    // All h1 shards effective at same point. canonical wins the tie; partial_3h /
+    // partial_1h entries follow but cursor already advanced past them → skipped.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-20T00:00:00Z'), to: d('2026-06-21T00:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'h1': d('2026-06-21T00:00:00Z'),
+        'h1@3h': d('2026-06-21T00:00:00Z'),
+        'h1@1h': d('2026-06-21T00:00:00Z'),
+      },
+    })
+    expect(partialSegments(plan)).toEqual([{
+      from: '2026-06-20T00:00:00.000Z',
+      to: '2026-06-21T00:00:00.000Z',
+      tier: 'h1',
+      cadence: null,
+      keys: ['avail/h1/2026-06-20.parquet'],
+    }])
+  })
+
+  test('within-tier propagation: stale partial_3h bounds canonical (declared > finer\'s effective)', () => {
+    // h1 canonical declared 2026-06-21T15 (sealed past the recent 1d shard end).
+    // partial_3h declared 2026-06-21T09 (stale — cron stuck).
+    // Within-tier propagation: canonical effective = min(declared, partial_3h.eff) = 09:00.
+    // 1h partial declared 2026-06-21T14 still bounds 3h effective to its own 09:00
+    // (3h has no finer). So all h1 shards effectively cap at 09:00.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-20T00:00:00Z'), to: d('2026-06-21T12:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'h1': d('2026-06-21T15:00:00Z'),
+        'h1@3h': d('2026-06-21T09:00:00Z'),
+        'h1@1h': d('2026-06-21T14:00:00Z'),
+        'raw': d('2026-06-21T12:00:00Z'),
+      },
+    })
+    // canonical and 3h both have effective 09:00 (tie, canonical wins → emits to 09:00).
+    // 1h has effective bounded by 3h (its next-finer-within-tier is none, so 1h
+    // keeps its declared 14:00); but wait — within-tier propagation walks
+    // finest-to-coarsest; for 1h there's NO finer cadence so 1h = its declared.
+    // For 3h, finer is 1h → 3h.eff = min(09:00, 14:00) = 09:00. canonical = min(15:00, 09:00) = 09:00.
+    // Walk: canonical → 1h (both effective bounded). Sort by effective ascending:
+    //   canonical(09:00) first, then partial_3h(09:00) (tie → canonical wins),
+    //   then partial_1h(14:00).
+    // - canonical: emit [20T00, 21T09)
+    // - partial_3h: segEnd 09:00, cursor 09:00 → no emit
+    // - partial_1h: segEnd 14:00, but plannedTo 12:00 → segEnd 12:00. Emit [09, 12).
+    expect(partialSegments(plan)).toEqual([
+      {
+        from: '2026-06-20T00:00:00.000Z',
+        to: '2026-06-21T09:00:00.000Z',
+        tier: 'h1',
+        cadence: null,
+        keys: ['avail/h1/2026-06-20.parquet', 'avail/h1/2026-06-21.parquet'],
+      },
+      {
+        from: '2026-06-21T09:00:00.000Z',
+        to: '2026-06-21T12:00:00.000Z',
+        tier: 'h1',
+        cadence: '1h',
+        keys: [
+          'avail/h1/p1h/2026-06-21T09.parquet',
+          'avail/h1/p1h/2026-06-21T10.parquet',
+          'avail/h1/p1h/2026-06-21T11.parquet',
+        ],
+      },
+    ])
+  })
+
+  test('cross-tier propagation: finer tier max bounds coarser tier (h1 capped by raw\'s max effective)', () => {
+    // raw partial_1h effective = 06-21T15 (raw's max).
+    // h1 canonical declared = 06-21T18 (would extend past raw's max).
+    // Cross-tier rule clamps h1 canonical to 06-21T15.
+    // raw canonical declared = 06-21T12; raw partial_1h declared = 06-21T15.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-20T00:00:00Z'), to: d('2026-06-21T20:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'h1': d('2026-06-21T18:00:00Z'),
+        'raw': d('2026-06-21T12:00:00Z'),
+        'raw@1h': d('2026-06-21T15:00:00Z'),
+      },
+    })
+    // Missing partial watermarks are SKIPPED from the grid (a declared
+    // cadence that hasn't been sealed shouldn't bound canonical via
+    // within-tier propagation — see effectiveShardWatermarks).
+    // h1 entries after propagation:
+    //   - canonical declared 18:00, both partials skipped → bounded only
+    //     by raw's max (15:00) → 15:00.
+    // raw entries:
+    //   - canonical declared 12:00 → 12:00.
+    //   - partial_3h skipped (missing).
+    //   - partial_1h declared 15:00 → 15:00 (no finer within-tier).
+    // h1 walk: canonical effective 15:00 → emit [20T00, 21T15). cursor 15:00.
+    // partial_3h / partial_1h: same effective 15:00, cursor 15:00 → skip.
+    // Move to raw. tierFloor = 15:00. raw canonical effective 12 → segEnd 12 < segStart 15 → no emit.
+    //   But cursor doesn't go backward (segEnd < cursor), cursor stays 15:00.
+    // raw partial_3h effective 15:00 → segEnd 15 = cursor 15 → no emit.
+    // raw partial_1h effective 15:00 → segEnd 15 = cursor 15 → no emit.
+    expect(partialSegments(plan)).toEqual([
+      {
+        from: '2026-06-20T00:00:00.000Z',
+        to: '2026-06-21T15:00:00.000Z',
+        tier: 'h1',
+        cadence: null,
+        keys: ['avail/h1/2026-06-20.parquet', 'avail/h1/2026-06-21.parquet'],
+      },
+    ])
+  })
+
+  test('partialKey template substitutes {shard} with the cadence label', () => {
+    // binBudget=50: raw=120 bins > 50, h1=2 bins ≤ 50 → output tier h1.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-21T00:00:00Z'), to: d('2026-06-21T02:00:00Z') },
+      binBudget: 50,
+      watermarks: {
+        'h1': d('2026-06-21T00:00:00Z'),
+        'h1@1h': d('2026-06-21T02:00:00Z'),
+      },
+    })
+    expect(plan.segments).toHaveLength(1)
+    expect(plan.segments[0]!.shardCadence).toBe('1h')
+    expect(plan.segments[0]!.keys).toEqual([
+      'avail/h1/p1h/2026-06-21T00.parquet',
+      'avail/h1/p1h/2026-06-21T01.parquet',
+    ])
+  })
+
+  test('fall-through to finer tier picks up after coarser tier\'s max effective', () => {
+    // h1 canonical 12:00 + h1 partial_1h 15:00. raw canonical 20:00.
+    // h1 covers [from, 12:00) canonical + [12:00, 15:00) partial_1h.
+    // After h1 cursor = 15:00. Fall through to raw for [15:00, 18:00).
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-20T00:00:00Z'), to: d('2026-06-21T18:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'h1': d('2026-06-21T12:00:00Z'),
+        'h1@1h': d('2026-06-21T15:00:00Z'),
+        'raw': d('2026-06-21T20:00:00Z'),
+      },
+    })
+    const cadenceOrder = plan.segments.map(s => ({ tier: s.shardTier.name, cadence: s.shardCadence }))
+    expect(cadenceOrder).toEqual([
+      { tier: 'h1', cadence: null },
+      { tier: 'h1', cadence: '1h' },
+      { tier: 'raw', cadence: null },
+    ])
+  })
+
+  test('reaggregate=false for any shard within the output tier (canonical or partial)', () => {
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-20T00:00:00Z'), to: d('2026-06-21T15:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'h1': d('2026-06-21T00:00:00Z'),
+        'h1@1h': d('2026-06-21T15:00:00Z'),
+      },
+    })
+    for (const seg of plan.segments) {
+      if (seg.shardTier.name === 'h1') {
+        expect(seg.reaggregate).toBe(false)
+      }
+    }
+  })
+
+  test('reaggregate=true for partial segments emitted by a finer tier', () => {
+    // Force fall-through to raw for the recent tail; raw partial_1h would emit
+    // a partial segment from raw.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-20T00:00:00Z'), to: d('2026-06-21T15:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'h1': d('2026-06-21T00:00:00Z'),
+        'raw': d('2026-06-21T12:00:00Z'),
+        'raw@1h': d('2026-06-21T15:00:00Z'),
+      },
+    })
+    const rawPartial = plan.segments.find(s => s.shardTier.name === 'raw' && s.shardCadence === '1h')
+    expect(rawPartial?.reaggregate).toBe(true)
+  })
+
+  test('authoritativeEnd uses raw tier\'s max effective (across canonical + partials)', () => {
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-20T00:00:00Z'), to: d('2026-06-21T20:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'raw': d('2026-06-21T15:00:00Z'),
+        'raw@1h': d('2026-06-21T18:00:00Z'),
+      },
+    })
+    // raw's max effective = partial_1h = 18:00. authoritativeEnd should be 18:00.
+    expect(plan.authoritativeEnd).toEqual(d('2026-06-21T18:00:00Z'))
+  })
+})

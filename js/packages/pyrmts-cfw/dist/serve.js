@@ -64,7 +64,7 @@ export async function serveQuery(opts) {
         result = {
             records,
             plan: {
-                outputTier: plan.outputTier.name,
+                ...(plan.outputTier !== undefined ? { outputTier: plan.outputTier.name } : {}),
                 outputBin: plan.outputBin,
                 authoritativeEnd: plan.authoritativeEnd?.toISOString() ?? null,
                 smoothing: plan.smoothing,

@@ -1,11 +1,16 @@
 import type { FetchOptionsBase, StorageBackend } from 'pyrmts';
 export interface D1Like {
     prepare(query: string): D1PreparedStatement;
+    batch?(statements: D1PreparedStatement[]): Promise<unknown[]>;
 }
 export interface D1PreparedStatement {
     bind(...values: unknown[]): D1PreparedStatement;
     all<T = Record<string, unknown>>(): Promise<{
         results: T[];
+        success?: boolean;
+        meta?: unknown;
+    }>;
+    run?(): Promise<{
         success?: boolean;
         meta?: unknown;
     }>;

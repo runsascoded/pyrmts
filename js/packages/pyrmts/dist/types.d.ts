@@ -64,11 +64,13 @@ export interface FetchOptionsBase {
 export interface Pyramid {
     storage: StorageBackend;
     keyTemplate: string;
+    partialKey?: string;
     axis: Axis;
     binCol: string;
     dims: Dim[];
     metrics: Metric[];
     tiers: Tier[];
+    partials?: Duration[];
     geo?: GeoSpec;
 }
 export interface GeoSpec {

@@ -15,7 +15,7 @@ export interface FetchPyramidQueryInput {
     fetchImpl?: typeof fetch;
 }
 export interface PlanMeta {
-    outputTier: string;
+    outputTier?: string;
     outputBin: string;
     authoritativeEnd: string | null;
     smoothing: {

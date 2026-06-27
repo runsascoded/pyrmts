@@ -16,12 +16,17 @@ import { s2 } from 's2js';
 import { isCellInCover, minimalCover as runMinimalCover } from './spatial-index-cover.js';
 const { cellid, LatLng, Rect, RegionCoverer } = s2;
 // `bboxToCells` upper bound. S2's `RegionCoverer` uses `maxCells` both as
-// an output cap and as a work-bound for the covering search; setting it
-// arbitrarily high effectively asks for the complete level-uniform cover.
-// 1M is well past anything we'd realistically query (NYC bbox at S2 lvl
-// 14 ≈ 25k cells; per-tile global cover at S2 lvl 10 ≈ 1.5M, so we cap
-// just under that to prevent runaway).
-const COVERER_MAX_CELLS = 1_000_000;
+// an output cap and as a work-bound: each candidate carries ~100-200 bytes
+// of `S2CellID` + priority-queue metadata, so the previous 1M cap could
+// peak at 100-200 MB and OOM under the V8 / CF Worker 128 MB heap limit.
+//
+// 10k bounds peak heap to ~1-2 MB. Real covers are well under 1k cells
+// (NYC bbox at S2 L15 covered by ~few-hundred cells; callers' explicit
+// `cellBudget` is typically 1024), so 10k gives the candidate-priority-
+// queue ~10× headroom for refinement without blowing the heap. If a
+// future caller legitimately needs more, expose `maxCells` as an optional
+// `bboxToCells` argument.
+const COVERER_MAX_CELLS = 10_000;
 export const s2Index = {
     name: 's2',
     maxLevel: 30,

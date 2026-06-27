@@ -63,12 +63,13 @@ export function planGeoQuery(pyramid, input) {
         from: seg.from,
         to: seg.to,
         shardTier: seg.shardTier,
+        shardCadence: seg.shardCadence,
         keys: seg.keys,
         reaggregate: seg.reaggregate,
         cells: outputCells,
     }));
     return {
-        outputTier: timePlan.outputTier,
+        ...(timePlan.outputTier !== undefined ? { outputTier: timePlan.outputTier } : {}),
         outputBin: timePlan.outputBin,
         outputRes,
         outputCells,

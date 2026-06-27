@@ -10,6 +10,7 @@ export interface PlanQueryInput {
         to: Date;
     };
     binBudget: number;
+    targetBin?: Duration;
     watermarks?: Record<string, Date>;
     earliestWatermarks?: Record<string, Date>;
     filter?: Record<string, string | number>;
@@ -21,11 +22,12 @@ export interface PlanSegment {
     from: Date;
     to: Date;
     shardTier: Tier;
+    shardCadence: Duration | null;
     keys: string[];
     reaggregate: boolean;
 }
 export interface QueryPlan {
-    outputTier: Tier;
+    outputTier?: Tier;
     outputBin: Bin;
     segments: PlanSegment[];
     authoritativeEnd: Date | null;

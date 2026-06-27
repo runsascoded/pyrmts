@@ -16,7 +16,7 @@ export interface FetchPyramidGeoQueryInput {
     fetchImpl?: typeof fetch;
 }
 export interface GeoPlanMeta {
-    outputTier: string;
+    outputTier?: string;
     outputBin: string;
     outputRes: number;
     outputCells: string[];

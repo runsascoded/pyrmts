@@ -80,12 +80,13 @@ export async function serveGeoQuery(opts) {
         // Project the geo plan down to a plain QueryPlan for stitch (which
         // lives in pyrmts core and doesn't know about geo fields).
         const timePlan = {
-            outputTier: plan.outputTier,
+            ...(plan.outputTier !== undefined ? { outputTier: plan.outputTier } : {}),
             outputBin: plan.outputBin,
             segments: plan.segments.map(s => ({
                 from: s.from,
                 to: s.to,
                 shardTier: s.shardTier,
+                shardCadence: s.shardCadence,
                 keys: s.keys,
                 reaggregate: s.reaggregate,
             })),
@@ -97,7 +98,7 @@ export async function serveGeoQuery(opts) {
         result = {
             records,
             plan: {
-                outputTier: plan.outputTier.name,
+                ...(plan.outputTier !== undefined ? { outputTier: plan.outputTier.name } : {}),
                 outputBin: plan.outputBin,
                 outputRes: plan.outputRes,
                 outputCells: plan.outputCells,

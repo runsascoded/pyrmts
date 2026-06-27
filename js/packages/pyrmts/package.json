@@ -13,6 +13,10 @@
     "./react": {
       "types": "./dist/use-pyramid.d.ts",
       "import": "./dist/use-pyramid.js"
+    },
+    "./test-utils": {
+      "types": "./dist/shard-index-conformance.d.ts",
+      "import": "./dist/shard-index-conformance.js"
     }
   },
   "files": [

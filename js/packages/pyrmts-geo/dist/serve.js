@@ -57,6 +57,7 @@ export async function serveGeoQuery(opts) {
     const smoothMode = smoothModeRaw === null ? undefined : smoothModeRaw;
     const watermarks = await resolveWatermarks(opts.watermarks, request);
     const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request);
+    const earliestPerCadence = await resolveWatermarks(opts.earliestPerCadence, request);
     let result;
     try {
         const plan = planGeoQuery(pyramid, {
@@ -66,6 +67,7 @@ export async function serveGeoQuery(opts) {
             cellBudget,
             watermarks,
             earliestWatermarks,
+            earliestPerCadence,
             filter,
             ...(smoothing !== undefined ? { smoothing } : {}),
             ...(smoothMode !== undefined ? { smoothMode } : {}),

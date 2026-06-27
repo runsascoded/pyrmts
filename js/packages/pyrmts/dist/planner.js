@@ -38,7 +38,7 @@ export function planQuery(pyramid, input) {
     // Watermarks clamp to the *extended* window so the buffer can include
     // post-`to` bins for centered smoothing (otherwise the trailing buffer
     // gets silently truncated to the original `to`).
-    const grid = effectiveShardWatermarks(pyramid, validated, input.watermarks ?? {}, plannedTo);
+    const grid = effectiveShardWatermarks(pyramid, validated, input.watermarks ?? {}, input.earliestPerCadence ?? {}, plannedTo);
     // Walk from output tier down to finest. Within each tier, walk
     // `(canonical, partials sorted by ascending effective)` — emit a
     // segment per shard up to its effective watermark. Once a tier's
@@ -59,9 +59,25 @@ export function planQuery(pyramid, input) {
         const entries = grid.byTier[tier.name];
         for (const entry of entries) {
             const segEnd = entry.effective.getTime() < plannedTo.getTime() ? entry.effective : plannedTo;
-            const tierFloor = earlyT && earlyT.getTime() > cursor.getTime() ? earlyT : cursor;
-            const segStart = tierFloor;
-            if (segEnd.getTime() > segStart.getTime()) {
+            // Floors:
+            //   - cursor          tier-walk position
+            //   - earlyT          per-tier earliest (propagated up-ladder)
+            //   - entry.earlyE    per-(tier, cadence) earliest (no propagation)
+            let segStart = cursor;
+            if (earlyT && earlyT.getTime() > segStart.getTime())
+                segStart = earlyT;
+            // Per-cadence is a "this specific file isn't there" gate, distinct from
+            // the per-tier "tier owns this range" semantics. When it ENTIRELY covers
+            // the entry's range, fall through to subsequent entries (and the next
+            // coarser tier) — DON'T advance cursor past the gated entry. When it
+            // partially gates, clamp segStart forward and advance cursor normally;
+            // the pre-gate portion is dropped (same as per-tier earliest today).
+            const earlyE = entry.earliestEntry;
+            const earlyEFullyGates = earlyE !== undefined && earlyE.getTime() >= segEnd.getTime();
+            if (!earlyEFullyGates && earlyE && earlyE.getTime() > segStart.getTime()) {
+                segStart = earlyE;
+            }
+            if (!earlyEFullyGates && segEnd.getTime() > segStart.getTime()) {
                 segments.push({
                     from: segStart,
                     to: segEnd,
@@ -71,7 +87,7 @@ export function planQuery(pyramid, input) {
                     reaggregate: i !== outputIdx,
                 });
             }
-            if (segEnd.getTime() > cursor.getTime())
+            if (!earlyEFullyGates && segEnd.getTime() > cursor.getTime())
                 cursor = segEnd;
             if (cursor.getTime() >= plannedTo.getTime())
                 break;
@@ -332,7 +348,7 @@ function pickTier(tiers, from, to, binBudget) {
 // `${tier}` for canonical, `${tier}@${cadence}` for partials. Tier-only
 // keys (today's convention) are still valid for canonical-only
 // pyramids; no migration required.
-function effectiveShardWatermarks(pyramid, validated, declared, rangeTo) {
+function effectiveShardWatermarks(pyramid, validated, declared, earliestPerCadence, rangeTo) {
     const out = {};
     const FAR_FUTURE = new Date(8.64e15);
     let finerTierMax = FAR_FUTURE; // bounds coarser tiers; FAR_FUTURE = no bound for finest
@@ -372,7 +388,11 @@ function effectiveShardWatermarks(pyramid, validated, declared, rangeTo) {
             withinTierBound = eff;
         }
         // Cross-tier bound + clamp to rangeTo. Track this tier's max for the
-        // next-coarser tier's pass.
+        // next-coarser tier's pass. Per-entry `earliestEntry` rides alongside —
+        // pure projection of `earliestPerCadence` keyed by encoded (tier, cadence).
+        // It does NOT participate in `min` propagation: it's a statement about
+        // THIS specific shard's file availability, not about underlying data
+        // shape the tier could synthesize.
         const entries = [];
         let tierMax = new Date(0);
         for (const { cadence } of decls) {
@@ -380,7 +400,12 @@ function effectiveShardWatermarks(pyramid, validated, declared, rangeTo) {
             const cross = e.getTime() < finerTierMax.getTime() ? e : finerTierMax;
             const clampedMs = Math.min(cross.getTime(), rangeTo.getTime());
             const final = new Date(clampedMs);
-            entries.push({ cadence, effective: final });
+            const earliestEntry = earliestPerCadence[encodeWatermarkKey(tier.name, cadence)];
+            entries.push({
+                cadence,
+                effective: final,
+                ...(earliestEntry !== undefined ? { earliestEntry } : {}),
+            });
             if (clampedMs > tierMax.getTime())
                 tierMax = new Date(clampedMs);
         }

@@ -13,6 +13,7 @@ export interface PlanQueryInput {
     targetBin?: Duration;
     watermarks?: Record<string, Date>;
     earliestWatermarks?: Record<string, Date>;
+    earliestPerCadence?: Record<string, Date>;
     filter?: Record<string, string | number>;
     smoothing?: SmoothingSpec;
     smoothMode?: SmoothMode;

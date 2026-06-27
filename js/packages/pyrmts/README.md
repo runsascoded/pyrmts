@@ -205,7 +205,15 @@ runs the planner + fetch + stitcher, returns
   - `input.targetBin?` — caller-specified output width; ragged decomposition
     via per-bin DP when no tier matches exactly.
   - `input.range`, `input.watermarks`, `input.earliestWatermarks`,
-    `input.filter`, `input.smoothing`, `input.smoothMode`.
+    `input.earliestPerCadence`, `input.filter`, `input.smoothing`,
+    `input.smoothMode`.
+  - `earliestPerCadence` — per-`(tier, cadence)` earliest-available-bin
+    gate keyed by `${tier}@${cadence}` (or bare `${tier}` for canonical).
+    Per-entry only, no propagation up the tier ladder; complements
+    `earliestWatermarks` (which propagates). Use for partial sub-shards
+    with forward-only coverage from a cron deploy date when coarser tiers
+    have full canonical backfill. See
+    [`specs/done/per-cadence-earliest.md`](../../../specs/done/per-cadence-earliest.md).
 - `binsInRange(from, to, bin): number`, `parseDuration`, `floorToSpan`,
   `addSpan`, `shardPeriodsCovering`, `formatPeriod` — duration helpers.
 

@@ -46,6 +46,7 @@ export function planGeoQuery(pyramid, input) {
         binBudget: input.binBudget,
         ...(input.watermarks !== undefined ? { watermarks: input.watermarks } : {}),
         ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
+        ...(input.earliestPerCadence !== undefined ? { earliestPerCadence: input.earliestPerCadence } : {}),
         ...(input.filter !== undefined ? { filter: input.filter } : {}),
         ...(input.smoothing !== undefined ? { smoothing: input.smoothing } : {}),
         ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),

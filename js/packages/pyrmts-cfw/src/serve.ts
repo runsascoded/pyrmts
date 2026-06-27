@@ -34,6 +34,16 @@ export interface ServeOptions {
   earliestWatermarks?:
     | Record<string, Date>
     | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
+  // Per-(tier, cadence) earliest-available-bin instants, keyed by the
+  // `ShardIndex` convention (`${tier}@${cadence}` for partials, bare
+  // `${tier}` for canonical). Per-entry gate that doesn't propagate up
+  // the tier ladder — use for partial sub-shards with forward-only
+  // coverage (e.g. a cascading cron started writing on a deploy date,
+  // but coarser tiers were canonically backfilled from epoch). See
+  // `specs/done/per-cadence-earliest.md`.
+  earliestPerCadence?:
+    | Record<string, Date>
+    | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
   // Treat missing shard objects as empty instead of erroring. Pair with
   // `earliestWatermarks` for the cleanest behavior: earliest watermarks
   // skip planning shards that shouldn't exist; tolerate404 catches the
@@ -79,6 +89,7 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
 
   const watermarks = await resolveWatermarks(opts.watermarks, request)
   const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request)
+  const earliestPerCadence = await resolveWatermarks(opts.earliestPerCadence, request)
 
   let result: { records: unknown[]; plan: unknown }
   try {
@@ -87,6 +98,7 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
       binBudget,
       watermarks,
       earliestWatermarks,
+      earliestPerCadence,
       filter,
       ...(smoothing !== undefined ? { smoothing } : {}),
       ...(smoothMode !== undefined ? { smoothMode } : {}),
@@ -150,7 +162,10 @@ function parseSmoothing(raw: string | null): SmoothingSpec | undefined {
 }
 
 async function resolveWatermarks(
-  src: ServeOptions['watermarks'] | ServeOptions['earliestWatermarks'],
+  src:
+    | ServeOptions['watermarks']
+    | ServeOptions['earliestWatermarks']
+    | ServeOptions['earliestPerCadence'],
   request: Request,
 ): Promise<Record<string, Date>> {
   if (src === undefined) return {}

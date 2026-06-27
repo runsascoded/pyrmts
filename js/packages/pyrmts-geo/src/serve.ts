@@ -31,6 +31,11 @@ export interface ServeGeoOptions {
   earliestWatermarks?:
     | Record<string, Date>
     | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
+  // Per-(tier, cadence) earliest-available-bin instants. See pyrmts-cfw
+  // `ServeOptions`.
+  earliestPerCadence?:
+    | Record<string, Date>
+    | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
   // Treat missing shard objects as empty instead of erroring. See pyrmts-cfw
   // `ServeOptions`.
   tolerateMissingShards?: boolean
@@ -88,6 +93,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
 
   const watermarks = await resolveWatermarks(opts.watermarks, request)
   const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request)
+  const earliestPerCadence = await resolveWatermarks(opts.earliestPerCadence, request)
 
   let result: { records: unknown[]; plan: unknown }
   try {
@@ -98,6 +104,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
       cellBudget,
       watermarks,
       earliestWatermarks,
+      earliestPerCadence,
       filter,
       ...(smoothing !== undefined ? { smoothing } : {}),
       ...(smoothMode !== undefined ? { smoothMode } : {}),
@@ -176,7 +183,10 @@ function parseBBox(s: string | null): BBox | null {
 }
 
 async function resolveWatermarks(
-  src: ServeGeoOptions['watermarks'] | ServeGeoOptions['earliestWatermarks'],
+  src:
+    | ServeGeoOptions['watermarks']
+    | ServeGeoOptions['earliestWatermarks']
+    | ServeGeoOptions['earliestPerCadence'],
   request: Request,
 ): Promise<Record<string, Date>> {
   if (src === undefined) return {}

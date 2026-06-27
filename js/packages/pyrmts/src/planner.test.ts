@@ -1123,3 +1123,248 @@ describe('planQuery: partials (phase 5 — grid walk)', () => {
     expect(plan.authoritativeEnd).toEqual(d('2026-06-21T18:00:00Z'))
   })
 })
+
+describe('planQuery: earliestPerCadence (per-(tier, cadence) earliest, no propagation)', () => {
+  // Same partial-aware pyramid used above. Tests confirm the per-(tier, cadence)
+  // gate fires per-entry only — no within-tier or cross-tier propagation —
+  // and that the cursor doesn't advance past entries whose entire range is
+  // gated (so coarser fall-through can still serve them via canonical etc.).
+  const availPartials: Pyramid = {
+    storage: mockStorage,
+    keyTemplate: 'avail/{tier}/{period}.parquet',
+    partialKey: 'avail/{tier}/p{shard}/{period}.parquet',
+    axis: 'time',
+    binCol: 'ts',
+    dims: [],
+    metrics: [{ name: 'n', monoid: 'sum' }],
+    tiers: [
+      { name: 'raw', bin: '1min', shard: '1d' },
+      { name: 'h1', bin: '1h', shard: '1d' },
+    ],
+    partials: ['1h', '3h'],
+  }
+
+  test('fully gates one entry; sibling entries in same tier emit normally; finer fall-through covers the gated tail', () => {
+    // h1 canonical suppressed (epoch0). h1@3h sealed thru 14:00; h1@1h sealed
+    // thru 18:00 but its per-cadence-earliest gates the whole query range.
+    // Expected:
+    //   - canonical: no emit (eff=epoch0).
+    //   - 3h: EMIT [12, 14) (sibling, NOT gated).
+    //   - 1h: per-cadence fully gates → no emit, no cursor advance.
+    //   - raw (finer fall-through): EMIT [14, 18) with reaggregate.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-15T12:00:00Z'), to: d('2026-06-15T18:00:00Z') },
+      binBudget: 100,
+      watermarks: {
+        'h1':    d('1970-01-01T00:00:00Z'),
+        'h1@3h': d('2026-06-15T14:00:00Z'),
+        'h1@1h': d('2026-06-15T18:00:00Z'),
+        'raw':   d('2026-06-15T18:00:00Z'),
+      },
+      earliestPerCadence: {
+        'h1@1h': d('2026-06-27T16:00:00Z'),  // way past plannedTo → fully gates
+      },
+    })
+    expect(partialSegments(plan)).toEqual([
+      {
+        from: '2026-06-15T12:00:00.000Z',
+        to:   '2026-06-15T14:00:00.000Z',
+        tier: 'h1',
+        cadence: '3h',
+        keys: [
+          'avail/h1/p3h/2026-06-15T12.parquet',
+        ],
+      },
+      {
+        from: '2026-06-15T14:00:00.000Z',
+        to:   '2026-06-15T18:00:00.000Z',
+        tier: 'raw',
+        cadence: null,
+        keys: ['avail/raw/2026-06-15.parquet'],
+      },
+    ])
+  })
+
+  test('does NOT propagate up the tier ladder — coarser tier emits canonical for the old window', () => {
+    // Contrast with `earliestWatermarks: { raw: futureDate }`, which would
+    // propagate up to h1 and gate it. With `earliestPerCadence: { 'raw@1h': ... }`,
+    // h1 sees no propagated gate and emits canonical normally.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-15T12:00:00Z'), to: d('2026-06-15T18:00:00Z') },
+      binBudget: 100,
+      watermarks: {
+        'raw':    d('2026-06-15T18:00:00Z'),
+        'raw@1h': d('2026-06-15T18:00:00Z'),
+        'h1':     d('2026-06-15T18:00:00Z'),
+      },
+      earliestPerCadence: {
+        'raw@1h': d('2026-06-27T16:00:00Z'),  // gates THIS entry only
+      },
+    })
+    // Output tier h1 (24h × 1h budget 1000); walk h1, emit canonical for full range.
+    expect(partialSegments(plan)).toEqual([{
+      from: '2026-06-15T12:00:00.000Z',
+      to:   '2026-06-15T18:00:00.000Z',
+      tier: 'h1',
+      cadence: null,
+      keys: ['avail/h1/2026-06-15.parquet'],
+    }])
+  })
+
+  test('contrast: per-tier earliest on raw DOES propagate and gates h1 too', () => {
+    // Same setup as the previous test, but the gate is per-tier on raw —
+    // which DOES propagate up to h1 (existing semantics). h1's effective
+    // earliest = max(undeclared, raw's earliest) = raw's earliest = future →
+    // h1 fully gated; raw also gated; no segments emit.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-15T12:00:00Z'), to: d('2026-06-15T18:00:00Z') },
+      binBudget: 100,
+      watermarks: {
+        'raw': d('2026-06-15T18:00:00Z'),
+        'h1':  d('2026-06-15T18:00:00Z'),
+      },
+      earliestWatermarks: {
+        raw: d('2026-06-27T16:00:00Z'),
+      },
+    })
+    expect(plan.segments).toEqual([])
+  })
+
+  test('per-tier + per-cadence both set: per-cadence further restricts a specific entry within the tier', () => {
+    // earliestWatermarks: raw=D1 → propagates to h1.earlyT=D1.
+    // earliestPerCadence: h1@1h=D2 (D2 > D1) → further restricts THAT entry.
+    // h1 canonical: not gated by per-cadence; gated by per-tier=D1 (i.e. clamps to D1).
+    // h1@3h: not gated by per-cadence; gated by per-tier=D1.
+    // h1@1h: gated by max(per-tier=D1, per-cadence=D2) = D2.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-15T00:00:00Z'), to: d('2026-06-15T18:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'h1':    d('1970-01-01T00:00:00Z'),
+        'h1@3h': d('2026-06-15T18:00:00Z'),
+        'h1@1h': d('2026-06-15T18:00:00Z'),
+        'raw':   d('2026-06-15T18:00:00Z'),
+      },
+      earliestWatermarks: {
+        raw: d('2026-06-15T10:00:00Z'),  // D1 — propagates: h1.earlyT also = 10:00
+      },
+      earliestPerCadence: {
+        'h1@1h': d('2026-06-15T15:00:00Z'),  // D2 — further restricts h1@1h only
+      },
+    })
+    // Walk h1: canonical (epoch0, no emit), 3h (segEnd=18:00, segStart=max(cursor=00,
+    // earlyT=10:00) = 10:00; no per-cadence → EMIT [10:00, 18:00) on h1@3h),
+    // cursor=18:00, break. h1@1h's gate is never observed because 3h covered.
+    // The per-cadence test below uses a configuration that exposes the
+    // per-cadence floor specifically.
+    expect(partialSegments(plan)).toEqual([{
+      from: '2026-06-15T10:00:00.000Z',
+      to:   '2026-06-15T18:00:00.000Z',
+      tier: 'h1',
+      cadence: '3h',
+      keys: [
+        'avail/h1/p3h/2026-06-15T09.parquet',
+        'avail/h1/p3h/2026-06-15T12.parquet',
+        'avail/h1/p3h/2026-06-15T15.parquet',
+      ],
+    }])
+  })
+
+  test('per-cadence partially gates (earliestEntry within entry range) → clamps segStart, cursor advances normally', () => {
+    // h1 canonical suppressed. h1@3h has eff=14:00. h1@1h has eff=18:00 and
+    // earliestEntry=16:00 (PARTIAL gate — falls inside the entry's range
+    // [14:00, 18:00)). Expected:
+    //   - canonical: no emit.
+    //   - 3h: EMIT [12, 14).
+    //   - 1h: segStart clamps to 16:00; EMIT [16:00, 18:00). cursor → 18:00.
+    //   - Pre-gate gap [14:00, 16:00) is dropped (same as per-tier earliest
+    //     behavior on a leading clamp). No raw fall-through for the gap.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-15T12:00:00Z'), to: d('2026-06-15T18:00:00Z') },
+      binBudget: 100,
+      watermarks: {
+        'h1':    d('1970-01-01T00:00:00Z'),
+        'h1@3h': d('2026-06-15T14:00:00Z'),
+        'h1@1h': d('2026-06-15T18:00:00Z'),
+        'raw':   d('2026-06-15T18:00:00Z'),
+      },
+      earliestPerCadence: {
+        'h1@1h': d('2026-06-15T16:00:00Z'),
+      },
+    })
+    expect(partialSegments(plan)).toEqual([
+      {
+        from: '2026-06-15T12:00:00.000Z',
+        to:   '2026-06-15T14:00:00.000Z',
+        tier: 'h1',
+        cadence: '3h',
+        keys: ['avail/h1/p3h/2026-06-15T12.parquet'],
+      },
+      {
+        from: '2026-06-15T16:00:00.000Z',
+        to:   '2026-06-15T18:00:00.000Z',
+        tier: 'h1',
+        cadence: '1h',
+        keys: [
+          'avail/h1/p1h/2026-06-15T16.parquet',
+          'avail/h1/p1h/2026-06-15T17.parquet',
+        ],
+      },
+    ])
+  })
+
+  test('canonical-key form (bare tier) is accepted and gates the canonical entry only', () => {
+    // Bare `${tier}` key in earliestPerCadence → applies to the canonical
+    // entry of that tier (no propagation). Distinct from the per-tier
+    // `earliestWatermarks[tier]` form (which propagates up-ladder).
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-15T12:00:00Z'), to: d('2026-06-15T18:00:00Z') },
+      binBudget: 100,
+      watermarks: {
+        'h1':    d('2026-06-15T18:00:00Z'),
+        'h1@3h': d('2026-06-15T18:00:00Z'),
+        'h1@1h': d('2026-06-15T18:00:00Z'),
+        'raw':   d('2026-06-15T18:00:00Z'),
+      },
+      earliestPerCadence: {
+        h1: d('2026-06-27T16:00:00Z'),  // future → fully gates h1 canonical
+      },
+    })
+    // Walk h1: canonical fully gated → no emit, no cursor advance.
+    //   Then 3h sort-tied with 1h at 18:00 (coarser first): 3h EMITS [12, 18).
+    // h1@1h would have been gated entirely by its own per-cadence entry only if
+    // declared — it isn't here, so the 3h emit covers the full query.
+    expect(partialSegments(plan)).toEqual([{
+      from: '2026-06-15T12:00:00.000Z',
+      to:   '2026-06-15T18:00:00.000Z',
+      tier: 'h1',
+      cadence: '3h',
+      keys: [
+        'avail/h1/p3h/2026-06-15T12.parquet',
+        'avail/h1/p3h/2026-06-15T15.parquet',
+      ],
+    }])
+  })
+
+  test('earliestPerCadence undeclared → behaves exactly like today', () => {
+    // Backwards-compat: omitting earliestPerCadence preserves existing
+    // segment emission. Same as the canonical phase-5 test.
+    const plan = planQuery(availPartials, {
+      range: { from: d('2026-06-20T00:00:00Z'), to: d('2026-06-21T18:00:00Z') },
+      binBudget: 1000,
+      watermarks: {
+        'h1':    d('2026-06-21T00:00:00Z'),
+        'h1@3h': d('2026-06-21T15:00:00Z'),
+        'h1@1h': d('2026-06-21T17:00:00Z'),
+        'raw':   d('2026-06-21T18:00:00Z'),
+      },
+    })
+    expect(plan.segments).toHaveLength(4)
+    expect(plan.segments.map(s => `${s.shardTier.name}@${s.shardCadence ?? 'canon'}`)).toEqual([
+      'h1@canon',
+      'h1@3h',
+      'h1@1h',
+      'raw@canon',
+    ])
+  })
+})

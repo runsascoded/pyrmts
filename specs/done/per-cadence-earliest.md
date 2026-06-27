@@ -304,3 +304,45 @@ multiple consumers need it.
 - ctbk bumps its pyrmts pin, restores `/1m` to `TIERS` + `partials`/
   `partialKey` (the previously-rolled-back state in commit `287bed61`),
   threads `earliestPerCadence` from D1.
+
+## Resolution
+
+Shipped as specified, with a few clarifications surfaced during
+implementation:
+
+- **Cursor-advance semantics on full gate.** The spec's segment-loop
+  snippet only specified the `segStart` computation, not whether the
+  cursor advances when an entry is fully gated. The use case ("query
+  for 6/15 lands on /2m canonical") forces the answer: when the
+  per-cadence floor `≥ segEnd` (entire entry gated), the cursor
+  does NOT advance — subsequent entries / coarser fall-through can
+  serve the range. When the per-cadence floor falls INSIDE the
+  entry's range (partial gate), `segStart` clamps forward, the
+  segment emits the post-gate portion, and the cursor advances to
+  `segEnd` (same as per-tier earliest's leading-clamp behavior;
+  the pre-gate portion is dropped).
+- **Canonical-key form supported.** The "Out of scope" section
+  flagged canonical-key entries (`earliestPerCadence['1m']`) as
+  redundant with `earliestWatermarks['1m']`; in practice the
+  encoder/decoder for `(tier, cadence|null)` already handles it,
+  so the implementation accepts both encoded forms (canonical via
+  bare `${tier}`, partial via `${tier}@${cadence}`). When both
+  `earliestWatermarks[tier]` and `earliestPerCadence[tier]` are
+  set, both are floors for the canonical entry — `max(...)`
+  determines `segStart` — and `earliestWatermarks[tier]` continues
+  to propagate up the ladder as today (per-cadence does not).
+- **`planRagged` not threaded.** The ragged-decomposition path stays
+  canonical-only (consistent with how it was left in
+  `partial-shards.md`). `earliestPerCadence` is silently ignored
+  there. If a future consumer needs ragged + partial integration,
+  spec the extension separately.
+- **Tests.** 7 new tests in `planner.test.ts` under
+  `describe('planQuery: earliestPerCadence …')` cover: full-gate
+  with sibling-emits and finer fall-through; non-propagation across
+  tiers (contrasted with `earliestWatermarks` propagation); per-tier
+  + per-cadence combined; partial-gate (segStart clamp + cursor
+  advance); canonical-key form; backwards-compat (undeclared →
+  unchanged emission).
+- **Threading.** `PlanGeoQueryInput.earliestPerCadence` and
+  `ServeOptions.earliestPerCadence` (cfw + geo) added — same
+  callback-or-record shape as `earliestWatermarks`.

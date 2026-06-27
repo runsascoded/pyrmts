@@ -60,6 +60,9 @@ export interface PlanGeoQueryInput {
   outputCells?: { res: number; cells: readonly string[] }
   watermarks?: Record<string, Date>
   earliestWatermarks?: Record<string, Date>
+  // See `pyrmts.PlanQueryInput.earliestPerCadence`. Keyed by encoded
+  // `(tier, cadence)` (e.g. `'1m@5min'`). Per-entry gate, no propagation.
+  earliestPerCadence?: Record<string, Date>
   filter?: Record<string, string | number>
   // Server-side rolling-window smoothing (see `pyrmts` `PlanQueryInput`).
   smoothing?: import('pyrmts').SmoothingSpec
@@ -114,6 +117,7 @@ export function planGeoQuery(
     binBudget: input.binBudget,
     ...(input.watermarks !== undefined ? { watermarks: input.watermarks } : {}),
     ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
+    ...(input.earliestPerCadence !== undefined ? { earliestPerCadence: input.earliestPerCadence } : {}),
     ...(input.filter !== undefined ? { filter: input.filter } : {}),
     ...(input.smoothing !== undefined ? { smoothing: input.smoothing } : {}),
     ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),

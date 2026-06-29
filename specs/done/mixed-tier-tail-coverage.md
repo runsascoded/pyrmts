@@ -1,5 +1,10 @@
 # Mixed-tier tail coverage (fall through to finer partials past output tier's watermark)
 
+> **Superseded by [`unified-shard-ladder.md`](./unified-shard-ladder.md).**
+> The finer-tier fall-through behavior this spec described is now the
+> default behavior of the cursor-aware-largest-first planner walk; no
+> separate "tail-coverage" concept needed.
+
 ## Resolution: already implemented — spec misdiagnosed
 
 After authoring this spec, traced `planner.ts` and found the feature

@@ -66,7 +66,10 @@ function ctbkTripsParquet(): Uint8Array {
 
 function buildPyramid(): Pyramid {
   const data = new Map<string, Uint8Array>()
-  data.set('trips/h1/2026-01.parquet', ctbkTripsParquet())
+  // Use 1d shards so a 1-day query aligns with the shard period boundary
+  // (the planner's seal check requires `effective ≥ periodEnd`, and
+  // `effective` gets clamped to `rangeTo`).
+  data.set('trips/h1/2026-01-01.parquet', ctbkTripsParquet())
   return {
     storage: parquetBackend(memStorage(data)),
     keyTemplate: 'trips/{tier}/{period}.parquet',
@@ -75,8 +78,8 @@ function buildPyramid(): Pyramid {
     dims: [],
     metrics: [{ name: 'count', monoid: 'count' }],
     tiers: [
-      { name: 'h1', bin: '1h', shard: '1mo' },
-      { name: 'd1', bin: '1d', shard: '1y' },
+      { name: 'h1', bin: '1h', shards: ['1d'] },
+      { name: 'd1', bin: '1d', shards: ['1y'] },
     ],
     geo: { cellCol: 'h3_cell', resolutions: [9, 7, 5] },
   }
@@ -89,7 +92,9 @@ describe('pyrmts-geo end-to-end', () => {
   test('plan → fetch → filter (res 9) → stitch yields per-station rows', async () => {
     const pyramid = buildPyramid()
     const plan = planGeoQuery(pyramid, {
-      range: { from: new Date('2026-01-01T00:00:00Z'), to: new Date('2026-01-01T02:00:00Z') },
+      // Query window aligned to a 1d shard boundary so the planner's seal
+      // check accepts the shard (the data only fills hours 0 and 1).
+      range: { from: new Date('2026-01-01T00:00:00Z'), to: new Date('2026-01-02T00:00:00Z') },
       binBudget: 100,
       bbox: BBOX,
       cellBudget: 1000,    // big enough to fit res-9 cells in this bbox
@@ -110,7 +115,7 @@ describe('pyrmts-geo end-to-end', () => {
         outputTier: plan.outputTier,
         outputBin: plan.outputBin,
         segments: plan.segments.map(s => ({
-          from: s.from, to: s.to, shardTier: s.shardTier, keys: s.keys, reaggregate: s.reaggregate,
+          from: s.from, to: s.to, shardTier: s.shardTier, shardDur: s.shardDur, keys: s.keys, reaggregate: s.reaggregate,
         })),
         authoritativeEnd: plan.authoritativeEnd,
         visibleRange: plan.visibleRange,
@@ -137,7 +142,7 @@ describe('pyrmts-geo end-to-end', () => {
   test('coarser cellBudget picks res 7 and aggregates stations sharing a cell', async () => {
     const pyramid = buildPyramid()
     const plan = planGeoQuery(pyramid, {
-      range: { from: new Date('2026-01-01T00:00:00Z'), to: new Date('2026-01-01T02:00:00Z') },
+      range: { from: new Date('2026-01-01T00:00:00Z'), to: new Date('2026-01-02T00:00:00Z') },
       binBudget: 100,
       bbox: BBOX,
       cellBudget: 3,    // res 9 has ~10 cells in bbox → won't fit; res 7 likely fits
@@ -153,7 +158,7 @@ describe('pyrmts-geo end-to-end', () => {
         outputTier: plan.outputTier,
         outputBin: plan.outputBin,
         segments: plan.segments.map(s => ({
-          from: s.from, to: s.to, shardTier: s.shardTier, keys: s.keys, reaggregate: s.reaggregate,
+          from: s.from, to: s.to, shardTier: s.shardTier, shardDur: s.shardDur, keys: s.keys, reaggregate: s.reaggregate,
         })),
         authoritativeEnd: plan.authoritativeEnd,
         visibleRange: plan.visibleRange,

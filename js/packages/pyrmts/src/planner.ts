@@ -3,9 +3,9 @@
 // re-aggregate. No I/O.
 
 import { addSpan, binsInRange, fixedDurationMs, floorToSpan, parseDuration, shardPeriodsCovering } from './axis.js'
-import { validatePartials, type ValidatedPartials } from './partials.js'
+import { validateLadders } from './ladder.js'
 import { encodeWatermarkKey } from './shard-index.js'
-import type { Bin, Duration, Pyramid, Tier } from './types.js'
+import type { Bin, Duration, Pyramid, Shard, Tier } from './types.js'
 
 export type SmoothMode = 'centered' | 'trailing'
 
@@ -38,33 +38,28 @@ export interface PlanQueryInput {
   // width they want); restoring budget enforcement is left to the caller
   // (compute `binsInRange(range, targetBin)` beforehand).
   targetBin?: Duration
-  // tier_name → latest complete bin instant. Missing tier means "complete
-  // through `range.to`" (consumer is responsible for accuracy). Coarser tiers
-  // are clamped to never exceed finer ones' watermarks (a coarse tier can't
-  // hold data past where its finer source ends).
+  // Watermark grid: `${tier}@${shardDur}` → latest sealed bin instant for
+  // that (tier, shardDur) cell. Undeclared cells default to FAR_FUTURE
+  // ("complete through `plannedTo`"). Within-tier `min` propagation walks
+  // ascending shard duration (smaller bounds larger — larger shards are
+  // built from smaller via promotion). Cross-tier `min` propagation: a
+  // coarser tier's per-shard-duration effective is bounded by the
+  // finer tier's max-effective.
   watermarks?: Record<string, Date>
-  // tier_name → earliest available bin instant. Missing tier means "available
-  // since the beginning of time" (no clamp). Coarser tiers are clamped to
-  // never start before finer ones' earliest (a coarser tier is built from a
-  // finer one, so it can't have data earlier than its source — symmetric to
-  // `watermarks` propagation, opposite direction). Use for pyramids with
-  // heterogeneous dim coverage so the planner doesn't emit shard keys for
-  // periods that pre-date a dim's data start.
+  // Per-tier earliest-available-bin instants. Missing tier means "available
+  // since beginning of time". Coarser tiers' earliest are bounded by finer
+  // tier's earliest (a coarser tier can't have data earlier than its source).
   earliestWatermarks?: Record<string, Date>
-  // `(tier, cadence)` → earliest available bin instant, keyed by the
-  // `ShardIndex` convention: `${tier}@${cadence}` for partial sub-shards,
-  // bare `${tier}` for canonical. Per-entry gating only — does NOT
-  // propagate up the tier ladder (unlike `earliestWatermarks`). Use when
-  // a partial sub-shard has forward-only coverage from a deploy / backfill
-  // start, and you DON'T want the constraint to poison coarser tiers that
-  // have full canonical backfill. If both `earliestWatermarks[tier]` and
-  // `earliestPerCadence[tier]` are set, the per-cadence one wins for the
-  // canonical entry (further restricts it); the per-tier one continues to
-  // apply to other tiers via propagation. See
-  // `specs/done/per-cadence-earliest.md`.
-  earliestPerCadence?: Record<string, Date>
+  // Per-(tier, shardDur) earliest-available-bin instants, keyed
+  // `${tier}@${shardDur}`. Per-entry gate that doesn't propagate up the
+  // tier ladder (use for partial-shard ladders with forward-only coverage
+  // from a deploy date). When a (tier, shardDur)'s containing period falls
+  // entirely before its earliest, the planner falls through to the next
+  // smaller shard duration (or finer tier). See
+  // `specs/done/unified-shard-ladder.md`.
+  earliestPerShard?: Record<string, Date>
   // dim_name → value, for `{dim_name}` placeholders in the key template
-  // (e.g. `awair-{device_id}/{tier}/{period}.parquet`).
+  // (e.g. `awair-{device_id}/{tier}/{shard}/{period}.parquet`).
   filter?: Record<string, string | number>
   // Server-side rolling-window smoothing over the monoid state. Plan extends
   // segments outward by the smoothing buffer (centered: ±count/2; trailing:
@@ -81,13 +76,12 @@ export interface PlanSegment {
   from: Date
   to: Date
   shardTier: Tier
-  // Sub-shard cadence (`null` = canonical shard; non-null = partial shard
-  // at this cadence). When non-null, the planner used `pyramid.partialKey`
-  // (not `keyTemplate`) to resolve the segment's `keys`. Storage backends
-  // generally don't need to read this — they consume the pre-resolved
-  // `keys` — but it's surfaced so stitchers / serializers can attribute
-  // segments to the canonical vs partial path. See `specs/partial-shards.md`.
-  shardCadence: Duration | null
+  // Shard duration this segment was sourced from (an entry in
+  // `shardTier.shards`). The full shard "period" covering [from, to] may
+  // be wider than [from, to] — the segment's range is clipped to the
+  // requested window; the keys list resolves to the underlying shard
+  // periods via `shardPeriodsCovering(from, to, shardDur)`.
+  shardDur: Shard
   keys: string[]
   // If true, this segment uses a finer tier than the output; the stitcher
   // must monoid-coarsen its rows up to outputTier.bin.
@@ -104,8 +98,9 @@ export interface QueryPlan {
   outputTier?: Tier
   outputBin: Bin
   segments: PlanSegment[]
-  // raw-tier effective watermark, if it falls inside the query range.
-  // Anything past this is *live tail* — consumer's hot-path concern.
+  // raw-tier max effective watermark (across all shard durations), if it
+  // falls inside the query range. Anything past this is *live tail* —
+  // consumer's hot-path concern.
   authoritativeEnd: Date | null
   // Visible time range (what the caller asked for). Stitcher trims rows
   // outside this back out after applying the rolling-window smoother.
@@ -136,8 +131,8 @@ export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
     throw new Error(`planQuery: empty range (${from.toISOString()} → ${to.toISOString()})`)
   }
 
-  // Validate `pyramid.partials` (no-op when unset).
-  const validated = validatePartials(pyramid)
+  // Validate per-tier shard ladders.
+  validateLadders(pyramid)
 
   if (input.targetBin !== undefined) {
     return planRagged(pyramid, input, input.targetBin)
@@ -158,74 +153,105 @@ export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
   const { from: plannedFrom, to: plannedTo } = smoothing
     ? extendForSmoothing(from, to, outputTier.bin as Duration, smoothing.smoothBinCount, smoothMode)
     : { from, to }
-  // Watermarks clamp to the *extended* window so the buffer can include
-  // post-`to` bins for centered smoothing (otherwise the trailing buffer
-  // gets silently truncated to the original `to`).
+
+  // Build the 2D `(tier, shardDur)` effective-watermark grid.
   const grid = effectiveShardWatermarks(
     pyramid,
-    validated,
     input.watermarks ?? {},
-    input.earliestPerCadence ?? {},
-    plannedTo,
+    input.earliestPerShard ?? {},
   )
 
-  // Walk from output tier down to finest. Within each tier, walk
-  // `(canonical, partials sorted by ascending effective)` — emit a
-  // segment per shard up to its effective watermark. Once a tier's
-  // shards are exhausted (cursor reaches the tier's max effective),
-  // fall through to the next-finer tier.
+  // Cursor-aware walk: at each cursor position, try the LARGEST shard
+  // duration at the output tier first; if its watermark doesn't reach
+  // past cursor (or is before its earliest), try the next-smaller; etc.;
+  // then fall to next-finer tier. Emit one segment per period chosen.
+  // Adjacent same-(tier, shardDur) segments coalesce after the walk.
   //
-  // Cursor advances UNCONDITIONALLY to each entry's effective end, even
-  // when no segment is emitted (e.g. the tier's earliest exceeds the
-  // segment's range). A tier "owns" its watermark range; if its data
-  // isn't there, the finer tier picks up *after* the coarser's range,
-  // not inside it. This matches the canonical-only behavior the existing
-  // tests codify.
-  const segments: PlanSegment[] = []
+  // "Covers cursor" check: `effective > cursor`. The shard's containing
+  // period [periodStart, periodEnd) has data sealed up to `effective`;
+  // any cursor position strictly less than effective has data available.
+  // Emitted segment is clipped to `min(plannedTo, effective, periodEnd)`.
+  const rawSegments: PlanSegment[] = []
   let cursor = plannedFrom
-  for (let i = outputIdx; i >= 0; i--) {
-    const tier = pyramid.tiers[i]!
-    const earlyT = earliest[tier.name]
-    const entries = grid.byTier[tier.name]!
-    for (const entry of entries) {
-      const segEnd = entry.effective.getTime() < plannedTo.getTime() ? entry.effective : plannedTo
-      // Floors:
-      //   - cursor          tier-walk position
-      //   - earlyT          per-tier earliest (propagated up-ladder)
-      //   - entry.earlyE    per-(tier, cadence) earliest (no propagation)
-      let segStart = cursor
-      if (earlyT && earlyT.getTime() > segStart.getTime()) segStart = earlyT
-      // Per-cadence is a "this specific file isn't there" gate, distinct from
-      // the per-tier "tier owns this range" semantics. When it ENTIRELY covers
-      // the entry's range, fall through to subsequent entries (and the next
-      // coarser tier) — DON'T advance cursor past the gated entry. When it
-      // partially gates, clamp segStart forward and advance cursor normally;
-      // the pre-gate portion is dropped (same as per-tier earliest today).
-      const earlyE = entry.earliestEntry
-      const earlyEFullyGates = earlyE !== undefined && earlyE.getTime() >= segEnd.getTime()
-      if (!earlyEFullyGates && earlyE && earlyE.getTime() > segStart.getTime()) {
-        segStart = earlyE
-      }
-      if (!earlyEFullyGates && segEnd.getTime() > segStart.getTime()) {
-        segments.push({
-          from: segStart,
-          to: segEnd,
+  walk: while (cursor.getTime() < plannedTo.getTime()) {
+    for (let i = outputIdx; i >= 0; i--) {
+      const tier = pyramid.tiers[i]!
+      const tierGrid = grid.byTier[tier.name]!
+      const earlyT = earliest[tier.name]
+      // Try shard durations LARGEST first.
+      for (let j = tier.shards.length - 1; j >= 0; j--) {
+        const shardDur = tier.shards[j]!
+        const entry = tierGrid[shardDur as string]
+        if (entry === undefined) continue
+        const span = parseDuration(shardDur as Duration)
+        const periodStart = floorToSpan(cursor, span)
+        const periodEnd = addSpan(periodStart, span)
+        // Covers cursor? Data exists at this position.
+        if (entry.effective.getTime() <= cursor.getTime()) continue
+        // Per-shard earliest gate? earliestPerShard > periodStart means
+        // this specific (tier, shardDur) doesn't cover periodStart.
+        if (entry.earliestEntry && entry.earliestEntry.getTime() > periodStart.getTime()) continue
+        // Per-tier earliest gate? Applies uniformly across shard durations.
+        // If earlyT > cursor, clip segment start.
+        const segFrom = earlyT && earlyT.getTime() > cursor.getTime() ? earlyT : cursor
+        // Clip to plannedTo, effective (partial-fill case), and periodEnd.
+        const upperMs = Math.min(
+          plannedTo.getTime(),
+          entry.effective.getTime(),
+          periodEnd.getTime(),
+        )
+        const segTo = new Date(upperMs)
+        if (segTo.getTime() <= segFrom.getTime()) {
+          // Entire range [cursor, segTo) gated by per-tier earliest. The
+          // entry "owns" this range; finer tiers / smaller shardDurs pick
+          // up *after* it, not inside it. Advance cursor to segTo (= entry's
+          // effective end clipped to period/plannedTo).
+          cursor = segTo
+          continue walk
+        }
+        rawSegments.push({
+          from: segFrom,
+          to: segTo,
           shardTier: tier,
-          shardCadence: entry.cadence,
-          keys: shardKeys(pyramid, tier, entry.cadence, segStart, segEnd, input.filter ?? {}),
+          shardDur,
+          keys: shardKeys(pyramid, tier, shardDur, segFrom, segTo, input.filter ?? {}),
           reaggregate: i !== outputIdx,
         })
+        cursor = segTo
+        continue walk
       }
-      if (!earlyEFullyGates && segEnd.getTime() > cursor.getTime()) cursor = segEnd
-      if (cursor.getTime() >= plannedTo.getTime()) break
     }
-    if (cursor.getTime() >= plannedTo.getTime()) break
+    // No tier/shardDur covered cursor — give up; tail is uncovered.
+    break
   }
 
-  // The raw-tier "max effective" (across canonical + partials) is the
-  // authoritative end — past it, the consumer's hot path takes over.
-  const rawEntries = grid.byTier[pyramid.tiers[0]!.name]!
-  const rawWm = rawEntries[rawEntries.length - 1]!.effective
+  // Coalesce adjacent same-(tier, shardDur) segments. Re-derive `keys` on
+  // the coalesced range so the keys list matches the new bounds.
+  const segments: PlanSegment[] = []
+  for (const seg of rawSegments) {
+    const last = segments[segments.length - 1]
+    if (
+      last !== undefined
+      && last.shardTier === seg.shardTier
+      && last.shardDur === seg.shardDur
+      && last.to.getTime() === seg.from.getTime()
+    ) {
+      last.to = seg.to
+      last.keys = shardKeys(pyramid, last.shardTier, last.shardDur, last.from, last.to, input.filter ?? {})
+    } else {
+      segments.push({ ...seg })
+    }
+  }
+
+  // raw-tier max effective (across all shard durations) is the authoritative
+  // end — past it, the consumer's hot path takes over.
+  const rawTierName = pyramid.tiers[0]!.name
+  const rawGrid = grid.byTier[rawTierName]!
+  let rawMaxMs = 0
+  for (const [, entry] of Object.entries(rawGrid)) {
+    if (entry.effective.getTime() > rawMaxMs) rawMaxMs = entry.effective.getTime()
+  }
+  const rawWm = new Date(rawMaxMs)
   const authoritativeEnd = rawWm < to ? rawWm : null
 
   return {
@@ -251,6 +277,11 @@ export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
 // then coalesces adjacent same-tier atoms into segments. The DP runs once
 // per (eligible-tier-set, phase) — output bins sharing a watermark band and
 // a phase mod LCM(tier widths) reuse cached results.
+//
+// The ragged path uses each eligible tier's LARGEST shard duration
+// (`tier.shards.at(-1)`) for all segments — it's a coarse-output path where
+// fine-grained shard-duration fall-through doesn't help (each output bin is
+// already an arbitrary width; we just need data at the chosen tier).
 function planRagged(
   pyramid: Pyramid,
   input: PlanQueryInput,
@@ -277,11 +308,6 @@ function planRagged(
       `planQuery: no tier with fixed-width bin ≤ targetBin '${targetBin}' (pyramid tiers: ${pyramid.tiers.map(t => t.bin).join(', ')})`,
     )
   }
-  // Necessary condition: gcd of eligible tier widths divides targetBinMs (by
-  // Bezout, integer linear combinations of tier widths span multiples of their
-  // gcd). Sufficient for decomposition existence ignoring alignment; the
-  // per-bin DP may still fail when strict-equality alignment dead-ends (e.g.
-  // tiers={2,3}, target=5: gcd=1 divides 5, but no path through {0,2,3,4} to 5).
   let tierGcd = eligibleTiers[0]!.ms
   for (let i = 1; i < eligibleTiers.length; i++) {
     tierGcd = gcd(tierGcd, eligibleTiers[i]!.ms)
@@ -291,17 +317,10 @@ function planRagged(
       `planQuery: no decomposition of targetBin '${targetBin}' from eligible tiers (gcd ${tierGcd} doesn't divide ${targetBinMs})`,
     )
   }
-  // Order finest-first for DP iteration determinism; the DP itself doesn't
-  // require ordering for correctness (it minimizes path length).
   eligibleTiers.sort((a, b) => a.ms - b.ms)
 
-  // `outputTier` is the stored tier matching `targetBin` exactly, if any.
-  // Used downstream (smoothing source-tier, plan metadata). When omitted,
-  // the segments mix multiple tiers and consumers must rely on `outputBin`.
   const outputTier = eligibleTiers.find(e => e.ms === targetBinMs)?.tier
 
-  // Smoothing snaps against `targetBin` (the output's bin width) just as the
-  // budget path snaps against `outputTier.bin`.
   const smoothMode: SmoothMode = input.smoothMode ?? 'centered'
   const smoothing = input.smoothing !== undefined
     ? resolveSmoothing(input.smoothing, targetBin, from, to, smoothMode)
@@ -310,17 +329,13 @@ function planRagged(
     ? extendForSmoothing(from, to, targetBin, smoothing.smoothBinCount, smoothMode)
     : { from, to }
 
-  const effective = effectiveWatermarks(pyramid.tiers, input.watermarks ?? {}, plannedTo)
+  // For ragged, use largest-shard-duration watermark per tier.
+  const effective = effectiveLargestShardWatermarks(pyramid.tiers, input.watermarks ?? {}, plannedTo)
   const earliest = effectiveEarliestWatermarks(pyramid.tiers, input.earliestWatermarks ?? {})
 
-  // Output bins span [floor(plannedFrom), ceil(plannedTo)] in `targetBin`
-  // strides. Each bin contributes one or more sub-bin atoms (per the DP).
   const targetSpan = tParsed
   const firstBinStart = floorToSpan(plannedFrom, targetSpan)
 
-  // Per-(eligible-set, phase) DP cache. Phase = bin-start ms mod L, where L
-  // is LCM of all tier-ms (and targetBin) — different bins with the same
-  // phase produce identical decompositions modulo a uniform offset.
   const phaseCacheByKey = new Map<string, Map<number, PackedAtom[] | null>>()
   const lcmAll = eligibleTiers.reduce((l, { ms }) => lcm(l, ms), targetBinMs)
 
@@ -332,7 +347,6 @@ function planRagged(
     const binEnd = addSpan(binStart, targetSpan)
     const binEndMs = binEnd.getTime()
 
-    // Per-bin eligible tiers: watermark covers binEnd AND earliest ≤ binStart.
     const perBin: { tier: Tier; ms: number }[] = []
     for (const e of eligibleTiers) {
       if (effective[e.tier.name]!.getTime() < binEndMs) continue
@@ -341,7 +355,6 @@ function planRagged(
       perBin.push(e)
     }
     if (perBin.length === 0) {
-      // No tier covers this bin — skip (consumer sees a gap row at this bin).
       binStart = binEnd
       continue
     }
@@ -373,7 +386,6 @@ function planRagged(
     binStart = binEnd
   }
 
-  // Coalesce adjacent same-tier atoms into segments.
   const segments: PlanSegment[] = []
   if (atoms.length > 0) {
     let curr = { ...atoms[0]! }
@@ -382,11 +394,11 @@ function planRagged(
       if (next.tier === curr.tier && next.absStartMs === curr.absEndMs) {
         curr.absEndMs = next.absEndMs
       } else {
-        segments.push(emitSegment(pyramid, curr, targetBinMs, input.filter ?? {}))
+        segments.push(emitRaggedSegment(pyramid, curr, targetBinMs, input.filter ?? {}))
         curr = { ...next }
       }
     }
-    segments.push(emitSegment(pyramid, curr, targetBinMs, input.filter ?? {}))
+    segments.push(emitRaggedSegment(pyramid, curr, targetBinMs, input.filter ?? {}))
   }
 
   const rawWm = effective[pyramid.tiers[0]!.name]!
@@ -415,12 +427,6 @@ interface PackedAtom {
   durationMs: number  // = fixedDurationMs(tier.bin)
 }
 
-// DP: find the minimum-item set of tier atoms tiling [binStartMs, binEndMs).
-// Each atom is one full bin of some eligible tier, with `cursor % tier.ms === 0`
-// in absolute (epoch) ms — the strict-equality alignment rule. Returns null
-// when no decomposition exists (alignment dead-ends with no finer tier to
-// fall back to). Memoized on the absolute cursor; runs O(B/g × n_tiers) where
-// B = bin width, g = gcd of eligible tier ms.
 function decomposeBin(
   eligibleTiers: { tier: Tier; ms: number }[],
   targetBinMs: number,
@@ -450,7 +456,7 @@ function decomposeBin(
   return solve(binStartMs)
 }
 
-function emitSegment(
+function emitRaggedSegment(
   pyramid: Pyramid,
   range: { tier: Tier; absStartMs: number; absEndMs: number },
   targetBinMs: number,
@@ -459,12 +465,13 @@ function emitSegment(
   const fromDate = new Date(range.absStartMs)
   const toDate = new Date(range.absEndMs)
   const tierMs = fixedDurationMs(range.tier.bin as Duration)
+  const shardDur = range.tier.shards[range.tier.shards.length - 1]!
   return {
     from: fromDate,
     to: toDate,
     shardTier: range.tier,
-    shardCadence: null,
-    keys: shardKeys(pyramid, range.tier, null, fromDate, toDate, filter),
+    shardDur,
+    keys: shardKeys(pyramid, range.tier, shardDur, fromDate, toDate, filter),
     reaggregate: tierMs !== targetBinMs,
   }
 }
@@ -493,156 +500,109 @@ function pickTier(tiers: Tier[], from: Date, to: Date, binBudget: number): Tier 
   return tiers[tiers.length - 1]!
 }
 
-// One `(tier, cadence|null)` entry's effective watermark, after both
-// within-tier and across-tier propagation. `cadence: null` = canonical
-// shard. Entries are sorted by `effective` ascending (canonical first
-// in the typical case; ties broken by COARSER-shard-first so canonical
-// still leads when its watermark equals a partial's).
+// One `(tier, shardDur)` entry's effective watermark, plus its
+// `earliestPerShard` gate (no propagation).
 interface EffectiveShardEntry {
-  cadence: Duration | null
   effective: Date
-  // Per-entry earliest-available-bin gate (from `earliestPerCadence`).
-  // Pure pass-through — no propagation within-tier or across-tier
-  // (see `effectiveShardWatermarks` for why).
   earliestEntry?: Date
 }
 
-// Per-tier effective watermark grid. `byTier[tierName]` is the entries
-// for that tier in walk order (sorted by ascending effective). Empty
-// array is impossible — every tier has at least canonical.
+// Per-tier × per-shardDur effective-watermark grid.
+//   byTier[tierName][shardDur] = { effective, earliestEntry? }
 interface EffectiveShardGrid {
-  byTier: Record<string, EffectiveShardEntry[]>
+  byTier: Record<string, Record<string, EffectiveShardEntry>>
 }
 
-// Build the 2D `(tier, cadence)` watermark grid.
+// Build the 2D `(tier, shardDur)` watermark grid.
 //
-// Propagation rules (both `min`-style — coarser is bounded by finer's
-// effective so the planner doesn't trust data the finer path hasn't
-// surfaced):
-//   - WITHIN tier (finest cadence → coarsest, ending at canonical):
-//     `effective[t, s] = min(declared[t, s], effective[t, next-finer-s])`
+// Propagation rules:
+//   - WITHIN tier (smallest shardDur → largest):
+//     `effective[t, s] = min(declared[t, s], effective[t, prev-smaller-s])`
+//     Larger shards are built from smaller via promotion; can't be fresher
+//     than the smaller they're built from.
 //   - ACROSS tiers (finest → coarsest):
 //     `effective[coarser, *] = min(its current eff, max-eff-of-finer-tier)`
-//     i.e. the freshest data available in the finer tier (= its finest
-//     cadence's effective) bounds every shard of the coarser tier.
+//     A coarser tier (built from finer) can't be fresher than its source.
 //
-// Keys in `declared` follow the `ShardIndex` encoded convention —
-// `${tier}` for canonical, `${tier}@${cadence}` for partials. Tier-only
-// keys (today's convention) are still valid for canonical-only
-// pyramids; no migration required.
+// Undeclared `(tier, shardDur)` cells default to FAR_FUTURE — the planner
+// treats them as "complete enough". Single-shard ladders without
+// watermarks behave as today. Consumers with partial coverage should pass
+// real watermarks for every (tier, shardDur) they care about.
+//
+// NOTE: the grid is NOT clamped to the query's `plannedTo` — the walk
+// reads `effective` to check whether a shard's full period is sealed
+// (`effective ≥ periodEnd`), then clips emitted segments to `plannedTo`
+// separately. Clamping the grid would break the sealed check for any
+// query strictly shorter than a shard period.
 function effectiveShardWatermarks(
   pyramid: Pyramid,
-  validated: ValidatedPartials | null,
   declared: Record<string, Date>,
-  earliestPerCadence: Record<string, Date>,
-  rangeTo: Date,
+  earliestPerShard: Record<string, Date>,
 ): EffectiveShardGrid {
-  const out: Record<string, EffectiveShardEntry[]> = {}
+  const out: Record<string, Record<string, EffectiveShardEntry>> = {}
   const FAR_FUTURE = new Date(8.64e15)
-  let finerTierMax = FAR_FUTURE  // bounds coarser tiers; FAR_FUTURE = no bound for finest
+  let finerTierMax = FAR_FUTURE  // FAR_FUTURE = no bound for the finest tier
 
   for (const tier of pyramid.tiers) {
-    // Raw declared values for this tier's shards. Order: canonical, then
-    // partials sorted COARSEST → FINEST (largest cadence first). Finest is
-    // last because within-tier propagation walks finest→coarsest (reversed).
-    //
-    // Default semantics differ for canonical vs partial:
-    //   - canonical missing → FAR_FUTURE ("complete enough"; matches the
-    //     pre-partial-shards behavior consumers depend on).
-    //   - partial missing → SKIPPED from the grid entirely. A declared-
-    //     in-config cadence that hasn't been sealed yet shouldn't poison
-    //     within-tier propagation (else the absent partial would drag
-    //     canonical's effective down to epoch 0).
-    const cadencesAsc = validated?.perTier[tier.name] ?? []  // already ascending ms
-    const cadencesByCoarsestFirst = [...cadencesAsc].reverse()
-    const decls: Array<{ cadence: Duration | null; declared: Date }> = []
-    decls.push({
-      cadence: null,
-      declared: declared[encodeWatermarkKey(tier.name, null)] ?? FAR_FUTURE,
-    })
-    for (const c of cadencesByCoarsestFirst) {
-      const dec = declared[encodeWatermarkKey(tier.name, c)]
-      if (dec === undefined) continue
-      decls.push({ cadence: c, declared: dec })
-    }
-
-    // Within-tier `min` propagation, finest → coarsest. Reversed `decls`
-    // has [finest_cadence, ..., coarsest_cadence, canonical].
-    const effByCadence = new Map<Duration | null, Date>()
+    // shards ascending (by ladder convention). Build entries with
+    // within-tier `min` propagation: smaller bounds larger.
     let withinTierBound = FAR_FUTURE
-    for (let i = decls.length - 1; i >= 0; i--) {
-      const { cadence, declared: d } = decls[i]!
-      const eff = d.getTime() < withinTierBound.getTime() ? d : withinTierBound
-      effByCadence.set(cadence, eff)
-      withinTierBound = eff
-    }
-
-    // Cross-tier bound + clamp to rangeTo. Track this tier's max for the
-    // next-coarser tier's pass. Per-entry `earliestEntry` rides alongside —
-    // pure projection of `earliestPerCadence` keyed by encoded (tier, cadence).
-    // It does NOT participate in `min` propagation: it's a statement about
-    // THIS specific shard's file availability, not about underlying data
-    // shape the tier could synthesize.
-    const entries: EffectiveShardEntry[] = []
+    const tierEntries: Record<string, EffectiveShardEntry> = {}
     let tierMax = new Date(0)
-    for (const { cadence } of decls) {
-      const e = effByCadence.get(cadence)!
-      const cross = e.getTime() < finerTierMax.getTime() ? e : finerTierMax
-      const clampedMs = Math.min(cross.getTime(), rangeTo.getTime())
-      const final = new Date(clampedMs)
-      const earliestEntry = earliestPerCadence[encodeWatermarkKey(tier.name, cadence)]
-      entries.push({
-        cadence,
-        effective: final,
+    for (let i = 0; i < tier.shards.length; i++) {
+      const shardDur = tier.shards[i]!
+      const key = encodeWatermarkKey(tier.name, shardDur)
+      const dec = declared[key] ?? FAR_FUTURE
+      // Within-tier: min(declared, prev-smaller's effective).
+      const withinEff = dec.getTime() < withinTierBound.getTime() ? dec : withinTierBound
+      // Cross-tier: min(within-tier, finer-tier-max).
+      const crossEff = withinEff.getTime() < finerTierMax.getTime() ? withinEff : finerTierMax
+      const earliestEntry = earliestPerShard[key]
+      tierEntries[shardDur as string] = {
+        effective: crossEff,
         ...(earliestEntry !== undefined ? { earliestEntry } : {}),
-      })
-      if (clampedMs > tierMax.getTime()) tierMax = new Date(clampedMs)
+      }
+      if (crossEff.getTime() > tierMax.getTime()) tierMax = crossEff
+      withinTierBound = crossEff
     }
-    // Walk order: ascending effective. Ties → coarser shard first
-    // (canonical > largest cadence > … > smallest cadence) so canonical
-    // wins when its watermark equals a partial's.
-    entries.sort((a, b) => {
-      const dt = a.effective.getTime() - b.effective.getTime()
-      if (dt !== 0) return dt
-      const aMs = a.cadence === null ? Number.POSITIVE_INFINITY : fixedDurationMs(a.cadence)
-      const bMs = b.cadence === null ? Number.POSITIVE_INFINITY : fixedDurationMs(b.cadence)
-      return bMs - aMs
-    })
-    out[tier.name] = entries
+    out[tier.name] = tierEntries
     finerTierMax = tierMax
   }
 
   return { byTier: out }
 }
 
-// Each tier's effective watermark = min(declared, next-finer-tier's effective).
-// Walks finest → coarsest, propagating the finer tier's bound forward.
-function effectiveWatermarks(
+// For ragged-decomposition planning: per-tier effective watermark using
+// each tier's LARGEST shard duration. Within-tier propagation already
+// folded into `effectiveShardWatermarks`; this is just the largest-shard
+// projection.
+function effectiveLargestShardWatermarks(
   tiers: Tier[],
   declared: Record<string, Date>,
   rangeTo: Date,
 ): Record<string, Date> {
   const out: Record<string, Date> = {}
-  // Finer tiers default to rangeTo (treat unspecified as "complete enough").
-  let finerBound = new Date(8.64e15)
+  const FAR_FUTURE = new Date(8.64e15)
+  let finerBound = FAR_FUTURE
   for (const tier of tiers) {
-    const decl = declared[tier.name]
-    const eff = decl
-      ? new Date(Math.min(decl.getTime(), finerBound.getTime()))
-      : finerBound
-    // Clamp to rangeTo so watermarks past the query don't leak through.
-    const clamped = eff.getTime() > rangeTo.getTime() ? rangeTo : eff
+    // Within-tier: min over all shardDurs at this tier.
+    let withinMin = FAR_FUTURE
+    for (const shardDur of tier.shards) {
+      const dec = declared[encodeWatermarkKey(tier.name, shardDur)] ?? FAR_FUTURE
+      if (dec.getTime() < withinMin.getTime()) withinMin = dec
+    }
+    // The largest shard's effective is at most the smallest-shard's
+    // declared (within-tier propagation). Then cross-tier: bound by finer.
+    const cross = withinMin.getTime() < finerBound.getTime() ? withinMin : finerBound
+    const clamped = cross.getTime() > rangeTo.getTime() ? rangeTo : cross
     out[tier.name] = clamped
-    finerBound = eff
+    finerBound = cross  // un-clamped for cross-tier propagation
   }
   return out
 }
 
-// Each tier's effective earliest = max(declared, next-finer-tier's effective).
-// Walks finest → coarsest, propagating the finer tier's bound forward.
-// Unspecified tiers have no clamp (treat as -infinity); a finer tier's
-// declared value carries up to coarser tiers that didn't declare one
-// (coarser tiers can't have data before their finer source did).
+// Per-tier effective earliest: max(declared, finer-tier's effective).
+// Walks finest → coarsest. Unspecified tiers have no clamp.
 function effectiveEarliestWatermarks(
   tiers: Tier[],
   declared: Record<string, Date>,
@@ -666,33 +626,17 @@ function effectiveEarliestWatermarks(
 function shardKeys(
   pyramid: Pyramid,
   tier: Tier,
-  cadence: Duration | null,
+  shardDur: Shard,
   from: Date,
   to: Date,
   filter: Record<string, string | number>,
 ): string[] {
-  // Partials use the cadence as the shard span; canonical uses tier.shard.
-  // Template selection mirrors: `partialKey` adds a `{shard}` placeholder
-  // (the cadence label, e.g. `1h`) on top of `keyTemplate`'s placeholders.
-  if (cadence !== null) {
-    if (pyramid.partialKey === undefined) {
-      throw new Error(`shardKeys: pyramid.partialKey is required when emitting partial-shard segments`)
-    }
-    const periods = shardPeriodsCovering(from, to, cadence)
-    return periods.map(p =>
-      substituteKey(pyramid.partialKey!, {
-        ...filter,
-        tier: tier.name,
-        shard: cadence,
-        period: p.label,
-      }),
-    )
-  }
-  const periods = shardPeriodsCovering(from, to, tier.shard)
+  const periods = shardPeriodsCovering(from, to, shardDur)
   return periods.map(p =>
     substituteKey(pyramid.keyTemplate, {
       ...filter,
       tier: tier.name,
+      shard: shardDur,
       period: p.label,
     }),
   )
@@ -708,12 +652,6 @@ function substituteKey(
     }
     return String(values[name])
   })
-}
-
-function clamp(t: Date, lo: Date, hi: Date): Date {
-  if (t.getTime() < lo.getTime()) return lo
-  if (t.getTime() > hi.getTime()) return hi
-  return t
 }
 
 // Catalog of "nice" widths used when snapping a user-supplied smoothing
@@ -746,11 +684,6 @@ interface ResolvedSmoothing {
   smoothBinCount: number
 }
 
-// Resolve a `SmoothingSpec` to a snapped (smoothBin, smoothBinCount) tuple.
-// Snapping picks the closest candidate that's an integer multiple of the
-// output bin, with `smoothBinCount` ≥ 1 and ≤ floor(visibleRangeBins / 4)
-// (so smoothing can't dominate the visible range — pathological cases
-// degrade to 1× output bin = no-op).
 function resolveSmoothing(
   spec: SmoothingSpec,
   outputBin: Duration,
@@ -762,7 +695,6 @@ function resolveSmoothing(
   const visibleBins = binsInRange(from, to, outputBin)
   const maxCount = Math.max(1, Math.floor(visibleBins / 4))
 
-  // Calendar output bins (mo/y) — only same-unit integer counts make sense.
   if (outSpan.unit === 'mo' || outSpan.unit === 'y') {
     if (typeof spec === 'string') {
       const s = parseDuration(spec)
@@ -780,8 +712,6 @@ function resolveSmoothing(
     return { smoothBin: `${count * outSpan.count}${outSpan.unit}` as Duration, smoothBinCount: count }
   }
 
-  // Fixed-width output bin — snap an ms target to the nearest nice width that
-  // divides cleanly into the output bin.
   const outputBinMs = fixedDurationMs(outputBin)
   const desiredMs = typeof spec === 'string'
     ? fixedDurationMs(spec)
@@ -790,8 +720,8 @@ function resolveSmoothing(
   let best: { label: Duration; count: number } | null = null
   let bestDist = Infinity
   for (const c of NICE_WIDTHS) {
-    if (c.ms < outputBinMs) continue   // can't smooth below output granularity
-    if (c.ms % outputBinMs !== 0) continue   // must be integer multiple
+    if (c.ms < outputBinMs) continue
+    if (c.ms % outputBinMs !== 0) continue
     const count = c.ms / outputBinMs
     if (count > maxCount) continue
     const dist = Math.abs(c.ms - desiredMs)
@@ -800,17 +730,10 @@ function resolveSmoothing(
       best = { label: c.label, count }
     }
   }
-  // Fall back to 1× output bin if nothing fits — degenerate but well-defined
-  // (smoothing == output, i.e. no-op).
   if (best === null) return { smoothBin: outputBin, smoothBinCount: 1 }
   return { smoothBin: best.label, smoothBinCount: best.count }
 }
 
-// Extend the visible [from, to) outward by the smoothing buffer so the
-// rolling pass has full context at every visible bin. For window size N:
-//   centered: lead = ceil((N-1)/2), tail = floor((N-1)/2) (past-biased on ties)
-//   trailing: lead = N - 1, tail = 0
-// N = 1 is a no-op (smoothing window == output bin).
 function extendForSmoothing(
   from: Date,
   to: Date,
@@ -822,7 +745,6 @@ function extendForSmoothing(
   const leadBins = mode === 'centered' ? Math.ceil((N - 1) / 2) : N - 1
   const tailBins = mode === 'centered' ? Math.floor((N - 1) / 2) : 0
   const outSpan = parseDuration(outputBin)
-  // Step `outputBin` outward via `addSpan` (calendar-correct for mo/y).
   return {
     from: addSpan(from, { count: -leadBins * outSpan.count, unit: outSpan.unit }),
     to: addSpan(to, { count: tailBins * outSpan.count, unit: outSpan.unit }),

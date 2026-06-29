@@ -77,7 +77,7 @@ function makeRecordInput(overrides: Partial<RecordShardInput> = {}): RecordShard
   return {
     pyramidName: 'avail',
     tier: '15m',
-    cadence: '1h',
+    shardDur: '1h',
     periodStart: new Date('2026-06-21T14:00:00Z'),
     periodEnd: new Date('2026-06-21T15:00:00Z'),
     key: 'avail/15m/p1h/2026-06-21T14.parquet',
@@ -91,34 +91,19 @@ describe('D1ShardIndex.getWatermarks', () => {
     const idx = new D1ShardIndex(db, { now: () => 0 })
     const result = await idx.getWatermarks('avail')
     expect(calls).toEqual([{
-      sql: 'SELECT tier, cadence, latest_period_end FROM "pyramid_watermarks" WHERE pyramid = ?',
+      sql: 'SELECT tier, shard_dur, latest_period_end FROM "pyramid_watermarks" WHERE pyramid = ?',
       binds: ['avail'],
       method: 'all',
     }])
     expect(result).toEqual(new Map())
   })
 
-  test('decodes empty-string cadence back to null (canonical sentinel)', async () => {
+  test('decodes (tier, shard_dur) rows into uniform `${tier}@${shardDur}` keys', async () => {
     const { db } = mockD1({
       rowsQueue: [[
-        { tier: '15m', cadence: '', latest_period_end: 1_700_000_000_000 },
-        { tier: '1h', cadence: '', latest_period_end: 1_700_000_100_000 },
-      ]],
-    })
-    const idx = new D1ShardIndex(db, { now: () => 0 })
-    const result = await idx.getWatermarks('avail')
-    expect(result).toEqual(new Map<string, Date>([
-      ['15m', new Date(1_700_000_000_000)],
-      ['1h', new Date(1_700_000_100_000)],
-    ]))
-  })
-
-  test('decodes non-empty cadence into encoded partial key', async () => {
-    const { db } = mockD1({
-      rowsQueue: [[
-        { tier: '15m', cadence: '1h', latest_period_end: 1_700_000_000_000 },
-        { tier: '15m', cadence: '1d', latest_period_end: 1_700_000_000_000 },
-        { tier: '2m', cadence: '10min', latest_period_end: 1_700_000_000_000 },
+        { tier: '15m', shard_dur: '1h', latest_period_end: 1_700_000_000_000 },
+        { tier: '15m', shard_dur: '1d', latest_period_end: 1_700_000_000_000 },
+        { tier: '2m', shard_dur: '10min', latest_period_end: 1_700_000_000_000 },
       ]],
     })
     const idx = new D1ShardIndex(db, { now: () => 0 })
@@ -126,18 +111,18 @@ describe('D1ShardIndex.getWatermarks', () => {
     expect(Array.from(result.keys()).sort()).toEqual(['15m@1d', '15m@1h', '2m@10min'])
   })
 
-  test('mixes canonical + partial rows in one map', async () => {
+  test('multiple (tier, shardDur) rows coexist in one map', async () => {
     const { db } = mockD1({
       rowsQueue: [[
-        { tier: '15m', cadence: '', latest_period_end: 100 },
-        { tier: '15m', cadence: '1h', latest_period_end: 200 },
-        { tier: '15m', cadence: '1d', latest_period_end: 300 },
+        { tier: '15m', shard_dur: '15m', latest_period_end: 100 },
+        { tier: '15m', shard_dur: '1h', latest_period_end: 200 },
+        { tier: '15m', shard_dur: '1d', latest_period_end: 300 },
       ]],
     })
     const idx = new D1ShardIndex(db, { now: () => 0 })
     const result = await idx.getWatermarks('avail')
     expect(result).toEqual(new Map<string, Date>([
-      ['15m', new Date(100)],
+      ['15m@15m', new Date(100)],
       ['15m@1h', new Date(200)],
       ['15m@1d', new Date(300)],
     ]))
@@ -148,26 +133,26 @@ describe('D1ShardIndex.getWatermarks', () => {
     const idx = new D1ShardIndex(db, { watermarksTable: 'tenant1_watermarks', now: () => 0 })
     await idx.getWatermarks('avail')
     expect(calls[0]!.sql).toBe(
-      'SELECT tier, cadence, latest_period_end FROM "tenant1_watermarks" WHERE pyramid = ?',
+      'SELECT tier, shard_dur, latest_period_end FROM "tenant1_watermarks" WHERE pyramid = ?',
     )
   })
 })
 
 describe('D1ShardIndex.recordShard', () => {
-  test('cadence=null encodes as empty-string sentinel in the upsert', async () => {
+  test('shardDur binds as-is into the upsert', async () => {
     const { db, calls } = mockD1()
     const idx = new D1ShardIndex(db, { now: () => 999 })
-    await idx.recordShard(makeRecordInput({ cadence: null }))
+    await idx.recordShard(makeRecordInput({ shardDur: '1h' }))
     expect(calls).toHaveLength(2)
     // First: watermark upsert.
     expect(calls[0]!.binds).toEqual([
-      'avail', '15m', '',
+      'avail', '15m', '1h',
       new Date('2026-06-21T15:00:00Z').getTime(),
       999,
     ])
     // Second: shards inventory.
     expect(calls[1]!.binds).toEqual([
-      'avail', '15m', '',
+      'avail', '15m', '1h',
       new Date('2026-06-21T14:00:00Z').getTime(),
       new Date('2026-06-21T15:00:00Z').getTime(),
       'avail/15m/p1h/2026-06-21T14.parquet',
@@ -175,12 +160,12 @@ describe('D1ShardIndex.recordShard', () => {
     ])
   })
 
-  test('cadence non-null binds as-is', async () => {
+  test('shardDur defaults via makeRecordInput bind into first 3 positions', async () => {
     const { db, calls } = mockD1()
     const idx = new D1ShardIndex(db, { now: () => 0 })
-    await idx.recordShard(makeRecordInput({ cadence: '1h' }))
-    expect(calls[0]!.binds.slice(0, 3)).toEqual(['avail', '15m', '1h'])
-    expect(calls[1]!.binds.slice(0, 3)).toEqual(['avail', '15m', '1h'])
+    await idx.recordShard(makeRecordInput({ shardDur: '1d' }))
+    expect(calls[0]!.binds.slice(0, 3)).toEqual(['avail', '15m', '1d'])
+    expect(calls[1]!.binds.slice(0, 3)).toEqual(['avail', '15m', '1d'])
   })
 
   test('watermark upsert uses MAX(existing, new) — monotonic guard', async () => {
@@ -189,8 +174,8 @@ describe('D1ShardIndex.recordShard', () => {
     await idx.recordShard(makeRecordInput())
     expect(calls[0]!.sql).toBe(
       'INSERT INTO "pyramid_watermarks" ' +
-      '(pyramid, tier, cadence, latest_period_end, updated_at) VALUES (?, ?, ?, ?, ?) ' +
-      'ON CONFLICT(pyramid, tier, cadence) DO UPDATE SET ' +
+      '(pyramid, tier, shard_dur, latest_period_end, updated_at) VALUES (?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(pyramid, tier, shard_dur) DO UPDATE SET ' +
       'latest_period_end = MAX(excluded.latest_period_end, "pyramid_watermarks".latest_period_end), ' +
       'updated_at = excluded.updated_at',
     )
@@ -202,8 +187,8 @@ describe('D1ShardIndex.recordShard', () => {
     await idx.recordShard(makeRecordInput())
     expect(calls[1]!.sql).toBe(
       'INSERT INTO "pyramid_shards" ' +
-      '(pyramid, tier, cadence, period_start, period_end, key, written_at) VALUES (?, ?, ?, ?, ?, ?, ?) ' +
-      'ON CONFLICT(pyramid, tier, cadence, period_start) DO UPDATE SET ' +
+      '(pyramid, tier, shard_dur, period_start, period_end, key, written_at) VALUES (?, ?, ?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(pyramid, tier, shard_dur, period_start) DO UPDATE SET ' +
       'period_end = excluded.period_end, key = excluded.key, written_at = excluded.written_at',
     )
   })
@@ -236,8 +221,8 @@ describe('D1ShardIndex.recordShard', () => {
     await idx.recordShard(makeRecordInput())
     expect(calls[1]!.sql).toBe(
       'INSERT INTO "tenant1_shards" ' +
-      '(pyramid, tier, cadence, period_start, period_end, key, written_at) VALUES (?, ?, ?, ?, ?, ?, ?) ' +
-      'ON CONFLICT(pyramid, tier, cadence, period_start) DO UPDATE SET ' +
+      '(pyramid, tier, shard_dur, period_start, period_end, key, written_at) VALUES (?, ?, ?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(pyramid, tier, shard_dur, period_start) DO UPDATE SET ' +
       'period_end = excluded.period_end, key = excluded.key, written_at = excluded.written_at',
     )
   })
@@ -257,20 +242,20 @@ describe('D1ShardIndex.schemaSql', () => {
       'CREATE TABLE IF NOT EXISTS "pyramid_watermarks" (\n' +
       '  pyramid TEXT NOT NULL,\n' +
       '  tier TEXT NOT NULL,\n' +
-      '  cadence TEXT NOT NULL DEFAULT \'\',\n' +
+      '  shard_dur TEXT NOT NULL,\n' +
       '  latest_period_end INTEGER NOT NULL,\n' +
       '  updated_at INTEGER NOT NULL,\n' +
-      '  PRIMARY KEY (pyramid, tier, cadence)\n' +
+      '  PRIMARY KEY (pyramid, tier, shard_dur)\n' +
       ') WITHOUT ROWID',
       'CREATE TABLE IF NOT EXISTS "pyramid_shards" (\n' +
       '  pyramid TEXT NOT NULL,\n' +
       '  tier TEXT NOT NULL,\n' +
-      '  cadence TEXT NOT NULL DEFAULT \'\',\n' +
+      '  shard_dur TEXT NOT NULL,\n' +
       '  period_start INTEGER NOT NULL,\n' +
       '  period_end INTEGER NOT NULL,\n' +
       '  key TEXT NOT NULL,\n' +
       '  written_at INTEGER NOT NULL,\n' +
-      '  PRIMARY KEY (pyramid, tier, cadence, period_start)\n' +
+      '  PRIMARY KEY (pyramid, tier, shard_dur, period_start)\n' +
       ') WITHOUT ROWID',
     ])
   })
@@ -306,17 +291,17 @@ function mockD1WithStore(): { db: D1Like } {
   interface WatermarkRow {
     pyramid: string
     tier: string
-    cadence: string
+    shard_dur: string
     latest_period_end: number
     updated_at: number
   }
   const watermarks = new Map<string, WatermarkRow>()
-  const wmKey = (p: string, t: string, c: string): string => `${p}|${t}|${c}`
+  const wmKey = (p: string, t: string, s: string): string => `${p}|${t}|${s}`
 
   function makeStmt(sql: string): D1PreparedStatement {
     let binds: unknown[] = []
     const exec = (): { results: WatermarkRow[] } => {
-      if (sql.startsWith('SELECT tier, cadence, latest_period_end')) {
+      if (sql.startsWith('SELECT tier, shard_dur, latest_period_end')) {
         const pyramid = binds[0] as string
         const results: WatermarkRow[] = []
         for (const row of watermarks.values()) {
@@ -325,14 +310,14 @@ function mockD1WithStore(): { db: D1Like } {
         return { results }
       }
       if (sql.includes('"pyramid_watermarks"') && sql.startsWith('INSERT INTO')) {
-        const [pyramid, tier, cadence, latest_period_end, updated_at] =
+        const [pyramid, tier, shard_dur, latest_period_end, updated_at] =
           binds as [string, string, string, number, number]
-        const key = wmKey(pyramid, tier, cadence)
+        const key = wmKey(pyramid, tier, shard_dur)
         const existing = watermarks.get(key)
         const newEnd = existing !== undefined
           ? Math.max(existing.latest_period_end, latest_period_end)
           : latest_period_end
-        watermarks.set(key, { pyramid, tier, cadence, latest_period_end: newEnd, updated_at })
+        watermarks.set(key, { pyramid, tier, shard_dur, latest_period_end: newEnd, updated_at })
         return { results: [] }
       }
       // pyramid_shards inventory insert — no-op for conformance (conformance

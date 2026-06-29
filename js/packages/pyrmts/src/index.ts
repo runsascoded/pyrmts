@@ -56,8 +56,8 @@ export type { PivotTallToHistogramOptions } from './pivot.js'
 export { fetchShardData, parquetBackend } from './fetch.js'
 export type { FetchOptions, FetchTrace } from './fetch.js'
 
-export { validatePartials } from './partials.js'
-export type { ValidatedPartials } from './partials.js'
+export { validateLadders } from './ladder.js'
+export type { ValidatedTierLadder } from './ladder.js'
 
 export {
   CachedShardIndex,

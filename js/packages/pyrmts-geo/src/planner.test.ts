@@ -29,9 +29,9 @@ function ctbkPyramid(geoResolutions: number[]): Pyramid {
     ],
     metrics: [{ name: 'count', monoid: 'count' }],
     tiers: [
-      { name: 'h1', bin: '1h', shard: '1mo' },
-      { name: 'd1', bin: '1d', shard: '1y' },
-      { name: 'mo1', bin: '1mo', shard: '1y' },
+      { name: 'h1', bin: '1h', shards: ['1mo'] },
+      { name: 'd1', bin: '1d', shards: ['1y'] },
+      { name: 'mo1', bin: '1mo', shards: ['1y'] },
     ],
     geo: { cellCol: 'h3_cell', resolutions: geoResolutions },
   }
@@ -111,8 +111,31 @@ describe('planGeoQuery: resolution selection', () => {
 })
 
 describe('planGeoQuery: segment shape', () => {
+  // Pyramid with 1d shards so a 1-day query aligns with the shard period
+  // boundary (the planner's seal check requires `effective ≥ periodEnd`,
+  // and `effective` gets clamped to `rangeTo`).
+  function ctbkPyramid1d(geoResolutions: number[]): Pyramid {
+    return {
+      storage: mockStorage,
+      keyTemplate: 'trips/{tier}/{period}.parquet',
+      axis: 'time',
+      binCol: 'ts',
+      dims: [
+        { name: 'station_id', type: 'string' },
+        { name: 'rideable', type: 'string' },
+      ],
+      metrics: [{ name: 'count', monoid: 'count' }],
+      tiers: [
+        { name: 'h1', bin: '1h', shards: ['1d'] },
+        { name: 'd1', bin: '1d', shards: ['1y'] },
+        { name: 'mo1', bin: '1mo', shards: ['1y'] },
+      ],
+      geo: { cellCol: 'h3_cell', resolutions: geoResolutions },
+    }
+  }
+
   test('inherits time-axis segmentation from planQuery; each segment carries the cell list', () => {
-    const pyramid = ctbkPyramid([9, 7, 5])
+    const pyramid = ctbkPyramid1d([9, 7, 5])
     const plan = planGeoQuery(pyramid, {
       range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
       binBudget: 100,
@@ -127,13 +150,13 @@ describe('planGeoQuery: segment shape', () => {
   })
 
   test('watermark-driven time refinement keeps the same cell list across segments', () => {
-    const pyramid = ctbkPyramid([9, 7, 5])
+    const pyramid = ctbkPyramid1d([9, 7, 5])
     const plan = planGeoQuery(pyramid, {
       range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-02T00:00:00Z') },
       binBudget: 100,
       bbox: NYC,
       cellBudget: 30,
-      watermarks: { h1: d('2026-01-01T12:00:00Z') },
+      watermarks: { 'h1@1d': d('2026-01-01T12:00:00Z') },
     })
     // h1 watermark at noon → segments split (h1 for first half, no finer
     // tier exists → tail dropped; depends on planQuery semantics).
@@ -197,9 +220,9 @@ describe('planGeoQuery: s2-backed pyramid', () => {
       dims: [{ name: 'station_id', type: 'string' }],
       metrics: [{ name: 'count', monoid: 'count' }],
       tiers: [
-        { name: 'h1', bin: '1h', shard: '1mo' },
-        { name: 'd1', bin: '1d', shard: '1y' },
-        { name: 'mo1', bin: '1mo', shard: '1y' },
+        { name: 'h1', bin: '1h', shards: ['1mo'] },
+        { name: 'd1', bin: '1d', shards: ['1y'] },
+        { name: 'mo1', bin: '1mo', shards: ['1y'] },
       ],
       geo: { cellCol: 's2_cell', resolutions: geoResolutions, index: s2Index },
     }
@@ -271,7 +294,7 @@ describe('planGeoQuery: pre-computed outputCells', () => {
       binCol: 'ts',
       dims: [],
       metrics: [{ name: 'count', monoid: 'count' }],
-      tiers: [{ name: 'h1', bin: '1h', shard: '1mo' }],
+      tiers: [{ name: 'h1', bin: '1h', shards: ['1mo'] }],
       geo: { cellCol: 'h3_cell', resolutions: geoResolutions, index },
     }
   }

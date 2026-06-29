@@ -9,23 +9,20 @@
 //   {
 //     "version": 1,
 //     "watermarks": {
-//       "15m":     1717200000000,
+//       "15m@1d":  1717200000000,
 //       "15m@1h":  1717286400000,
-//       "1h":      1717200000000
+//       "1h@1d":   1717200000000
 //     },
 //     "shards": [ // optional inventory; only present if recordShard
-//       { "tier": "15m", "cadence": "1h", "periodStart": 1717286400000,
+//       { "tier": "15m", "shardDur": "1h", "periodStart": 1717286400000,
 //         "periodEnd": 1717290000000, "key": "…" }, ...   // …includeInventory: true
 //     ],
 //     "updatedAt": 1717290000123
 //   }
 //
-// Encoded keys (`${tier}` canonical / `${tier}@${cadence}` partial)
-// match the `ShardIndex` contract directly — no per-tier nesting, no
-// label parsing. Consumers with the legacy ctbk `{tiers: {<name>:
-// {latest_period: "2026-06", partials: …}}}` format migrate via a
-// one-shot script (out of scope; the spec recommends D1 anyway for
-// the cadence-driven write workloads).
+// Encoded keys are uniformly `${tier}@${shardDur}` — every entry on
+// the per-tier shard ladder gets its own watermark row. See
+// `specs/done/unified-shard-ladder.md`.
 //
 // Single-writer assumption: `recordShard` does GET-modify-PUT against
 // the manifest blob. Concurrent writers race on the GET/PUT cycle and
@@ -35,14 +32,10 @@
 
 import {
   encodeWatermarkKey,
-  type Duration,
   type RecordShardInput,
   type ShardIndex,
   type Storage,
 } from './index.js'
-
-// Re-export of internal types so this module compiles without circular
-// imports (the index.js re-exports `Duration` from `./types.js`).
 
 export interface ManifestShardIndexOptions {
   // Storage key resolution. String literal is used directly; function
@@ -59,7 +52,7 @@ export interface ManifestShardIndexOptions {
 
 interface ManifestShardRecord {
   tier: string
-  cadence: string | null
+  shardDur: string
   periodStart: number
   periodEnd: number
   key: string
@@ -126,12 +119,12 @@ function parseManifest(bytes: Uint8Array): ManifestV1 | null {
       if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
       const r = raw as Record<string, unknown>
       if (typeof r.tier !== 'string') return null
-      if (r.cadence !== null && typeof r.cadence !== 'string') return null
+      if (typeof r.shardDur !== 'string') return null
       if (typeof r.periodStart !== 'number' || typeof r.periodEnd !== 'number') return null
       if (typeof r.key !== 'string') return null
       shards.push({
         tier: r.tier,
-        cadence: r.cadence as string | null,
+        shardDur: r.shardDur,
         periodStart: r.periodStart,
         periodEnd: r.periodEnd,
         key: r.key,
@@ -173,8 +166,7 @@ export class ManifestShardIndex implements ShardIndex {
     const manifest = existing !== null ? parseManifest(existing) : null
     const now = this.now()
     const m: ManifestV1 = manifest ?? emptyManifest(now)
-    const cadence: Duration | null = input.cadence
-    const encoded = encodeWatermarkKey(input.tier, cadence)
+    const encoded = encodeWatermarkKey(input.tier, input.shardDur)
     const periodEndMs = input.periodEnd.getTime()
     const prevMs = m.watermarks[encoded]
     if (prevMs === undefined || periodEndMs > prevMs) {
@@ -185,12 +177,12 @@ export class ManifestShardIndex implements ShardIndex {
       const shards = m.shards ?? []
       const i = shards.findIndex(s =>
         s.tier === input.tier
-        && s.cadence === input.cadence
+        && s.shardDur === input.shardDur
         && s.periodStart === periodStartMs,
       )
       const record: ManifestShardRecord = {
         tier: input.tier,
-        cadence: input.cadence,
+        shardDur: input.shardDur as string,
         periodStart: periodStartMs,
         periodEnd: periodEndMs,
         key: input.key,

@@ -11,23 +11,18 @@ import type { Pyramid } from './types.js'
 
 const ms = (iso: string): number => new Date(iso).getTime()
 
-// Build a 3-row h1 parquet for awair (device 17617, 2026-01-01 hours 0/1/2).
-function awairH1Parquet(): Uint8Array {
+// Build a 1-row h1 parquet for awair (device 17617) at the given hour.
+function awairH1HourParquet(hour: 0 | 1 | 2): Uint8Array {
+  const hourMs = ms(`2026-01-01T0${hour}:00:00Z`)
+  const sums = [1200, 1260, 1320]
+  const sumsqs = [24500, 26800, 29200]
   const buf = parquetWriteBuffer({
     columnData: [
-      {
-        name: 'ts',
-        type: 'INT64',
-        data: [
-          BigInt(ms('2026-01-01T00:00:00Z')),
-          BigInt(ms('2026-01-01T01:00:00Z')),
-          BigInt(ms('2026-01-01T02:00:00Z')),
-        ],
-      },
-      { name: 'device_id', type: 'INT32', data: [17617, 17617, 17617] },
-      { name: 'temp_n', type: 'INT32', data: [60, 60, 60] },
-      { name: 'temp_sum', type: 'DOUBLE', data: [1200, 1260, 1320] },
-      { name: 'temp_sumsq', type: 'DOUBLE', data: [24500, 26800, 29200] },
+      { name: 'ts', type: 'INT64', data: [BigInt(hourMs)] },
+      { name: 'device_id', type: 'INT32', data: [17617] },
+      { name: 'temp_n', type: 'INT32', data: [60] },
+      { name: 'temp_sum', type: 'DOUBLE', data: [sums[hour]!] },
+      { name: 'temp_sumsq', type: 'DOUBLE', data: [sumsqs[hour]!] },
     ],
   })
   return new Uint8Array(buf)
@@ -41,10 +36,10 @@ const awair: Pyramid = {
   dims: [{ name: 'device_id', type: 'int' }],
   metrics: [{ name: 'temp', monoid: 'sum' }],
   tiers: [
-    { name: 'raw', bin: '1min', shard: '1mo' },
-    { name: 'h1', bin: '1h', shard: '1mo' },
-    { name: 'd1', bin: '1d', shard: '1y' },
-    { name: 'mo1', bin: '1mo', shard: '1y' },
+    { name: 'raw', bin: '1min', shards: ['1min'] },
+    { name: 'h1', bin: '1h', shards: ['1h'] },
+    { name: 'd1', bin: '1d', shards: ['1d'] },
+    { name: 'mo1', bin: '1mo', shards: ['1mo'] },
   ],
 }
 
@@ -76,9 +71,11 @@ function availRawParquet(): Uint8Array {
 
 describe('end-to-end pipeline', () => {
   test('plan → fetch → stitch reads parquet shard and returns stitched rows', async () => {
-    // Stand up an in-memory pyramid with one h1 shard.
+    // Stand up an in-memory pyramid with 3 hourly h1 shards.
     const data = new Map<string, Uint8Array>()
-    data.set('awair-17617/h1/2026-01.parquet', awairH1Parquet())
+    data.set('awair-17617/h1/2026-01-01T00.parquet', awairH1HourParquet(0))
+    data.set('awair-17617/h1/2026-01-01T01.parquet', awairH1HourParquet(1))
+    data.set('awair-17617/h1/2026-01-01T02.parquet', awairH1HourParquet(2))
     const pyramid: Pyramid = { ...awair, storage: parquetBackend(memStorage(data)) }
 
     const plan = planQuery(pyramid, {
@@ -86,9 +83,13 @@ describe('end-to-end pipeline', () => {
       binBudget: 100,
       filter: { device_id: 17617 },
     })
-    expect(plan.outputTier.name).toBe('h1')
+    expect(plan.outputTier?.name).toBe('h1')
     expect(plan.segments).toHaveLength(1)
-    expect(plan.segments[0]!.keys).toEqual(['awair-17617/h1/2026-01.parquet'])
+    expect(plan.segments[0]!.keys).toEqual([
+      'awair-17617/h1/2026-01-01T00.parquet',
+      'awair-17617/h1/2026-01-01T01.parquet',
+      'awair-17617/h1/2026-01-01T02.parquet',
+    ])
 
     const shardRows = await Promise.all(
       plan.segments.map(seg => pyramid.storage.fetchSegment(seg)),
@@ -132,8 +133,8 @@ describe('end-to-end pipeline', () => {
       dims: [{ name: 'station_id', type: 'string' }],
       metrics: [{ name: 'states', monoid: 'histogram' }],
       tiers: [
-        { name: 'raw', bin: '1min', shard: '1h' },
-        { name: 'h1', bin: '1h', shard: '1mo' },
+        { name: 'raw', bin: '1min', shards: ['1h'] },
+        { name: 'h1', bin: '1h', shards: ['1mo'] },
       ],
     }
 
@@ -141,9 +142,9 @@ describe('end-to-end pipeline', () => {
     const plan = planQuery(pyramid, {
       range: { from: new Date('2026-01-01T00:00:00Z'), to: new Date('2026-01-01T01:00:00Z') },
       binBudget: 1,    // 1 h1 bin in 1h range
-      watermarks: { h1: new Date('2026-01-01T00:00:00Z') },   // h1 not yet built
+      watermarks: { 'h1@1mo': new Date('2026-01-01T00:00:00Z') },   // h1 not yet built
     })
-    expect(plan.outputTier.name).toBe('h1')
+    expect(plan.outputTier?.name).toBe('h1')
     expect(plan.segments).toHaveLength(1)
     expect(plan.segments[0]!.shardTier.name).toBe('raw')
     expect(plan.segments[0]!.reaggregate).toBe(true)

@@ -3,51 +3,47 @@
 // `ManifestShardIndex` (single JSON blob in storage). The planner takes
 // a pre-resolved watermark map (not the index itself), so the index is a
 // pure read/write boundary the consumer wires up. See
-// `specs/partial-shards.md` §Watermark index.
+// `specs/done/unified-shard-ladder.md` §Watermark grid.
 
-import type { Duration } from './types.js'
+import type { Shard } from './types.js'
 
-// Watermark key encoding:
-//   - `${tier}`             — canonical shard at that tier
-//   - `${tier}@${cadence}`  — partial sub-shard at this tier × cadence
-//
-// `@` is the separator. Tier names must not contain `@` (validated at
-// pyramid-config time in phase 5 alongside grid-walk plumbing). The
-// encoding is symmetric with the D1 schema's `(tier, cadence)`
-// composite key (`cadence` NULL → canonical).
+// Watermark key encoding: `${tier}@${shardDur}` for every entry, no
+// special canonical/partial dichotomy. The `@` separator means tier names
+// must not contain `@` (validated at pyramid-config time).
 export const WATERMARK_KEY_SEPARATOR = '@'
 
-export function encodeWatermarkKey(tier: string, cadence: Duration | null): string {
-  if (cadence === null) return tier
-  return `${tier}${WATERMARK_KEY_SEPARATOR}${cadence}`
+export function encodeWatermarkKey(tier: string, shardDur: Shard): string {
+  return `${tier}${WATERMARK_KEY_SEPARATOR}${shardDur}`
 }
 
 export interface DecodedWatermarkKey {
   tier: string
-  cadence: Duration | null
+  shardDur: Shard
 }
 
 export function decodeWatermarkKey(key: string): DecodedWatermarkKey {
   const idx = key.indexOf(WATERMARK_KEY_SEPARATOR)
-  if (idx === -1) return { tier: key, cadence: null }
+  if (idx === -1) {
+    throw new Error(`decodeWatermarkKey: missing '${WATERMARK_KEY_SEPARATOR}' in '${key}'; expected '\${tier}@\${shardDur}'`)
+  }
   return {
     tier: key.slice(0, idx),
-    cadence: key.slice(idx + 1) as Duration,
+    shardDur: key.slice(idx + 1) as Shard,
   }
 }
 
 export interface RecordShardInput {
   pyramidName: string
   tier: string
-  // `null` = canonical shard; non-null = partial sub-shard at that cadence.
-  cadence: Duration | null
+  // Shard duration (e.g. `1h`, `1d`). Always present — no
+  // canonical/partial dichotomy in the unified-ladder model.
+  shardDur: Shard
   // Half-open `[periodStart, periodEnd)` — end-exclusive matches the
   // existing shard-period convention in `shardPeriodsCovering`.
   periodStart: Date
   periodEnd: Date
   // Pre-resolved storage key (the consumer is responsible for using
-  // `pyramid.keyTemplate` / `pyramid.partialKey`; the index just records
-  // what was written).
+  // `pyramid.keyTemplate`; the index just records what was written).
   key: string
 }
 

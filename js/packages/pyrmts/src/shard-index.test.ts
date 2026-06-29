@@ -8,34 +8,30 @@ import {
 } from './shard-index.js'
 
 describe('watermark key codec', () => {
-  test('canonical (cadence=null) encodes as the bare tier name', () => {
-    expect(encodeWatermarkKey('15m', null)).toBe('15m')
-  })
-
-  test('partial encodes as tier@cadence', () => {
+  test('encodes as tier@shardDur', () => {
     expect(encodeWatermarkKey('15m', '1h')).toBe('15m@1h')
   })
 
-  test('decode round-trips canonical', () => {
-    expect(decodeWatermarkKey('15m')).toEqual({ tier: '15m', cadence: null })
+  test('decode round-trips', () => {
+    expect(decodeWatermarkKey('15m@1h')).toEqual({ tier: '15m', shardDur: '1h' })
   })
 
-  test('decode round-trips partial', () => {
-    expect(decodeWatermarkKey('15m@1h')).toEqual({ tier: '15m', cadence: '1h' })
-  })
-
-  test('encode → decode round-trips a spread of tier/cadence combos', () => {
-    const cases: Array<{ tier: string; cadence: string | null }> = [
-      { tier: 'raw', cadence: null },
-      { tier: '2m', cadence: '10min' },
-      { tier: '15m', cadence: '1h' },
-      { tier: '1h', cadence: '3d' },
-      { tier: 'mo1', cadence: null },
+  test('encode → decode round-trips a spread of tier/shardDur combos', () => {
+    const cases: Array<{ tier: string; shardDur: string }> = [
+      { tier: 'raw', shardDur: '1mo' },
+      { tier: '2m', shardDur: '10min' },
+      { tier: '15m', shardDur: '1h' },
+      { tier: '1h', shardDur: '3d' },
+      { tier: 'mo1', shardDur: '1y' },
     ]
     for (const c of cases) {
-      const encoded = encodeWatermarkKey(c.tier, c.cadence as never)
+      const encoded = encodeWatermarkKey(c.tier, c.shardDur as never)
       expect(decodeWatermarkKey(encoded)).toEqual(c)
     }
+  })
+
+  test('decodeWatermarkKey throws on bare-tier (no separator)', () => {
+    expect(() => decodeWatermarkKey('15m')).toThrow(/missing '@'/)
   })
 })
 
@@ -50,7 +46,7 @@ function counterIndex(): { index: ShardIndex; calls: { get: number; record: numb
       // Stamp the result with the call number so distinct calls return
       // distinguishable values.
       const m = new Map<string, Date>()
-      m.set('15m', new Date(calls.get * 1000))
+      m.set('15m@1h', new Date(calls.get * 1000))
       return m
     },
     async recordShard(input) {
@@ -69,9 +65,9 @@ describe('CachedShardIndex', () => {
     const m2 = await cached.getWatermarks('avail')
     const m3 = await cached.getWatermarks('avail')
     expect(calls.get).toBe(1)
-    expect(m1.get('15m')).toEqual(new Date(1000))
-    expect(m2.get('15m')).toEqual(new Date(1000))
-    expect(m3.get('15m')).toEqual(new Date(1000))
+    expect(m1.get('15m@1h')).toEqual(new Date(1000))
+    expect(m2.get('15m@1h')).toEqual(new Date(1000))
+    expect(m3.get('15m@1h')).toEqual(new Date(1000))
   })
 
   test('refetches after TTL expires', async () => {
@@ -80,17 +76,17 @@ describe('CachedShardIndex', () => {
     const cached = new CachedShardIndex(index, { ttlMs: 60_000, now: () => t })
     const m1 = await cached.getWatermarks('avail')
     expect(calls.get).toBe(1)
-    expect(m1.get('15m')).toEqual(new Date(1000))
+    expect(m1.get('15m@1h')).toEqual(new Date(1000))
 
     t = 59_999
     const m2 = await cached.getWatermarks('avail')
     expect(calls.get).toBe(1)
-    expect(m2.get('15m')).toEqual(new Date(1000))
+    expect(m2.get('15m@1h')).toEqual(new Date(1000))
 
     t = 60_000
     const m3 = await cached.getWatermarks('avail')
     expect(calls.get).toBe(2)
-    expect(m3.get('15m')).toEqual(new Date(2000))
+    expect(m3.get('15m@1h')).toEqual(new Date(2000))
   })
 
   test('caches independently per pyramidName', async () => {
@@ -107,20 +103,20 @@ describe('CachedShardIndex', () => {
     const cached = new CachedShardIndex(index, { ttlMs: 60_000, now: () => 0 })
     const m1 = await cached.getWatermarks('avail')
     expect(calls.get).toBe(1)
-    expect(m1.get('15m')).toEqual(new Date(1000))
+    expect(m1.get('15m@1h')).toEqual(new Date(1000))
 
     await cached.recordShard({
       pyramidName: 'avail',
       tier: '15m',
-      cadence: '1h',
+      shardDur: '1h',
       periodStart: new Date(0),
       periodEnd: new Date(3_600_000),
-      key: 'avail/15m/p1h/1970-01-01T00.parquet',
+      key: 'avail/15m/1h/1970-01-01T00.parquet',
     })
 
     const m2 = await cached.getWatermarks('avail')
     expect(calls.get).toBe(2)
-    expect(m2.get('15m')).toEqual(new Date(2000))
+    expect(m2.get('15m@1h')).toEqual(new Date(2000))
   })
 
   test('recordShard invalidates only the affected pyramid', async () => {
@@ -133,7 +129,7 @@ describe('CachedShardIndex', () => {
     await cached.recordShard({
       pyramidName: 'avail',
       tier: '15m',
-      cadence: null,
+      shardDur: '1h',
       periodStart: new Date(0),
       periodEnd: new Date(3_600_000),
       key: 'k',
@@ -160,11 +156,11 @@ describe('CachedShardIndex', () => {
     const p3 = cached.getWatermarks('avail')
     // All 3 parallel reads should be hooked to the same in-flight fetch.
     expect(callsGet).toBe(1)
-    resolveUnderlying!(new Map([['15m', new Date(42)]]))
+    resolveUnderlying!(new Map([['15m@1h', new Date(42)]]))
     const [r1, r2, r3] = await Promise.all([p1, p2, p3])
     expect(r1).toBe(r2)
     expect(r2).toBe(r3)
-    expect(r1.get('15m')).toEqual(new Date(42))
+    expect(r1.get('15m@1h')).toEqual(new Date(42))
   })
 
   test('failed underlying fetch evicts the in-flight entry so the next call retries', async () => {
@@ -173,7 +169,7 @@ describe('CachedShardIndex', () => {
       async getWatermarks() {
         callsGet++
         if (callsGet === 1) throw new Error('transient')
-        return new Map([['15m', new Date(callsGet * 1000)]])
+        return new Map([['15m@1h', new Date(callsGet * 1000)]])
       },
       async recordShard() {},
     }
@@ -181,7 +177,7 @@ describe('CachedShardIndex', () => {
     await expect(cached.getWatermarks('avail')).rejects.toThrow('transient')
     const m = await cached.getWatermarks('avail')
     expect(callsGet).toBe(2)
-    expect(m.get('15m')).toEqual(new Date(2000))
+    expect(m.get('15m@1h')).toEqual(new Date(2000))
   })
 
   test('default ttl is 60_000 (matches ctbk\'s manifest TTL)', async () => {
@@ -235,10 +231,10 @@ describe('CachedShardIndex', () => {
     const input: RecordShardInput = {
       pyramidName: 'avail',
       tier: '15m',
-      cadence: '1h',
+      shardDur: '1h',
       periodStart: new Date(3_600_000),
       periodEnd: new Date(7_200_000),
-      key: 'avail/15m/p1h/1970-01-01T01.parquet',
+      key: 'avail/15m/1h/1970-01-01T01.parquet',
     }
     await cached.recordShard(input)
     expect(records).toEqual([input])

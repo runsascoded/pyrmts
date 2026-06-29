@@ -22,10 +22,10 @@ const awair: Pyramid = {
     { name: 'co2', monoid: 'sum' },
   ],
   tiers: [
-    { name: 'raw', bin: '1min', shard: '1mo' },
-    { name: 'h1', bin: '1h', shard: '1mo' },
-    { name: 'd1', bin: '1d', shard: '1y' },
-    { name: 'mo1', bin: '1mo', shard: '1y' },
+    { name: 'raw', bin: '1min', shards: ['1min'] },
+    { name: 'h1', bin: '1h', shards: ['1h'] },
+    { name: 'd1', bin: '1d', shards: ['1d'] },
+    { name: 'mo1', bin: '1mo', shards: ['1mo'] },
   ],
 }
 
@@ -53,7 +53,7 @@ describe('stitch: pass-through (no reaggregate)', () => {
       filter,
     })
     // 3h range, 100 budget → h1.
-    expect(plan.outputTier.name).toBe('h1')
+    expect(plan.outputTier?.name).toBe('h1')
 
     const rows: Row[] = [
       sumRow(ms('2026-01-01T00:00:00Z'), 17617, { temp: [60, 1200, 24500], co2: [60, 24000, 9700000] }),
@@ -89,7 +89,7 @@ describe('stitch: reaggregate to coarser output', () => {
       filter,
     })
     // 1h range, 1 budget → h1 has 1 bin → h1 selected.
-    expect(plan.outputTier.name).toBe('h1')
+    expect(plan.outputTier?.name).toBe('h1')
 
     // Build raw (1min) rows for the full hour. Each minute contributes 1 reading.
     const rawRows: Row[] = []
@@ -137,11 +137,11 @@ describe('stitch: multi-segment (output + reaggregated tail)', () => {
       binBudget: 100,
       filter,
       watermarks: {
-        raw: d('2026-01-01T03:00:00Z'),
-        h1:  d('2026-01-01T02:00:00Z'),  // h1 only built through 02:00
+        'raw@1min': d('2026-01-01T03:00:00Z'),
+        'h1@1h':  d('2026-01-01T02:00:00Z'),  // h1 only built through 02:00
       },
     })
-    expect(plan.outputTier.name).toBe('h1')
+    expect(plan.outputTier?.name).toBe('h1')
     expect(plan.segments).toHaveLength(2)
 
     // Segment 0: h1, [00:00, 02:00). Two h1 rows pre-aggregated.
@@ -175,8 +175,8 @@ describe('stitch: histogram monoid', () => {
     dims: [{ name: 'station_id', type: 'string' }],
     metrics: [{ name: 'states', monoid: 'histogram' }],
     tiers: [
-      { name: 'raw', bin: '1min', shard: '1h' },
-      { name: 'h1', bin: '1h', shard: '1mo' },
+      { name: 'raw', bin: '1min', shards: ['1min'] },
+      { name: 'h1', bin: '1h', shards: ['1h'] },
     ],
   }
 
@@ -185,7 +185,7 @@ describe('stitch: histogram monoid', () => {
       range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-01-01T01:00:00Z') },
       binBudget: 1,    // forces h1
     })
-    expect(plan.outputTier.name).toBe('h1')
+    expect(plan.outputTier?.name).toBe('h1')
 
     plan.segments[0]!.shardTier = availPyramid.tiers[0]!
     plan.segments[0]!.reaggregate = true

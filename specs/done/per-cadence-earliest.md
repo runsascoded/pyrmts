@@ -1,5 +1,10 @@
 # Per-(tier, cadence) earliest watermarks (no cross-tier propagation)
 
+> **Superseded by [`unified-shard-ladder.md`](./unified-shard-ladder.md).**
+> Field renamed `earliestPerCadence` → `earliestPerShard`; keys
+> uniformly `${tier}@${shardDur}`. Semantics preserved (per-(tier,
+> shardDur) gate that doesn't propagate up the tier ladder).
+
 ## Goal
 
 Let `planQuery` correctly model the case where a `(tier, cadence)`

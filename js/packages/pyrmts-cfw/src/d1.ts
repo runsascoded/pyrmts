@@ -63,12 +63,16 @@ const DEFAULT_CHUNK_SIZE = 90
 
 // Materialize `tableTemplate` against `tier`. Substitutes `{tier}` →
 // `tier.name`. Extra `{X}` placeholders pull from `tier[X]` for fields
-// the spec-defined Tier type carries (bin, shard).
+// the spec-defined Tier type carries (bin, largest shard).
 function resolveTable(template: string, tier: Tier): string {
   return template.replace(/\{(\w+)\}/g, (_, k) => {
     if (k === 'tier') return tier.name
     if (k === 'bin') return String(tier.bin)
-    if (k === 'shard') return String(tier.shard)
+    // `{shard}` historically substituted `tier.shard` (the largest /
+    // canonical shard duration); preserve that semantic by reading
+    // `tier.shards.at(-1)`. Templates that want a specific rung use
+    // their own logic.
+    if (k === 'shard') return String(tier.shards[tier.shards.length - 1])
     throw new Error(`d1Backend: unknown placeholder '{${k}}' in tableTemplate '${template}'`)
   })
 }

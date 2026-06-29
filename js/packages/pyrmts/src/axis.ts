@@ -117,9 +117,6 @@ export function shardPeriodsCovering(
   to: Date,
   shard: Shard,
 ): { start: Date; end: Date; label: string }[] {
-  if (shard === 'all') {
-    return [{ start: new Date(0), end: new Date(8.64e15), label: 'all' }]
-  }
   if (shard === '1run') {
     throw new Error("'1run' shards are step-axis only; not yet supported")
   }

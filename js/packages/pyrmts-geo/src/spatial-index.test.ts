@@ -38,7 +38,7 @@ describe('getSpatialIndex: pyramid resolution', () => {
       binCol: 'ts',
       dims: [],
       metrics: [{ name: 'count', monoid: 'count' }],
-      tiers: [{ name: 'h1', bin: '1h', shard: '1mo' }],
+      tiers: [{ name: 'h1', bin: '1h', shards: ['1mo'] }],
       ...(geo !== undefined ? { geo } : {}),
     }
   }
@@ -81,7 +81,7 @@ describe('GeoPyramid structural compatibility with core Pyramid', () => {
       binCol: 'ts',
       dims: [],
       metrics: [{ name: 'count', monoid: 'count' }],
-      tiers: [{ name: 'h1', bin: '1h', shard: '1mo' }],
+      tiers: [{ name: 'h1', bin: '1h', shards: ['1mo'] }],
       geo: { cellCol: 'h3_cell', resolutions: [9, 7, 5] },
     }
     const geo: GeoPyramid = core

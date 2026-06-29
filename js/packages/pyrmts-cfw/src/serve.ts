@@ -34,14 +34,13 @@ export interface ServeOptions {
   earliestWatermarks?:
     | Record<string, Date>
     | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
-  // Per-(tier, cadence) earliest-available-bin instants, keyed by the
-  // `ShardIndex` convention (`${tier}@${cadence}` for partials, bare
-  // `${tier}` for canonical). Per-entry gate that doesn't propagate up
-  // the tier ladder — use for partial sub-shards with forward-only
-  // coverage (e.g. a cascading cron started writing on a deploy date,
-  // but coarser tiers were canonically backfilled from epoch). See
-  // `specs/done/per-cadence-earliest.md`.
-  earliestPerCadence?:
+  // Per-(tier, shardDur) earliest-available-bin instants, keyed
+  // `${tier}@${shardDur}` (uniform across the per-tier shard ladder).
+  // Per-entry gate that doesn't propagate up the tier ladder — use for
+  // shard durations with forward-only coverage (e.g. a cascading cron
+  // started writing on a deploy date). See
+  // `specs/done/unified-shard-ladder.md`.
+  earliestPerShard?:
     | Record<string, Date>
     | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
   // Treat missing shard objects as empty instead of erroring. Pair with
@@ -89,7 +88,7 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
 
   const watermarks = await resolveWatermarks(opts.watermarks, request)
   const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request)
-  const earliestPerCadence = await resolveWatermarks(opts.earliestPerCadence, request)
+  const earliestPerShard = await resolveWatermarks(opts.earliestPerShard, request)
 
   let result: { records: unknown[]; plan: unknown }
   try {
@@ -98,7 +97,7 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
       binBudget,
       watermarks,
       earliestWatermarks,
-      earliestPerCadence,
+      earliestPerShard,
       filter,
       ...(smoothing !== undefined ? { smoothing } : {}),
       ...(smoothMode !== undefined ? { smoothMode } : {}),
@@ -120,6 +119,7 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
         smoothing: plan.smoothing,
         segments: plan.segments.map(s => ({
           tier: s.shardTier.name,
+          shardDur: s.shardDur,
           from: s.from.toISOString(),
           to: s.to.toISOString(),
           reaggregate: s.reaggregate,
@@ -165,7 +165,7 @@ async function resolveWatermarks(
   src:
     | ServeOptions['watermarks']
     | ServeOptions['earliestWatermarks']
-    | ServeOptions['earliestPerCadence'],
+    | ServeOptions['earliestPerShard'],
   request: Request,
 ): Promise<Record<string, Date>> {
   if (src === undefined) return {}

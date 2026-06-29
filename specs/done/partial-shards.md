@@ -1,5 +1,12 @@
 # Partial sub-shards: multi-cadence sub-shards per tier
 
+> **Superseded by [`unified-shard-ladder.md`](./unified-shard-ladder.md).**
+> The canonical/partial dichotomy this spec introduced is gone; every
+> shard is just an entry on a per-tier `shards: Shard[]` ladder.
+> `pyramid.partials` + `pyramid.partialKey` removed; watermark keys
+> are uniformly `${tier}@${shardDur}` (no bare-`${tier}` form).
+> Planner walk replaced with cursor-aware-largest-first per position.
+
 ## Goal
 
 Let each tier have **multiple shard granularities** — a canonical sealed

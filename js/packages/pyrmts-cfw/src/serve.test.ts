@@ -67,10 +67,10 @@ function buildPyramid(): Pyramid {
     dims: [{ name: 'device_id', type: 'int' }],
     metrics: [{ name: 'temp', monoid: 'sum' }],
     tiers: [
-      { name: 'raw', bin: '1min', shard: '1mo' },
-      { name: 'h1', bin: '1h', shard: '1mo' },
-      { name: 'd1', bin: '1d', shard: '1y' },
-      { name: 'mo1', bin: '1mo', shard: '1y' },
+      { name: 'raw', bin: '1min', shards: ['1mo'] },
+      { name: 'h1', bin: '1h', shards: ['1mo'] },
+      { name: 'd1', bin: '1d', shards: ['1y'] },
+      { name: 'mo1', bin: '1mo', shards: ['1y'] },
     ],
   }
 }
@@ -89,6 +89,7 @@ interface ResponseBody {
     } | null
     segments: Array<{
       tier: string
+      shardDur: string
       from: string
       to: string
       reaggregate: boolean
@@ -120,6 +121,7 @@ describe('serveQuery', () => {
       smoothing: null,
       segments: [{
         tier: 'h1',
+        shardDur: '1mo',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T03:00:00.000Z',
         reaggregate: false,
@@ -205,6 +207,7 @@ describe('serveQuery', () => {
     expect(body.records).toEqual([])
     expect(body.plan.segments).toEqual([{
       tier: 'h1',
+      shardDur: '1mo',
       from: '2026-01-01T00:00:00.000Z',
       to: '2026-01-01T03:00:00.000Z',
       reaggregate: false,
@@ -232,6 +235,7 @@ describe('serveQuery', () => {
     const body = await res.json() as ResponseBody
     expect(body.plan.segments).toEqual([{
       tier: 'h1',
+      shardDur: '1mo',
       from: '2026-01-01T02:00:00.000Z',
       to: '2026-01-01T03:00:00.000Z',
       reaggregate: false,
@@ -271,13 +275,14 @@ describe('serveQuery', () => {
         + '&bin_budget=100'
         + '&device_id=17617',
       ),
-      watermarks: () => ({ h1: new Date('2026-01-01T02:00:00Z') }),
+      watermarks: () => ({ 'h1@1mo': new Date('2026-01-01T02:00:00Z') }),
     })
     expect(res.status).toBe(200)
     const body = await res.json() as ResponseBody
     expect(body.plan.segments).toEqual([
       {
         tier: 'h1',
+        shardDur: '1mo',
         from: '2026-01-01T00:00:00.000Z',
         to: '2026-01-01T02:00:00.000Z',
         reaggregate: false,
@@ -285,6 +290,7 @@ describe('serveQuery', () => {
       },
       {
         tier: 'raw',
+        shardDur: '1mo',
         from: '2026-01-01T02:00:00.000Z',
         to: '2026-01-01T03:00:00.000Z',
         reaggregate: true,

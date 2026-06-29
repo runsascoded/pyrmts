@@ -42,8 +42,8 @@ function mockD1(results: MockResults = {}): { db: D1Like; calls: Call[] } {
   return { db, calls }
 }
 
-const TIER_1MO: Tier = { name: '1mo', bin: '1mo', shard: 'all' }
-const TIER_1D: Tier = { name: '1d', bin: '1d', shard: 'all' }
+const TIER_1MO: Tier = { name: '1mo', bin: '1mo', shards: ['120y'] }
+const TIER_1D: Tier = { name: '1d', bin: '1d', shards: ['120y'] }
 
 function seg(tier: Tier, from = '2024-01-01T00:00:00Z', to = '2024-12-31T23:59:59Z'): FetchSegment {
   return { from: new Date(from), to: new Date(to), shardTier: tier, keys: [] }
@@ -187,7 +187,7 @@ describe('d1Backend: tableTemplate substitution', () => {
     const { db, calls } = mockD1()
     const backend = d1Backend(db, { tableTemplate: 'tbl_{tier}_{bin}_{shard}' })
     await backend.fetchSegment(seg(TIER_1D))
-    expect(calls[0]!.sql).toContain('"tbl_1d_1d_all"')
+    expect(calls[0]!.sql).toContain('"tbl_1d_1d_120y"')
   })
 
   test('unknown placeholder throws', async () => {

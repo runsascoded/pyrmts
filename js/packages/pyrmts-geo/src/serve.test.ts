@@ -46,7 +46,10 @@ function tripsParquet(): Uint8Array {
 
 function buildPyramid(): Pyramid {
   const data = new Map<string, Uint8Array>()
-  data.set('trips/h1/2026-01.parquet', tripsParquet())
+  // 1d shards so test queries can align to a shard boundary (the planner's
+  // seal check requires `effective ≥ periodEnd`, and `effective` gets
+  // clamped to `rangeTo`).
+  data.set('trips/h1/2026-01-01.parquet', tripsParquet())
   return {
     storage: parquetBackend(memStorage(data)),
     keyTemplate: 'trips/{tier}/{period}.parquet',
@@ -55,8 +58,8 @@ function buildPyramid(): Pyramid {
     dims: [{ name: 'h3_cell', type: 'h3' }],
     metrics: [{ name: 'count', monoid: 'count' }],
     tiers: [
-      { name: 'h1', bin: '1h', shard: '1mo' },
-      { name: 'd1', bin: '1d', shard: '1y' },
+      { name: 'h1', bin: '1h', shards: ['1d'] },
+      { name: 'd1', bin: '1d', shards: ['1y'] },
     ],
     geo: { cellCol: 'h3_cell', resolutions: [9, 7, 5] },
   }
@@ -81,9 +84,12 @@ describe('serveGeoQuery', () => {
     const res = await serveGeoQuery({
       pyramid: buildPyramid(),
       request: new Request(
+        // 1-day window aligned to a 1d shard boundary (the planner's seal
+        // check requires `effective ≥ periodEnd`; data only covers the
+        // first two hours but the wider window doesn't change the row count).
         'https://serve.example/?'
         + 'from=2026-01-01T00:00:00Z'
-        + '&to=2026-01-01T02:00:00Z'
+        + '&to=2026-01-02T00:00:00Z'
         + '&bin_budget=100'
         + `&bbox=${BBOX_PARAM}`
         + '&cell_budget=1000',
@@ -179,7 +185,7 @@ describe('serveGeoQuery', () => {
       request: new Request(
         'https://serve.example/?'
         + 'from=2026-01-01T00:00:00Z'
-        + '&to=2026-01-01T02:00:00Z'
+        + '&to=2026-01-02T00:00:00Z'
         + `&bbox=${BBOX_PARAM}`
         + '&cell_budget=3',
       ),
@@ -201,7 +207,7 @@ describe('serveGeoQuery', () => {
       request: new Request(
         'https://serve.example/?'
         + 'from=2026-01-01T00:00:00Z'
-        + '&to=2026-01-01T02:00:00Z'
+        + '&to=2026-01-02T00:00:00Z'
         + `&bbox=${BBOX_PARAM}`
         + '&cell_budget=100',
       ),
@@ -216,9 +222,11 @@ describe('serveGeoQuery', () => {
     // earliestWatermarks pushes the planner's segment past the query range so
     // no shard keys are emitted at all, demonstrating the planner-level skip.
     const pyramid: Pyramid = { ...buildPyramid(), storage: parquetBackend(memStorage()) }
+    // 1-day window aligned to a 1d shard boundary so the planner emits a
+    // segment (with shard keys for the missing shard).
     const url = 'https://serve.example/?'
       + 'from=2026-01-01T00:00:00Z'
-      + '&to=2026-01-01T02:00:00Z'
+      + '&to=2026-01-02T00:00:00Z'
       + `&bbox=${BBOX_PARAM}`
       + '&cell_budget=100'
 

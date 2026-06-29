@@ -8,7 +8,7 @@ import type { FetchSegment, Storage, Tier } from './types.js'
 
 // Dummy segment fixture for parquet-backend tests — the parquet backend
 // only reads `keys`, so from/to/shardTier are placeholder values.
-const DUMMY_TIER: Tier = { name: 't', bin: '1h', shard: '1mo' }
+const DUMMY_TIER: Tier = { name: 't', bin: '1h', shards: ['1mo'] }
 function seg(keys: string[]): FetchSegment {
   return { from: new Date(0), to: new Date(0), shardTier: DUMMY_TIER, keys }
 }

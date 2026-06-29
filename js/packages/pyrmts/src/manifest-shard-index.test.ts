@@ -24,10 +24,10 @@ function makeRecordInput(overrides: Partial<RecordShardInput> = {}): RecordShard
   return {
     pyramidName: 'avail',
     tier: '15m',
-    cadence: '1h',
+    shardDur: '1h',
     periodStart: new Date('2026-06-21T14:00:00Z'),
     periodEnd: new Date('2026-06-21T15:00:00Z'),
-    key: 'avail/15m/p1h/2026-06-21T14.parquet',
+    key: 'avail/15m/1h/2026-06-21T14.parquet',
     ...overrides,
   }
 }
@@ -39,16 +39,16 @@ describe('ManifestShardIndex.getWatermarks', () => {
     expect(await idx.getWatermarks('avail')).toEqual(new Map())
   })
 
-  test('round-trips canonical + partial watermarks', async () => {
+  test('round-trips multiple shard-duration watermarks at one tier', async () => {
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, { now: () => 0 })
-    await idx.recordShard(makeRecordInput({ cadence: null }))
-    await idx.recordShard(makeRecordInput({ cadence: '1h' }))
-    await idx.recordShard(makeRecordInput({ cadence: '1d' }))
+    await idx.recordShard(makeRecordInput({ shardDur: '1h' }))
+    await idx.recordShard(makeRecordInput({ shardDur: '1d' }))
+    await idx.recordShard(makeRecordInput({ shardDur: '1mo' }))
     expect(await idx.getWatermarks('avail')).toEqual(new Map<string, Date>([
-      ['15m', new Date('2026-06-21T15:00:00Z')],
       ['15m@1h', new Date('2026-06-21T15:00:00Z')],
       ['15m@1d', new Date('2026-06-21T15:00:00Z')],
+      ['15m@1mo', new Date('2026-06-21T15:00:00Z')],
     ]))
   })
 
@@ -63,7 +63,7 @@ describe('ManifestShardIndex.getWatermarks', () => {
     const storage = memStorage()
     await storage.put(
       'pyrmts/avail/_manifest.json',
-      new TextEncoder().encode(JSON.stringify({ version: 99, watermarks: { '15m': 1000 } })),
+      new TextEncoder().encode(JSON.stringify({ version: 99, watermarks: { '15m@1h': 1000 } })),
     )
     const idx = new ManifestShardIndex(storage, { now: () => 0 })
     expect(await idx.getWatermarks('avail')).toEqual(new Map())
@@ -89,11 +89,11 @@ describe('ManifestShardIndex.recordShard', () => {
   test('creates manifest on first write', async () => {
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, { now: () => 999 })
-    await idx.recordShard(makeRecordInput({ cadence: null }))
+    await idx.recordShard(makeRecordInput({ shardDur: '1d' }))
     const m = await readManifest(storage, 'pyrmts/avail/_manifest.json')
     expect(m).toEqual({
       version: 1,
-      watermarks: { '15m': new Date('2026-06-21T15:00:00Z').getTime() },
+      watermarks: { '15m@1d': new Date('2026-06-21T15:00:00Z').getTime() },
       updatedAt: 999,
     })
   })
@@ -102,32 +102,24 @@ describe('ManifestShardIndex.recordShard', () => {
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, { now: () => 0 })
     await idx.recordShard(makeRecordInput({
-      cadence: null,
+      shardDur: '1d',
       periodStart: new Date('2026-06-21T14:00:00Z'),
       periodEnd: new Date('2026-06-21T15:00:00Z'),
     }))
     await idx.recordShard(makeRecordInput({
-      cadence: null,
+      shardDur: '1d',
       periodStart: new Date('2026-06-21T13:00:00Z'),
       periodEnd: new Date('2026-06-21T14:00:00Z'),  // older
     }))
     expect(await idx.getWatermarks('avail')).toEqual(new Map<string, Date>([
-      ['15m', new Date('2026-06-21T15:00:00Z')],
+      ['15m@1d', new Date('2026-06-21T15:00:00Z')],
     ]))
   })
 
-  test('cadence=null encodes as bare tier in watermarks key', async () => {
+  test('watermark key is encoded uniformly as tier@shardDur', async () => {
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, { now: () => 0 })
-    await idx.recordShard(makeRecordInput({ cadence: null }))
-    const m = await readManifest(storage, 'pyrmts/avail/_manifest.json')
-    expect(Object.keys((m as { watermarks: Record<string, number> }).watermarks)).toEqual(['15m'])
-  })
-
-  test('cadence non-null encodes as tier@cadence in watermarks key', async () => {
-    const storage = memStorage()
-    const idx = new ManifestShardIndex(storage, { now: () => 0 })
-    await idx.recordShard(makeRecordInput({ cadence: '1h' }))
+    await idx.recordShard(makeRecordInput({ shardDur: '1h' }))
     const m = await readManifest(storage, 'pyrmts/avail/_manifest.json')
     expect(Object.keys((m as { watermarks: Record<string, number> }).watermarks)).toEqual(['15m@1h'])
   })
@@ -144,46 +136,46 @@ describe('ManifestShardIndex.recordShard', () => {
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, { includeInventory: true, now: () => 0 })
     await idx.recordShard(makeRecordInput({
-      cadence: '1h',
+      shardDur: '1h',
       periodStart: new Date('2026-06-21T14:00:00Z'),
       periodEnd: new Date('2026-06-21T15:00:00Z'),
     }))
     await idx.recordShard(makeRecordInput({
-      cadence: '1h',
+      shardDur: '1h',
       periodStart: new Date('2026-06-21T15:00:00Z'),
       periodEnd: new Date('2026-06-21T16:00:00Z'),
-      key: 'avail/15m/p1h/2026-06-21T15.parquet',
+      key: 'avail/15m/1h/2026-06-21T15.parquet',
     }))
     const m = await readManifest(storage, 'pyrmts/avail/_manifest.json')
     expect((m as { shards: unknown[] }).shards).toEqual([
       {
         tier: '15m',
-        cadence: '1h',
+        shardDur: '1h',
         periodStart: new Date('2026-06-21T14:00:00Z').getTime(),
         periodEnd: new Date('2026-06-21T15:00:00Z').getTime(),
-        key: 'avail/15m/p1h/2026-06-21T14.parquet',
+        key: 'avail/15m/1h/2026-06-21T14.parquet',
       },
       {
         tier: '15m',
-        cadence: '1h',
+        shardDur: '1h',
         periodStart: new Date('2026-06-21T15:00:00Z').getTime(),
         periodEnd: new Date('2026-06-21T16:00:00Z').getTime(),
-        key: 'avail/15m/p1h/2026-06-21T15.parquet',
+        key: 'avail/15m/1h/2026-06-21T15.parquet',
       },
     ])
   })
 
-  test('includeInventory: true overwrites the same (tier, cadence, periodStart) row', async () => {
+  test('includeInventory: true overwrites the same (tier, shardDur, periodStart) row', async () => {
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, { includeInventory: true, now: () => 0 })
     await idx.recordShard(makeRecordInput({
-      cadence: '1h',
+      shardDur: '1h',
       periodStart: new Date('2026-06-21T14:00:00Z'),
       periodEnd: new Date('2026-06-21T15:00:00Z'),
       key: 'k1',
     }))
     await idx.recordShard(makeRecordInput({
-      cadence: '1h',
+      shardDur: '1h',
       periodStart: new Date('2026-06-21T14:00:00Z'),
       periodEnd: new Date('2026-06-21T15:00:00Z'),
       key: 'k2',  // rewrite of same period
@@ -200,7 +192,7 @@ describe('ManifestShardIndex.recordShard', () => {
     await idx.recordShard(makeRecordInput())
     expect((await readManifest(storage, 'pyrmts/avail/_manifest.json') as { updatedAt: number }).updatedAt).toBe(1000)
     t = 2000
-    await idx.recordShard(makeRecordInput({ cadence: '1d' }))
+    await idx.recordShard(makeRecordInput({ shardDur: '1d' }))
     expect((await readManifest(storage, 'pyrmts/avail/_manifest.json') as { updatedAt: number }).updatedAt).toBe(2000)
   })
 })
@@ -210,14 +202,14 @@ describe('ManifestShardIndex: manifestKey override', () => {
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, { manifestKey: 'shared/manifest.json', now: () => 0 })
     await idx.recordShard(makeRecordInput({ pyramidName: 'avail' }))
-    await idx.recordShard(makeRecordInput({ pyramidName: 'rides', tier: '1d', cadence: null }))
+    await idx.recordShard(makeRecordInput({ pyramidName: 'rides', tier: '1d', shardDur: '1y' }))
     expect(await idx.getWatermarks('avail')).toEqual(new Map<string, Date>([
       ['15m@1h', new Date('2026-06-21T15:00:00Z')],
-      ['1d', new Date('2026-06-21T15:00:00Z')],
+      ['1d@1y', new Date('2026-06-21T15:00:00Z')],
     ]))
     expect(await idx.getWatermarks('rides')).toEqual(new Map<string, Date>([
       ['15m@1h', new Date('2026-06-21T15:00:00Z')],
-      ['1d', new Date('2026-06-21T15:00:00Z')],
+      ['1d@1y', new Date('2026-06-21T15:00:00Z')],
     ]))
   })
 
@@ -228,12 +220,12 @@ describe('ManifestShardIndex: manifestKey override', () => {
       now: () => 0,
     })
     await idx.recordShard(makeRecordInput({ pyramidName: 'avail' }))
-    await idx.recordShard(makeRecordInput({ pyramidName: 'rides', tier: '1d', cadence: null }))
+    await idx.recordShard(makeRecordInput({ pyramidName: 'rides', tier: '1d', shardDur: '1y' }))
     expect(await idx.getWatermarks('avail')).toEqual(new Map<string, Date>([
       ['15m@1h', new Date('2026-06-21T15:00:00Z')],
     ]))
     expect(await idx.getWatermarks('rides')).toEqual(new Map<string, Date>([
-      ['1d', new Date('2026-06-21T15:00:00Z')],
+      ['1d@1y', new Date('2026-06-21T15:00:00Z')],
     ]))
   })
 

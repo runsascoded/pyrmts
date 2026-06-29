@@ -1,5 +1,49 @@
 # Unified shard-duration ladder per tier (drop canonical/partial dichotomy)
 
+## Resolution
+
+Implemented as designed, with these deviations / clarifications:
+
+- **Seal check is `effective > cursor`, not `effective ≥ periodEnd`.**
+  The "Worked examples" sketch used a strict-period seal check ("period
+  sealed iff effective ≥ periodEnd"), which would have broken
+  pyramids whose only watermark falls *inside* the largest-shard period
+  (e.g. ctbk's avail-v3 where `15m@15d` lives in monthly periods but
+  watermarks land daily). Switched to "covers cursor" semantics: the
+  shard's data is sealed up to `effective`; cursor is covered iff
+  `effective > cursor`. Emitted segment clips to
+  `min(plannedTo, effective, periodEnd)`. Preserves both the old
+  "partial-fill of a single canonical shard" semantics and the new
+  "fully-sealed promoted shards" semantics in one code path.
+- **Undeclared (tier, shardDur) cells default to FAR_FUTURE** ("complete
+  enough"). Lets single-shard test pyramids work without declaring
+  watermarks. For production consumers (ctbk's D1ShardIndex), declare
+  watermarks for every (tier, shardDur) that has shards; undeclared
+  cells will be considered readable, which matches the "trust the
+  storage backend" model.
+- **`planRagged` (targetBin path) was not migrated to the cursor-aware
+  walk.** It still uses each tier's largest shard duration
+  (`tier.shards.at(-1)`) and its own per-tier effective via
+  `effectiveLargestShardWatermarks` (which DOES clamp to rangeTo, as
+  ragged needs to drop atoms past plannedTo). Ragged decomposition
+  is orthogonal to the ladder model — it packs output bins from finer
+  tiers' atoms regardless of shard-size choices within those tiers.
+- **`{shard}` placeholder optional in `keyTemplate`.** The spec's
+  "Storage layout migration" section showed uniform
+  `<tier>/<shard>/<period>` paths, but tests that don't need to
+  distinguish shard sizes can omit `{shard}` (the planner's
+  `substituteKey` only replaces placeholders that appear in the
+  template). This preserved many existing test fixtures without
+  forcing path-string rewrites.
+- **Deferred to consumer:** storage migration, backfill of intermediate
+  sizes, compactor unification (steps 3–5 in §Migration plan). ctbk's
+  task list.
+- **Test coverage:** 331/331 tests pass across `pyrmts`, `pyrmts-cfw`,
+  `pyrmts-geo`. Added `planner.test.ts` cases for the three
+  worked-examples (full tiling / sparse mid-ladder / finer-tier
+  fall-through), plus a "cursor-aware walk: largest-first" describe
+  block reproducing the avail-v3 walk-order bug.
+
 ## Goal
 
 Refactor pyrmts's tier model from a singleton-`shard`-plus-optional-

@@ -33,7 +33,7 @@ export interface ServeGeoOptions {
     | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
   // Per-(tier, cadence) earliest-available-bin instants. See pyrmts-cfw
   // `ServeOptions`.
-  earliestPerCadence?:
+  earliestPerShard?:
     | Record<string, Date>
     | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
   // Treat missing shard objects as empty instead of erroring. See pyrmts-cfw
@@ -93,7 +93,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
 
   const watermarks = await resolveWatermarks(opts.watermarks, request)
   const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request)
-  const earliestPerCadence = await resolveWatermarks(opts.earliestPerCadence, request)
+  const earliestPerShard = await resolveWatermarks(opts.earliestPerShard, request)
 
   let result: { records: unknown[]; plan: unknown }
   try {
@@ -104,7 +104,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
       cellBudget,
       watermarks,
       earliestWatermarks,
-      earliestPerCadence,
+      earliestPerShard,
       filter,
       ...(smoothing !== undefined ? { smoothing } : {}),
       ...(smoothMode !== undefined ? { smoothMode } : {}),
@@ -131,7 +131,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
         from: s.from,
         to: s.to,
         shardTier: s.shardTier,
-        shardCadence: s.shardCadence,
+        shardDur: s.shardDur,
         keys: s.keys,
         reaggregate: s.reaggregate,
       })),
@@ -152,6 +152,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
         smoothing: plan.smoothing,
         segments: plan.segments.map(s => ({
           tier: s.shardTier.name,
+          shardDur: s.shardDur,
           from: s.from.toISOString(),
           to: s.to.toISOString(),
           reaggregate: s.reaggregate,
@@ -186,7 +187,7 @@ async function resolveWatermarks(
   src:
     | ServeGeoOptions['watermarks']
     | ServeGeoOptions['earliestWatermarks']
-    | ServeGeoOptions['earliestPerCadence'],
+    | ServeGeoOptions['earliestPerShard'],
   request: Request,
 ): Promise<Record<string, Date>> {
   if (src === undefined) return {}

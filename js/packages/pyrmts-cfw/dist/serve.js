@@ -44,7 +44,7 @@ export async function serveQuery(opts) {
     const smoothMode = smoothModeRaw === null ? undefined : smoothModeRaw;
     const watermarks = await resolveWatermarks(opts.watermarks, request);
     const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request);
-    const earliestPerCadence = await resolveWatermarks(opts.earliestPerCadence, request);
+    const earliestPerShard = await resolveWatermarks(opts.earliestPerShard, request);
     let result;
     try {
         const plan = planQuery(pyramid, {
@@ -52,7 +52,7 @@ export async function serveQuery(opts) {
             binBudget,
             watermarks,
             earliestWatermarks,
-            earliestPerCadence,
+            earliestPerShard,
             filter,
             ...(smoothing !== undefined ? { smoothing } : {}),
             ...(smoothMode !== undefined ? { smoothMode } : {}),
@@ -72,6 +72,7 @@ export async function serveQuery(opts) {
                 smoothing: plan.smoothing,
                 segments: plan.segments.map(s => ({
                     tier: s.shardTier.name,
+                    shardDur: s.shardDur,
                     from: s.from.toISOString(),
                     to: s.to.toISOString(),
                     reaggregate: s.reaggregate,

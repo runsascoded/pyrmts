@@ -19,35 +19,21 @@ export function assertShardIndexConformance(makeIndex) {
             const idx = makeIndex();
             expect(await idx.getWatermarks('avail')).toEqual(new Map());
         });
-        test('recordShard canonical → watermark visible at bare-tier key', async () => {
+        test('recordShard → watermark visible at `${tier}@${shardDur}` key', async () => {
             const idx = makeIndex();
             await idx.recordShard({
                 pyramidName: 'avail',
                 tier: '15m',
-                cadence: null,
+                shardDur: '1d',
                 periodStart: new Date('2026-06-21T14:00:00Z'),
                 periodEnd: new Date('2026-06-21T15:00:00Z'),
-                key: 'avail/15m/2026-06-21.parquet',
+                key: 'avail/15m/1d/2026-06-21.parquet',
             });
             expect(await idx.getWatermarks('avail')).toEqual(new Map([
-                ['15m', new Date('2026-06-21T15:00:00Z')],
+                ['15m@1d', new Date('2026-06-21T15:00:00Z')],
             ]));
         });
-        test('recordShard partial → watermark visible at tier@cadence key', async () => {
-            const idx = makeIndex();
-            await idx.recordShard({
-                pyramidName: 'avail',
-                tier: '15m',
-                cadence: '1h',
-                periodStart: new Date('2026-06-21T14:00:00Z'),
-                periodEnd: new Date('2026-06-21T15:00:00Z'),
-                key: 'avail/15m/p1h/2026-06-21T14.parquet',
-            });
-            expect(await idx.getWatermarks('avail')).toEqual(new Map([
-                ['15m@1h', new Date('2026-06-21T15:00:00Z')],
-            ]));
-        });
-        test('multiple (tier, cadence) rows coexist in one pyramid', async () => {
+        test('multiple (tier, shardDur) rows coexist in one pyramid', async () => {
             const idx = makeIndex();
             const base = {
                 pyramidName: 'avail',
@@ -55,13 +41,13 @@ export function assertShardIndexConformance(makeIndex) {
                 periodEnd: new Date('2026-06-21T15:00:00Z'),
                 key: 'k',
             };
-            await idx.recordShard({ ...base, tier: '15m', cadence: null });
-            await idx.recordShard({ ...base, tier: '15m', cadence: '1h' });
-            await idx.recordShard({ ...base, tier: '15m', cadence: '1d' });
-            await idx.recordShard({ ...base, tier: '1h', cadence: null });
+            await idx.recordShard({ ...base, tier: '15m', shardDur: '1d' });
+            await idx.recordShard({ ...base, tier: '15m', shardDur: '1h' });
+            await idx.recordShard({ ...base, tier: '15m', shardDur: '30min' });
+            await idx.recordShard({ ...base, tier: '1h', shardDur: '1d' });
             const got = await idx.getWatermarks('avail');
             expect(Array.from(got.keys()).sort()).toEqual([
-                '15m', '15m@1d', '15m@1h', '1h',
+                '15m@1d', '15m@1h', '15m@30min', '1h@1d',
             ]);
         });
         test('monotonic guard: older periodEnd does not regress the watermark', async () => {
@@ -69,7 +55,7 @@ export function assertShardIndexConformance(makeIndex) {
             await idx.recordShard({
                 pyramidName: 'avail',
                 tier: '15m',
-                cadence: null,
+                shardDur: '1d',
                 periodStart: new Date('2026-06-21T14:00:00Z'),
                 periodEnd: new Date('2026-06-21T15:00:00Z'),
                 key: 'k1',
@@ -79,13 +65,13 @@ export function assertShardIndexConformance(makeIndex) {
             await idx.recordShard({
                 pyramidName: 'avail',
                 tier: '15m',
-                cadence: null,
+                shardDur: '1d',
                 periodStart: new Date('2026-06-21T13:00:00Z'),
                 periodEnd: new Date('2026-06-21T14:00:00Z'),
                 key: 'k0',
             });
             expect(await idx.getWatermarks('avail')).toEqual(new Map([
-                ['15m', new Date('2026-06-21T15:00:00Z')],
+                ['15m@1d', new Date('2026-06-21T15:00:00Z')],
             ]));
         });
         test('idempotency: re-recording the same shard does not duplicate or regress', async () => {
@@ -93,7 +79,7 @@ export function assertShardIndexConformance(makeIndex) {
             const input = {
                 pyramidName: 'avail',
                 tier: '15m',
-                cadence: '1h',
+                shardDur: '1h',
                 periodStart: new Date('2026-06-21T14:00:00Z'),
                 periodEnd: new Date('2026-06-21T15:00:00Z'),
                 key: 'k',
@@ -110,7 +96,7 @@ export function assertShardIndexConformance(makeIndex) {
             await idx.recordShard({
                 pyramidName: 'avail',
                 tier: '15m',
-                cadence: null,
+                shardDur: '1d',
                 periodStart: new Date('2026-06-21T14:00:00Z'),
                 periodEnd: new Date('2026-06-21T15:00:00Z'),
                 key: 'k1',
@@ -118,13 +104,13 @@ export function assertShardIndexConformance(makeIndex) {
             await idx.recordShard({
                 pyramidName: 'avail',
                 tier: '15m',
-                cadence: null,
+                shardDur: '1d',
                 periodStart: new Date('2026-06-21T15:00:00Z'),
                 periodEnd: new Date('2026-06-21T16:00:00Z'),
                 key: 'k2',
             });
             expect(await idx.getWatermarks('avail')).toEqual(new Map([
-                ['15m', new Date('2026-06-21T16:00:00Z')],
+                ['15m@1d', new Date('2026-06-21T16:00:00Z')],
             ]));
         });
     });

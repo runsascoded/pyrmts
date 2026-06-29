@@ -4,7 +4,7 @@ export interface ServeOptions {
     request: Request;
     watermarks?: Record<string, Date> | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>);
     earliestWatermarks?: Record<string, Date> | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>);
-    earliestPerCadence?: Record<string, Date> | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>);
+    earliestPerShard?: Record<string, Date> | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>);
     tolerateMissingShards?: boolean;
     cors?: boolean;
 }

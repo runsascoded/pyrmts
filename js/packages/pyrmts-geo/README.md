@@ -58,9 +58,9 @@ const ridesPyramid: GeoPyramid = {
   dims: [{ name: 'station_id', type: 'string' }],
   metrics: [{ name: 'count', monoid: 'count' }],
   tiers: [
-    { name: 'h1',  bin: '1h',  shard: '1mo' },
-    { name: 'd1',  bin: '1d',  shard: '1y'  },
-    { name: 'mo1', bin: '1mo', shard: '1y'  },
+    { name: 'h1',  bin: '1h',  shards: ['1mo'] },
+    { name: 'd1',  bin: '1d',  shards: ['1y']  },
+    { name: 'mo1', bin: '1mo', shards: ['1y']  },
   ],
   geo: {
     cellCol: 's2_cell',

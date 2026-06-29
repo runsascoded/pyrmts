@@ -6,7 +6,7 @@ export { getMonoid, stateColumns } from './monoids.js';
 export { stitch } from './stitch.js';
 export { pivotTallToHistogram } from './pivot.js';
 export { fetchShardData, parquetBackend } from './fetch.js';
-export { validatePartials } from './partials.js';
+export { validateLadders } from './ladder.js';
 export { CachedShardIndex, WATERMARK_KEY_SEPARATOR, decodeWatermarkKey, encodeWatermarkKey, } from './shard-index.js';
 export { ManifestShardIndex } from './manifest-shard-index.js';
 // `assertShardIndexConformance` is exported separately as

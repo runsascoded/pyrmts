@@ -57,7 +57,7 @@ export async function serveGeoQuery(opts) {
     const smoothMode = smoothModeRaw === null ? undefined : smoothModeRaw;
     const watermarks = await resolveWatermarks(opts.watermarks, request);
     const earliestWatermarks = await resolveWatermarks(opts.earliestWatermarks, request);
-    const earliestPerCadence = await resolveWatermarks(opts.earliestPerCadence, request);
+    const earliestPerShard = await resolveWatermarks(opts.earliestPerShard, request);
     let result;
     try {
         const plan = planGeoQuery(pyramid, {
@@ -67,7 +67,7 @@ export async function serveGeoQuery(opts) {
             cellBudget,
             watermarks,
             earliestWatermarks,
-            earliestPerCadence,
+            earliestPerShard,
             filter,
             ...(smoothing !== undefined ? { smoothing } : {}),
             ...(smoothMode !== undefined ? { smoothMode } : {}),
@@ -88,7 +88,7 @@ export async function serveGeoQuery(opts) {
                 from: s.from,
                 to: s.to,
                 shardTier: s.shardTier,
-                shardCadence: s.shardCadence,
+                shardDur: s.shardDur,
                 keys: s.keys,
                 reaggregate: s.reaggregate,
             })),
@@ -108,6 +108,7 @@ export async function serveGeoQuery(opts) {
                 smoothing: plan.smoothing,
                 segments: plan.segments.map(s => ({
                     tier: s.shardTier.name,
+                    shardDur: s.shardDur,
                     from: s.from.toISOString(),
                     to: s.to.toISOString(),
                     reaggregate: s.reaggregate,

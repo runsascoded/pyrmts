@@ -3,28 +3,22 @@
 // `ManifestShardIndex` (single JSON blob in storage). The planner takes
 // a pre-resolved watermark map (not the index itself), so the index is a
 // pure read/write boundary the consumer wires up. See
-// `specs/partial-shards.md` §Watermark index.
-// Watermark key encoding:
-//   - `${tier}`             — canonical shard at that tier
-//   - `${tier}@${cadence}`  — partial sub-shard at this tier × cadence
-//
-// `@` is the separator. Tier names must not contain `@` (validated at
-// pyramid-config time in phase 5 alongside grid-walk plumbing). The
-// encoding is symmetric with the D1 schema's `(tier, cadence)`
-// composite key (`cadence` NULL → canonical).
+// `specs/done/unified-shard-ladder.md` §Watermark grid.
+// Watermark key encoding: `${tier}@${shardDur}` for every entry, no
+// special canonical/partial dichotomy. The `@` separator means tier names
+// must not contain `@` (validated at pyramid-config time).
 export const WATERMARK_KEY_SEPARATOR = '@';
-export function encodeWatermarkKey(tier, cadence) {
-    if (cadence === null)
-        return tier;
-    return `${tier}${WATERMARK_KEY_SEPARATOR}${cadence}`;
+export function encodeWatermarkKey(tier, shardDur) {
+    return `${tier}${WATERMARK_KEY_SEPARATOR}${shardDur}`;
 }
 export function decodeWatermarkKey(key) {
     const idx = key.indexOf(WATERMARK_KEY_SEPARATOR);
-    if (idx === -1)
-        return { tier: key, cadence: null };
+    if (idx === -1) {
+        throw new Error(`decodeWatermarkKey: missing '${WATERMARK_KEY_SEPARATOR}' in '${key}'; expected '\${tier}@\${shardDur}'`);
+    }
     return {
         tier: key.slice(0, idx),
-        cadence: key.slice(idx + 1),
+        shardDur: key.slice(idx + 1),
     };
 }
 // TTL cache around any `ShardIndex.getWatermarks`. `recordShard`

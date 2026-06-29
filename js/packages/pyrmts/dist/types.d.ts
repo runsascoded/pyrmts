@@ -5,11 +5,11 @@ export type StepUnit = 'step' | 'steps' | 'ksteps' | 'msteps';
 export type StepCount = `${number}${StepUnit}`;
 export type RunBoundary = '1run';
 export type Bin = Duration | StepCount;
-export type Shard = Duration | RunBoundary | 'all';
+export type Shard = Duration | RunBoundary;
 export interface Tier {
     name: string;
     bin: Bin;
-    shard: Shard;
+    shards: Shard[];
 }
 export interface Dim {
     name: string;
@@ -64,13 +64,11 @@ export interface FetchOptionsBase {
 export interface Pyramid {
     storage: StorageBackend;
     keyTemplate: string;
-    partialKey?: string;
     axis: Axis;
     binCol: string;
     dims: Dim[];
     metrics: Metric[];
     tiers: Tier[];
-    partials?: Duration[];
     geo?: GeoSpec;
 }
 export interface GeoSpec {

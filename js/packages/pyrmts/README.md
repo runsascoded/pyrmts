@@ -38,10 +38,10 @@ const awair: Pyramid = {
     { name: 'pm25',  monoid: 'sum' },
   ],
   tiers: [
-    { name: 'raw', bin: '1min', shard: '1mo' },   // finest first
-    { name: 'h1',  bin: '1h',   shard: '1mo' },
-    { name: 'd1',  bin: '1d',   shard: '1y'  },
-    { name: 'mo1', bin: '1mo',  shard: '1y'  },
+    { name: 'raw', bin: '1min', shards: ['1mo'] },   // finest first
+    { name: 'h1',  bin: '1h',   shards: ['1mo'] },
+    { name: 'd1',  bin: '1d',   shards: ['1y']  },
+    { name: 'mo1', bin: '1mo',  shards: ['1y']  },
   ],
 }
 ```
@@ -85,52 +85,53 @@ for the design + 8 deviations from the originally-proposed spec.
 Throws if `targetBin` is calendar-variable (`mo`/`y`) or if no integer
 linear combination of fixed-width tier bins equals `targetBin`.
 
-### Partial sub-shards for fresh-data tails
+### Multi-shard-size ladders for fresh-data tails
 
-When a pyramid needs interactive "Latest · N" UX, the gap between the last
-sealed canonical shard and "now" is bridged by **partial sub-shards** —
-finer-cadence shards written by a cascading cron between canonical seals.
-
-Declare a pyramid-wide cadence ladder (per-tier filtering by alignment is
-automatic) and a sub-shard key template:
+For pyramids needing interactive "Latest · N" UX, declare a per-tier
+**shard-duration ladder** — every entry is a real shard size, smallest to
+largest. The compactor writes at `shards[0]` (e.g. 10-min cadence) and
+promotes up the ladder at each boundary (10min → 30min → 1h → … → 15d).
+At any moment, the timeline is tiled by shards of varying sizes:
+smaller-near-present, larger-further-back (subject to retention).
 
 ```ts
 const avail: Pyramid = {
-  storage: parquetBackend(r2Storage(env.BUCKET), 'avail/{tier}/{period}.parquet'),
-  keyTemplate: 'avail/{tier}/{period}.parquet',
-  partialKey:  'avail/{tier}/p{shard}/{period}.parquet',  // `{shard}` = cadence label
+  storage: parquetBackend(r2Storage(env.BUCKET), 'avail/{tier}/{shard}/{period}.parquet'),
+  keyTemplate: 'avail/{tier}/{shard}/{period}.parquet',
   axis: 'time',
   binCol: 'ts',
   dims: [{ name: 'station_id', type: 'int' }],
   metrics: [{ name: 'n_bikes', monoid: 'sum' }],
   tiers: [
-    { name: '15m', bin: '15min', shard: '15d' },
-    { name: '1h',  bin: '1h',    shard: '1mo' },
+    { name: '15m', bin: '15min', shards: ['10min', '30min', '1h', '3h', '12h', '1d', '3d', '15d'] },
+    { name: '1h',  bin: '1h',    shards: ['1h', '3h', '12h', '1d', '3d', '1mo'] },
   ],
-  partials: ['10min', '30min', '1h', '3h', '12h', '1d', '3d'],
 }
 ```
 
-Then pass watermarks keyed by `${tier}` (canonical) or `${tier}@${cadence}`
-(partial) to `planQuery`. The planner walks each tier `(canonical →
-partial_coarsest → ... → partial_finest)` and emits one segment per shard
-extending the covered range:
+Pass watermarks keyed by `${tier}@${shardDur}` to `planQuery`. The planner
+walks the output tier's ladder LARGEST-first at each cursor position;
+where the largest isn't sealed for the containing period, it falls to the
+next smaller; if no shard at the output tier covers, it falls to the next
+finer tier (`reaggregate: true`). Adjacent same-`(tier, shardDur)`
+segments coalesce post-walk:
 
 ```ts
 const plan = planQuery(avail, {
   range: { from, to },
   binBudget: 256,
   watermarks: {
-    '15m':     last15mCanonicalEnd,
-    '15m@1h':  last15mPartial1hEnd,
-    '15m@1d':  last15mPartial1dEnd,
+    '15m@15d':  last15mShard15dEnd,
+    '15m@1d':   last15mShard1dEnd,
+    '15m@1h':   last15mShard1hEnd,
+    '15m@10min': last15mShard10minEnd,
   },
 })
 // → segments: [
-//     { tier: '15m', cadence: null, ... },   // canonical
-//     { tier: '15m', cadence: '1d', ... },   // partial extends past canonical
-//     { tier: '15m', cadence: '1h', ... },   // partial extends further
-//     { tier: 'raw', cadence: null, ... },   // fall-through for the live tail
+//     { tier: '15m', shardDur: '15d', ... },   // largest shard for backfilled history
+//     { tier: '15m', shardDur: '1d',  ... },   // falls to /1d where /15d not sealed
+//     { tier: '15m', shardDur: '1h',  ... },   // ... and to /1h closer to present
+//     { tier: '15m', shardDur: '10min', ... }, // smallest for live tail
 //   ]
 ```
 
@@ -148,8 +149,9 @@ const plan = planQuery(avail, { range, binBudget, watermarks })
 `D1ShardIndex` is the recommended impl for CFW consumers (concurrent writers,
 atomic upserts). `ManifestShardIndex` (JSON blob over any `Storage`) is a
 fallback for single-writer / non-CF deploys. See
-[`specs/done/partial-shards.md`](../../../specs/done/partial-shards.md) for
-the design + propagation rules.
+[`specs/done/unified-shard-ladder.md`](../../../specs/done/unified-shard-ladder.md) for
+the design (cursor-aware-largest-first planner walk; per-tier shard
+ladders; promotion-aware watermark propagation).
 
 ### Server-side rolling-window smoothing
 
@@ -188,7 +190,8 @@ runs the planner + fetch + stitcher, returns
 ### Types
 
 - `Pyramid` — `{ storage, keyTemplate, axis, binCol, dims, metrics, tiers, geo? }`.
-- `Tier` — `{ name, bin, shard }`.
+- `Tier` — `{ name, bin, shards }`. `shards` is the ascending shard-duration
+  ladder (smallest to largest; smallest ≥ `bin`; each divides the next).
 - `Dim` — `{ name, type: 'int' | 'string' | 'h3' | 'geohash' }`.
 - `Metric` — `{ name, monoid, config? }`.
 - `Bin` — `Duration | StepCount` (time-axis or step-axis units).
@@ -205,15 +208,14 @@ runs the planner + fetch + stitcher, returns
   - `input.targetBin?` — caller-specified output width; ragged decomposition
     via per-bin DP when no tier matches exactly.
   - `input.range`, `input.watermarks`, `input.earliestWatermarks`,
-    `input.earliestPerCadence`, `input.filter`, `input.smoothing`,
+    `input.earliestPerShard`, `input.filter`, `input.smoothing`,
     `input.smoothMode`.
-  - `earliestPerCadence` — per-`(tier, cadence)` earliest-available-bin
-    gate keyed by `${tier}@${cadence}` (or bare `${tier}` for canonical).
-    Per-entry only, no propagation up the tier ladder; complements
-    `earliestWatermarks` (which propagates). Use for partial sub-shards
-    with forward-only coverage from a cron deploy date when coarser tiers
-    have full canonical backfill. See
-    [`specs/done/per-cadence-earliest.md`](../../../specs/done/per-cadence-earliest.md).
+  - `earliestPerShard` — per-`(tier, shardDur)` earliest-available-bin
+    gate keyed uniformly `${tier}@${shardDur}`. Per-entry only, no
+    propagation up the tier ladder; complements `earliestWatermarks`
+    (which propagates). Use for shard durations with forward-only
+    coverage from a cron deploy date. See
+    [`specs/done/unified-shard-ladder.md`](../../../specs/done/unified-shard-ladder.md).
 - `binsInRange(from, to, bin): number`, `parseDuration`, `floorToSpan`,
   `addSpan`, `shardPeriodsCovering`, `formatPeriod` — duration helpers.
 
@@ -251,10 +253,11 @@ runs the planner + fetch + stitcher, returns
   parsed config + supplied storage. YAML configs are one constructor; apps
   with runtime-dynamic pyramids build `Pyramid` directly.
 
-### `ShardIndex` (partial-shard watermark backend)
+### `ShardIndex` (watermark grid backend)
 
 - `ShardIndex` — `{ getWatermarks(name) → Map<key, Date>, recordShard(input) }`.
-  Key encoding: `${tier}` canonical / `${tier}@${cadence}` partial.
+  Key encoding: uniformly `${tier}@${shardDur}` for every entry on the
+  per-tier shard ladder.
 - `CachedShardIndex` — TTL wrapper around any `ShardIndex` (default 60s);
   dedupes concurrent in-flight reads; `recordShard` invalidates the pyramid.
 - `ManifestShardIndex` — JSON-blob impl over `Storage` (R2, memStorage, fs).
@@ -264,7 +267,7 @@ runs the planner + fetch + stitcher, returns
   cascading-cron workloads.
 - `assertShardIndexConformance(factory)` — shared vitest suite that pins both
   impls to identical observable semantics. Import from `pyrmts/test-utils`.
-- `encodeWatermarkKey(tier, cadence)` / `decodeWatermarkKey(key)` — codec
+- `encodeWatermarkKey(tier, shardDur)` / `decodeWatermarkKey(key)` — codec
   helpers, mirror the `Map<key, Date>` shape.
 
 ### FE hook

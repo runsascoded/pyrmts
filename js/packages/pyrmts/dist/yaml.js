@@ -10,14 +10,14 @@
 //   storage:
 //     type: r2
 //     bucket: 380nwk
-//     key: 'awair-{device_id}/{tier}/{period}.parquet'
+//     key: 'awair-{device_id}/{tier}/{shard}/{period}.parquet'
 //   dims:
 //     - { name: device_id, type: int }
 //   metrics:
 //     - { name: temp, monoid: sum }
 //   tiers:
-//     - { name: raw, bin: 1min, shard: 1mo }
-//     - { name: h1,  bin: 1h,   shard: 1mo }
+//     - { name: raw, bin: 1min, shards: [1h, 1mo] }
+//     - { name: h1,  bin: 1h,   shards: [1d, 1mo] }
 import { parse as parseYaml } from 'yaml';
 const VALID_AXES = new Set(['time', 'step']);
 const VALID_DIM_TYPES = new Set(['int', 'string', 'h3', 'geohash']);
@@ -31,7 +31,7 @@ export function parsePyramidYaml(text) {
     }
     const root = raw;
     const storage = parseStorageBlock(root.storage);
-    const { keyTemplate, partialKey, storageMeta } = storage;
+    const { keyTemplate, storageMeta } = storage;
     const axis = root.axis ?? 'time';
     if (!VALID_AXES.has(axis)) {
         throw new Error(`parsePyramidYaml: invalid axis '${axis}' (want 'time' or 'step')`);
@@ -46,24 +46,9 @@ export function parsePyramidYaml(text) {
         metrics: parseMetrics(root.metrics),
         tiers: parseTiers(root.tiers),
     };
-    if (partialKey !== undefined)
-        cfg.partialKey = partialKey;
-    if (root.partials !== undefined)
-        cfg.partials = parsePartials(root.partials);
     if (root.geo !== undefined)
         cfg.geo = parseGeo(root.geo);
     return cfg;
-}
-function parsePartials(raw) {
-    if (!Array.isArray(raw)) {
-        throw new Error('parsePyramidYaml: `partials` must be an array of Duration strings');
-    }
-    return raw.map((c, i) => {
-        if (typeof c !== 'string') {
-            throw new Error(`parsePyramidYaml: partials[${i}] must be a Duration string (got ${String(c)})`);
-        }
-        return c;
-    });
 }
 function parseGeo(raw) {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -99,10 +84,6 @@ export function pyramidFromConfig(cfg, storage) {
         metrics: cfg.metrics,
         tiers: cfg.tiers,
     };
-    if (cfg.partialKey !== undefined)
-        p.partialKey = cfg.partialKey;
-    if (cfg.partials !== undefined)
-        p.partials = cfg.partials;
     if (cfg.geo !== undefined)
         p.geo = cfg.geo;
     return p;
@@ -118,17 +99,9 @@ function parseStorageBlock(raw) {
     if (typeof s.key !== 'string') {
         throw new Error('parsePyramidYaml: `storage.key` (key template) must be a string');
     }
-    let partialKey;
-    if (s.partialKey !== undefined) {
-        if (typeof s.partialKey !== 'string') {
-            throw new Error('parsePyramidYaml: `storage.partialKey` (sub-shard key template) must be a string');
-        }
-        partialKey = s.partialKey;
-    }
-    const { key, partialKey: _pk, ...rest } = s;
+    const { key, ...rest } = s;
     return {
         keyTemplate: key,
-        ...(partialKey !== undefined ? { partialKey } : {}),
         storageMeta: { ...rest, type: s.type },
     };
 }
@@ -190,13 +163,19 @@ function parseTiers(raw) {
         if (typeof tt.bin !== 'string') {
             throw new Error(`parsePyramidYaml: tiers[${i}].bin must be a string`);
         }
-        if (typeof tt.shard !== 'string') {
-            throw new Error(`parsePyramidYaml: tiers[${i}].shard must be a string`);
+        if (!Array.isArray(tt.shards) || tt.shards.length === 0) {
+            throw new Error(`parsePyramidYaml: tiers[${i}].shards must be a non-empty array of Shard strings`);
         }
+        const shards = tt.shards.map((s, j) => {
+            if (typeof s !== 'string') {
+                throw new Error(`parsePyramidYaml: tiers[${i}].shards[${j}] must be a string (got ${String(s)})`);
+            }
+            return s;
+        });
         return {
             name: tt.name,
             bin: tt.bin,
-            shard: tt.shard,
+            shards,
         };
     });
 }

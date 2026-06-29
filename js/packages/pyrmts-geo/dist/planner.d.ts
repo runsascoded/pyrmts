@@ -16,7 +16,7 @@ export interface PlanGeoQueryInput {
     };
     watermarks?: Record<string, Date>;
     earliestWatermarks?: Record<string, Date>;
-    earliestPerCadence?: Record<string, Date>;
+    earliestPerShard?: Record<string, Date>;
     filter?: Record<string, string | number>;
     smoothing?: import('pyrmts').SmoothingSpec;
     smoothMode?: import('pyrmts').SmoothMode;

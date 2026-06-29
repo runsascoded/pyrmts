@@ -1,15 +1,15 @@
-import type { Duration } from './types.js';
+import type { Shard } from './types.js';
 export declare const WATERMARK_KEY_SEPARATOR = "@";
-export declare function encodeWatermarkKey(tier: string, cadence: Duration | null): string;
+export declare function encodeWatermarkKey(tier: string, shardDur: Shard): string;
 export interface DecodedWatermarkKey {
     tier: string;
-    cadence: Duration | null;
+    shardDur: Shard;
 }
 export declare function decodeWatermarkKey(key: string): DecodedWatermarkKey;
 export interface RecordShardInput {
     pyramidName: string;
     tier: string;
-    cadence: Duration | null;
+    shardDur: Shard;
     periodStart: Date;
     periodEnd: Date;
     key: string;

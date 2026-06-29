@@ -92,9 +92,6 @@ export function binsInRange(from, to, bin) {
 // Enumerate shard periods covering [from, to]. Each period is the half-open
 // interval [start, end) plus a `label` suitable for `{period}` substitution.
 export function shardPeriodsCovering(from, to, shard) {
-    if (shard === 'all') {
-        return [{ start: new Date(0), end: new Date(8.64e15), label: 'all' }];
-    }
     if (shard === '1run') {
         throw new Error("'1run' shards are step-axis only; not yet supported");
     }

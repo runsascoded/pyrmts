@@ -1,4 +1,4 @@
-import type { Bin, Duration, Pyramid, Tier } from './types.js';
+import type { Bin, Duration, Pyramid, Shard, Tier } from './types.js';
 export type SmoothMode = 'centered' | 'trailing';
 export type SmoothingSpec = Duration | {
     auto: true;
@@ -13,7 +13,7 @@ export interface PlanQueryInput {
     targetBin?: Duration;
     watermarks?: Record<string, Date>;
     earliestWatermarks?: Record<string, Date>;
-    earliestPerCadence?: Record<string, Date>;
+    earliestPerShard?: Record<string, Date>;
     filter?: Record<string, string | number>;
     smoothing?: SmoothingSpec;
     smoothMode?: SmoothMode;
@@ -23,7 +23,7 @@ export interface PlanSegment {
     from: Date;
     to: Date;
     shardTier: Tier;
-    shardCadence: Duration | null;
+    shardDur: Shard;
     keys: string[];
     reaggregate: boolean;
 }

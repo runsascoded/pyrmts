@@ -95,12 +95,6 @@ class ShardPeriod:
 
 def shard_periods_covering(from_: datetime, to: datetime, shard: str) -> list[ShardPeriod]:
     """Enumerate shard periods covering `[from, to)`."""
-    if shard == 'all':
-        return [ShardPeriod(
-            start=datetime.fromtimestamp(0, tz=timezone.utc),
-            end=datetime.max.replace(tzinfo=timezone.utc),
-            label='all',
-        )]
     if shard == '1run':
         raise NotImplementedError("'1run' shards are step-axis only; not yet supported")
     span = parse_duration(shard)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 
@@ -25,7 +25,7 @@ DimType = Literal['int', 'string', 'h3', 'geohash']
 class Tier:
     name: str
     bin: str
-    shard: str
+    shards: tuple[str, ...]
 
 
 @dataclass(frozen=True)

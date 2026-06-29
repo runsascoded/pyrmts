@@ -1,10 +1,21 @@
-"""`cascade_tiers`: given a Pyramid with its finest tier populated, build each
-coarser tier by combining input shards via the pyramid's monoid catalog.
+"""`cascade_tiers`: given a Pyramid with its finest tier's smallest shard
+populated, build every other (tier, shard_dur) rung by combining inputs via
+the pyramid's monoid catalog.
 
-Pure axis arithmetic + monoid application. No project-specific logic (h3,
-GBFS, etc.) — consumers materialize the finest tier; this builds the rest.
+Per-tier ladder model (post unified-shard-ladder refactor):
 
-See `specs/cascade-tiers-and-geo-materializer.md`."""
+- For each tier T from `finest` upward, walk T's `shards` ladder from
+  smallest to largest.
+- Source for `(T, T.shards[i])`:
+  - `i > 0`: same tier, smaller rung — `(T, T.shards[i-1])`
+  - `i == 0` and T is finer than `finest`: caller materialized this rung;
+    skip.
+  - `i == 0` and T is coarser than `finest`: cross-tier promotion from
+    `(T-1, T-1.shards[-1])` (finer tier's largest shard, re-binned to T's
+    `bin`).
+
+See `specs/done/unified-shard-ladder.md` (JS) and
+`specs/done/python-unified-ladder.md` (Python catch-up)."""
 from __future__ import annotations
 
 import io
@@ -12,7 +23,6 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -42,57 +52,73 @@ def cascade_tiers(
     finest_tier: str | None = None,
     storage_write=None,
     overwrite: bool = False,
-    derive_from: dict[str, str] | None = None,
     concurrency: int = 1,
     filter: dict[str, str | int] | None = None,
 ) -> CascadeResult:
-    """For each tier coarser than `finest_tier`, build every shard covering
-    `time_range` by combining the appropriate finer-tier shards via the
-    monoid catalog.
+    """Build every (tier, shard_dur) rung at or above `finest_tier` by walking
+    each tier's `shards` ladder.
+
+    Caller must have already materialized `(finest_tier, finest_tier.shards[0])`
+    for `time_range`.
 
     Args:
-        pyramid: the Pyramid (finest tier must already be populated for `time_range`).
+        pyramid: the Pyramid; tiers ordered finest-first.
         time_range: half-open `(from, to)` UTC interval.
-        finest_tier: name of the already-populated tier (defaults to
-            `pyramid.tiers[0]`).
+        finest_tier: name of the already-materialized tier (defaults to
+            `pyramid.tiers[0]`). Its smallest rung (`shards[0]`) is the assumed
+            input; larger rungs and coarser tiers are built from it.
         storage_write: where to write outputs (defaults to `pyramid.storage`).
         overwrite: if False, skip outputs that already exist (cheap HEAD).
-        derive_from: tier_name → source-tier name (defaults to the next-finer
-            tier in `pyramid.tiers`).
-        concurrency: parallel shard-builds per tier (threaded).
+        concurrency: parallel shard-builds per rung (threaded).
         filter: extra `{...}` values to substitute into `pyramid.keyTemplate`
             (e.g. `{device_id: 17617}` for awair).
     """
     finest = finest_tier or pyramid.tiers[0].name
     finest_idx = pyramid.tier_index(finest)
-    derive_from = derive_from or {}
     filter = filter or {}
+    storage_write = storage_write or pyramid.storage
 
     result = CascadeResult()
 
-    for tier_idx in range(finest_idx + 1, len(pyramid.tiers)):
+    for tier_idx in range(finest_idx, len(pyramid.tiers)):
         tier = pyramid.tiers[tier_idx]
-        src_name = derive_from.get(tier.name) or pyramid.tiers[tier_idx - 1].name
-        src_tier = pyramid.tier(src_name)
-        _cascade_one_tier(
-            pyramid=pyramid,
-            tier=tier,
-            src_tier=src_tier,
-            time_range=time_range,
-            storage_write=storage_write or pyramid.storage,
-            overwrite=overwrite,
-            concurrency=concurrency,
-            filter=filter,
-            result=result,
-        )
+        for shard_idx in range(len(tier.shards)):
+            if tier_idx == finest_idx and shard_idx == 0:
+                continue  # caller materialized this rung
+            src_tier, src_shard_dur = _pick_inputs(pyramid, tier_idx, shard_idx)
+            _cascade_one_rung(
+                pyramid=pyramid,
+                tier=tier,
+                shard_dur=tier.shards[shard_idx],
+                src_tier=src_tier,
+                src_shard_dur=src_shard_dur,
+                time_range=time_range,
+                storage_write=storage_write,
+                overwrite=overwrite,
+                concurrency=concurrency,
+                filter=filter,
+                result=result,
+            )
     return result
 
 
-def _cascade_one_tier(
+def _pick_inputs(pyramid: Pyramid, tier_idx: int, shard_idx: int) -> tuple[Tier, str]:
+    tier = pyramid.tiers[tier_idx]
+    if shard_idx > 0:
+        return tier, tier.shards[shard_idx - 1]
+    # shard_idx == 0 and tier_idx > finest_idx: cross-tier promotion from
+    # finer tier's largest shard.
+    src_tier = pyramid.tiers[tier_idx - 1]
+    return src_tier, src_tier.shards[-1]
+
+
+def _cascade_one_rung(
     *,
     pyramid: Pyramid,
     tier: Tier,
+    shard_dur: str,
     src_tier: Tier,
+    src_shard_dur: str,
     time_range: tuple[datetime, datetime],
     storage_write,
     overwrite: bool,
@@ -101,22 +127,22 @@ def _cascade_one_tier(
     result: CascadeResult,
 ) -> None:
     from_, to = time_range
-    out_periods = shard_periods_covering(from_, to, tier.shard)
+    out_periods = shard_periods_covering(from_, to, shard_dur)
 
     def work(period: ShardPeriod) -> tuple[str, str]:
         out_key = substitute_key(
             pyramid.keyTemplate,
-            {**filter, 'tier': tier.name, 'period': period.label},
+            {**filter, 'tier': tier.name, 'shard': shard_dur, 'period': period.label},
         )
         if not overwrite and storage_write.head(out_key) is not None:
             return out_key, 'skipped'
         try:
-            src_periods = shard_periods_covering(period.start, period.end, src_tier.shard)
+            src_periods = shard_periods_covering(period.start, period.end, src_shard_dur)
             src_tables: list[pa.Table] = []
             for sp in src_periods:
                 src_key = substitute_key(
                     pyramid.keyTemplate,
-                    {**filter, 'tier': src_tier.name, 'period': sp.label},
+                    {**filter, 'tier': src_tier.name, 'shard': src_shard_dur, 'period': sp.label},
                 )
                 blob = pyramid.storage.get(src_key)
                 if blob is None:
@@ -172,7 +198,9 @@ def _combine_to_bin(
     shard_end: datetime,
 ) -> list[Row]:
     """Group rows from `src_tables` by `(floor(bin), *dims)` for `tier.bin`,
-    then apply each metric's monoid combine."""
+    then apply each metric's monoid combine. Within a single tier (same-tier
+    promotion across rungs), `tier.bin` is unchanged so the floor is a no-op
+    on input bins — the same code path handles cross-tier re-binning."""
     bin_col = pyramid.binCol
     dim_names = [d.name for d in pyramid.dims]
     metric_specs: list[tuple[Metric, Monoid]] = [(m, get_monoid(m.monoid)) for m in pyramid.metrics]

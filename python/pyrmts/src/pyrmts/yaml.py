@@ -4,11 +4,12 @@
 constructs a `Pyramid` via `pyramid_from_config`."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import yaml as _yaml
 
+from .axis import parse_duration
 from .types import (
     Axis,
     Dim,
@@ -144,15 +145,89 @@ def _parse_tiers(raw: Any) -> list[Tier]:
             raise ValueError(f"parse_pyramid_yaml: tiers[{i}] must be a mapping")
         name = t.get('name')
         bin_ = t.get('bin')
-        shard = t.get('shard')
         if not isinstance(name, str):
             raise ValueError(f"parse_pyramid_yaml: tiers[{i}].name must be a string")
         if not isinstance(bin_, str):
             raise ValueError(f"parse_pyramid_yaml: tiers[{i}].bin must be a string")
-        if not isinstance(shard, str):
-            raise ValueError(f"parse_pyramid_yaml: tiers[{i}].shard must be a string")
-        out.append(Tier(name=name, bin=bin_, shard=shard))
+        if 'shard' in t:
+            raise ValueError(
+                f"parse_pyramid_yaml: tiers[{i}] uses the old singular `shard:` form; "
+                f"use `shards: [...]` (a divisibility-chained ladder)."
+            )
+        shards_raw = t.get('shards')
+        if not isinstance(shards_raw, list) or not shards_raw:
+            raise ValueError(
+                f"parse_pyramid_yaml: tiers[{i}].shards must be a non-empty list of Duration strings"
+            )
+        shards: list[str] = []
+        for j, s in enumerate(shards_raw):
+            if not isinstance(s, str):
+                raise ValueError(
+                    f"parse_pyramid_yaml: tiers[{i}].shards[{j}] must be a string (got {s!r})"
+                )
+            shards.append(s)
+        _validate_shard_ladder(i, name, bin_, shards)
+        out.append(Tier(name=name, bin=bin_, shards=tuple(shards)))
     return out
+
+
+def _validate_shard_ladder(
+    tier_idx: int,
+    tier_name: str,
+    bin_: str,
+    shards: list[str],
+) -> None:
+    """`shards` must be ascending; each fixed-width rung must divide the next
+    fixed-width rung. `bin_` (if fixed-width) must divide `shards[0]` (if
+    fixed-width). Calendar-variable durations (`mo`/`y`) skip divisibility
+    checks against fixed-width neighbors — they live in a separate universe
+    where month-length variation makes integer-ms comparisons meaningless.
+    Mirrors JS `validateLadders` (`js/.../ladder.ts`)."""
+    bin_ms = _fixed_ms_or_none(bin_)
+    shard_ms_list = [_fixed_ms_or_none(s) for s in shards]
+
+    if shard_ms_list[0] is not None and bin_ms is not None and shard_ms_list[0] < bin_ms:
+        raise ValueError(
+            f"parse_pyramid_yaml: tiers[{tier_idx}] ({tier_name!r}): "
+            f"shards[0] {shards[0]!r} ({shard_ms_list[0]}ms) is smaller than "
+            f"bin {bin_!r} ({bin_ms}ms)"
+        )
+    if shard_ms_list[0] is not None and bin_ms is not None and shard_ms_list[0] % bin_ms != 0:
+        raise ValueError(
+            f"parse_pyramid_yaml: tiers[{tier_idx}] ({tier_name!r}): "
+            f"bin {bin_!r} does not divide shards[0] {shards[0]!r}"
+        )
+    prev_ms = shard_ms_list[0]
+    for j in range(1, len(shards)):
+        cur_ms = shard_ms_list[j]
+        if cur_ms is None or prev_ms is None:
+            prev_ms = cur_ms
+            continue
+        if cur_ms <= prev_ms:
+            raise ValueError(
+                f"parse_pyramid_yaml: tiers[{tier_idx}] ({tier_name!r}): "
+                f"shards not ascending (shards[{j}] {shards[j]!r} ({cur_ms}ms) "
+                f"<= shards[{j-1}] {shards[j-1]!r} ({prev_ms}ms))"
+            )
+        if cur_ms % prev_ms != 0:
+            raise ValueError(
+                f"parse_pyramid_yaml: tiers[{tier_idx}] ({tier_name!r}): "
+                f"shards[{j-1}] {shards[j-1]!r} does not divide shards[{j}] {shards[j]!r}"
+            )
+        prev_ms = cur_ms
+
+
+_FIXED_UNITS: set[str] = {'min', 'h', 'd'}
+
+
+def _fixed_ms_or_none(s: str) -> int | None:
+    """Return the duration's length in milliseconds, or `None` for
+    calendar-variable units (`mo`/`y`) that don't have a fixed ms width."""
+    from .axis import _MS  # local import to avoid cycle on module load
+    span = parse_duration(s)
+    if span.unit not in _FIXED_UNITS:
+        return None
+    return span.count * _MS[span.unit]
 
 
 def _parse_geo(raw: Any) -> GeoSpec:

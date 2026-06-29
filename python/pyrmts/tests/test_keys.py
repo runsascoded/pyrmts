@@ -18,3 +18,18 @@ def test_missing_value_raises():
 
 def test_no_placeholders():
     assert substitute_key('static/path.parquet', {}) == 'static/path.parquet'
+
+
+def test_shard_placeholder():
+    assert substitute_key(
+        'avail/{tier}/{shard}/{period}.parquet',
+        {'tier': 'h1', 'shard': '1mo', 'period': '2026-05'},
+    ) == 'avail/h1/1mo/2026-05.parquet'
+
+
+def test_extra_values_ignored():
+    """Extra values in the dict are harmless when the template doesn't reference them."""
+    assert substitute_key(
+        'avail/{tier}/{period}.parquet',
+        {'tier': 'h1', 'shard': '1mo', 'period': '2026-05'},
+    ) == 'avail/h1/2026-05.parquet'

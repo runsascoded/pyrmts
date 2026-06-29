@@ -34,8 +34,8 @@ def _awair_pyramid() -> Pyramid:
         dims=[Dim(name='device_id', type='int')],
         metrics=[Metric(name='temp', monoid='sum')],
         tiers=[
-            Tier(name='raw', bin='1min', shard='1mo'),
-            Tier(name='h1', bin='1h', shard='1mo'),
+            Tier(name='raw', bin='1min', shards=('1mo',)),
+            Tier(name='h1', bin='1h', shards=('1mo',)),
         ],
     )
 

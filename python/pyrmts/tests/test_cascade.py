@@ -1,5 +1,8 @@
-"""Cascade integration test: build a finest tier directly, cascade up, then
-verify outputs match a direct-from-source aggregation."""
+"""Cascade integration tests for the unified-shard-ladder model.
+
+Each tier declares `shards: tuple[str, ...]` (ascending, divisibility-chain).
+The caller materializes `(tiers[0], tiers[0].shards[0])`; cascade fills in
+every other (tier, shard_dur) rung."""
 from __future__ import annotations
 
 import io
@@ -32,7 +35,11 @@ def _ms(t: datetime) -> int:
 
 
 def _make_pyramid(storage: MemStorage, *, with_dim: bool = True) -> Pyramid:
-    """5min → 15min → 1h → 1d ladder, histogram monoid, optional `station_id` dim."""
+    """5min → 15min → 1h → 1d ladder, histogram monoid, optional `station_id` dim.
+
+    Each tier has a single shard rung — same shape as the pre-ladder tests, just
+    expressed as `shards=('1h',)` etc. Cross-tier promotion still occurs at
+    every tier boundary."""
     return Pyramid(
         storage=storage,
         keyTemplate='avail/{tier}/{period}.parquet',
@@ -40,10 +47,10 @@ def _make_pyramid(storage: MemStorage, *, with_dim: bool = True) -> Pyramid:
         dims=[Dim(name='station_id', type='string')] if with_dim else [],
         metrics=[Metric(name='bikes', monoid='histogram')],
         tiers=[
-            Tier(name='5m',  bin='5min', shard='1h'),
-            Tier(name='15m', bin='15min', shard='1h'),
-            Tier(name='1h',  bin='1h',   shard='1d'),
-            Tier(name='1d',  bin='1d',   shard='1mo'),
+            Tier(name='5m',  bin='5min',  shards=('1h',)),
+            Tier(name='15m', bin='15min', shards=('1h',)),
+            Tier(name='1h',  bin='1h',    shards=('1d',)),
+            Tier(name='1d',  bin='1d',    shards=('1mo',)),
         ],
     )
 
@@ -52,13 +59,14 @@ def _write_finest_shards(
     pyramid: Pyramid,
     observations: list[tuple[datetime, str, int]],  # (ts, station_id, state)
 ) -> None:
-    """Write the 5m@1h finest tier directly from per-minute observations.
+    """Write the finest tier's smallest shard rung directly from per-minute
+    observations.
 
     Each observation contributes a 1-minute histogram entry `{state: 1}` to
-    the 5-minute bucket covering its timestamp."""
+    the tier-bin bucket covering its timestamp."""
     finest = pyramid.tiers[0]
     bin_span = parse_duration(finest.bin)
-    shard_span = parse_duration(finest.shard)
+    shard_span = parse_duration(finest.shards[0])
 
     # (shard_label, bin_ms, station_id) -> hist
     accum: dict[tuple[str, int, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -192,29 +200,119 @@ def test_cascade_overwrite():
     assert len(r.written) > 0
 
 
-def test_cascade_explicit_derive_from():
+def test_cascade_within_tier_ladder():
+    """Same-tier ladder rung: build `(raw, 1d)` from `(raw, 1h)` 24× combine."""
     storage = MemStorage()
-    pyramid = _make_pyramid(storage)
-    base = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
-    observations = [
-        (datetime(2026, 5, 10, 12 + h, m, tzinfo=UTC), 's1', (h * 60 + m) % 4)
-        for h in range(2) for m in range(60)
-    ]
-    _write_finest_shards(pyramid, observations)
+    pyramid = Pyramid(
+        storage=storage,
+        keyTemplate='c/{tier}/{shard}/{period}.parquet',
+        binCol='ts',
+        dims=[],
+        metrics=[Metric(name='n', monoid='count')],
+        tiers=[
+            Tier(name='raw', bin='1min', shards=('1h', '1d')),
+        ],
+    )
+    base = datetime(2026, 5, 10, 0, 0, tzinfo=UTC)
 
-    # Derive 1h directly from 5m, skipping 15m. Skip 15m and 1d via empty source.
+    # 24 1h shards, each with 60 1min rows.
+    for h in range(24):
+        rows = [
+            {'ts': _ms(datetime(2026, 5, 10, h, m, tzinfo=UTC)), 'n': 1}
+            for m in range(60)
+        ]
+        table = pa.table({'ts': [r['ts'] for r in rows], 'n': [r['n'] for r in rows]})
+        buf = io.BytesIO()
+        pq.write_table(table, buf)
+        period = f"2026-05-10T{h:02d}"
+        storage.put(f"c/raw/1h/{period}.parquet", buf.getvalue())
+
+    result = cascade_tiers(
+        pyramid,
+        time_range=(base, datetime(2026, 5, 11, tzinfo=UTC)),
+    )
+    assert result.errors == []
+    # The `(raw, 1d)` rung is the only output; cross-tier doesn't apply (single tier).
+    assert result.written == ['c/raw/1d/2026-05-10.parquet']
+
+    out = pq.read_table(io.BytesIO(storage.get('c/raw/1d/2026-05-10.parquet'))).to_pylist()
+    # All 60×24 = 1440 minute-bins survive at the `raw` tier's bin (1min);
+    # only the shard size grows (1h → 1d).
+    assert len(out) == 24 * 60
+    assert sum(r['n'] for r in out) == 24 * 60
+
+
+def test_cascade_multi_rung_with_cross_tier_promotion():
+    """Mixed ladder: finest tier `[5min, 1h]` + coarser tier `[1d]`. Caller
+    writes (5m, 5min); cascade builds (5m, 1h) → (1h, 1d)."""
+    storage = MemStorage()
+    pyramid = Pyramid(
+        storage=storage,
+        keyTemplate='m/{tier}/{shard}/{period}.parquet',
+        binCol='ts',
+        dims=[],
+        metrics=[Metric(name='temp', monoid='sum')],
+        tiers=[
+            Tier(name='5m', bin='5min', shards=('5min', '1h')),
+            Tier(name='1h', bin='1h',   shards=('1d',)),
+        ],
+    )
+
+    # Write the finest rung (5m, 5min): 12 5min bins per hour × 2 hours.
+    base = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    for h in range(2):
+        rows = []
+        for i in range(12):
+            ts = datetime(2026, 5, 10, 12 + h, i * 5, tzinfo=UTC)
+            temp = 20 + h * 12 + i  # monotone over both hours
+            rows.append({
+                'ts': _ms(ts),
+                'temp_n': 5,
+                'temp_sum': 5.0 * temp,
+                'temp_sumsq': 5.0 * temp * temp,
+            })
+        # The (5m, 5min) shard is the finest rung; period label = HH-prefixed minute.
+        table = pa.table({k: [r[k] for r in rows] for k in rows[0]})
+        buf = io.BytesIO()
+        pq.write_table(table, buf)
+        # Each 5min shard covers one bin; we'd normally have 12 shards per hour,
+        # but using 5min as the shard duration makes each shard a single row.
+        # Write them per actual 5min period.
+        for row in rows:
+            ts_dt = datetime.fromtimestamp(row['ts'] / 1000, tz=UTC)
+            period = ts_dt.strftime('%Y-%m-%dT%H-%M')
+            sub_table = pa.table({k: [v] for k, v in row.items()})
+            sub_buf = io.BytesIO()
+            pq.write_table(sub_table, sub_buf)
+            storage.put(f"m/5m/5min/{period}.parquet", sub_buf.getvalue())
+
     result = cascade_tiers(
         pyramid,
         time_range=(base, datetime(2026, 5, 10, 14, 0, tzinfo=UTC)),
-        derive_from={'1h': '5m'},
     )
     assert result.errors == []
 
-    expected_1h = _expected_hist(observations, '1h')
-    actual: dict[tuple[int, str], dict[str, int]] = {}
-    for row in _read_hist_rows(storage, 'avail/1h/2026-05-10.parquet'):
-        actual[(row['dt'], row['station_id'])] = row['bikes']
-    assert actual == expected_1h
+    # Same-tier promotion: (5m, 1h) from (5m, 5min).
+    out_5m_1h_12 = pq.read_table(
+        io.BytesIO(storage.get('m/5m/1h/2026-05-10T12.parquet'))
+    ).to_pylist()
+    # 12 5-minute bins survive at tier bin=5min.
+    assert len(out_5m_1h_12) == 12
+    expected_sum_h0 = sum(5.0 * (20 + i) for i in range(12))
+    assert sum(r['temp_sum'] for r in out_5m_1h_12) == pytest.approx(expected_sum_h0)
+
+    # Cross-tier promotion: (1h, 1d) from (5m, 1h).
+    out_1h_1d = pq.read_table(
+        io.BytesIO(storage.get('m/1h/1d/2026-05-10.parquet'))
+    ).to_pylist()
+    # 1h tier has bin=1h; 2 hours of data → 2 rows.
+    assert len(out_1h_1d) == 2
+    assert out_1h_1d[0]['ts'] == _ms(base)
+    assert out_1h_1d[1]['ts'] == _ms(datetime(2026, 5, 10, 13, tzinfo=UTC))
+    # Sums match by-hour totals from the finest data.
+    expected_sum_h1 = sum(5.0 * (20 + 12 + i) for i in range(12))
+    assert out_1h_1d[0]['temp_sum'] == pytest.approx(expected_sum_h0)
+    assert out_1h_1d[1]['temp_sum'] == pytest.approx(expected_sum_h1)
 
 
 def test_cascade_sum_monoid():
@@ -227,9 +325,9 @@ def test_cascade_sum_monoid():
         dims=[],
         metrics=[Metric(name='temp', monoid='sum')],
         tiers=[
-            Tier(name='1min', bin='1min', shard='1h'),
-            Tier(name='1h',   bin='1h',   shard='1d'),
-            Tier(name='1d',   bin='1d',   shard='1mo'),
+            Tier(name='1min', bin='1min', shards=('1h',)),
+            Tier(name='1h',   bin='1h',   shards=('1d',)),
+            Tier(name='1d',   bin='1d',   shards=('1mo',)),
         ],
     )
 
@@ -279,8 +377,8 @@ def test_cascade_count_monoid():
         dims=[],
         metrics=[Metric(name='n', monoid='count')],
         tiers=[
-            Tier(name='1min', bin='1min', shard='1h'),
-            Tier(name='1h',   bin='1h',   shard='1d'),
+            Tier(name='1min', bin='1min', shards=('1h',)),
+            Tier(name='1h',   bin='1h',   shards=('1d',)),
         ],
     )
     base = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
@@ -311,8 +409,8 @@ def test_cascade_with_filter():
         dims=[],
         metrics=[Metric(name='n', monoid='count')],
         tiers=[
-            Tier(name='1min', bin='1min', shard='1h'),
-            Tier(name='1h',   bin='1h',   shard='1d'),
+            Tier(name='1min', bin='1min', shards=('1h',)),
+            Tier(name='1h',   bin='1h',   shards=('1d',)),
         ],
     )
     base = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)

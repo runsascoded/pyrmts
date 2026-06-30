@@ -14,6 +14,7 @@
 
 import {
   type RecordShardInput,
+  type RecordedShard,
   type Shard,
   type ShardIndex,
   encodeWatermarkKey,
@@ -65,6 +66,33 @@ export class D1ShardIndex implements ShardIndex {
       out.set(encodeWatermarkKey(row.tier, row.shard_dur as Shard), new Date(row.latest_period_end))
     }
     return out
+  }
+
+  async listShards(pyramidName: string): Promise<RecordedShard[]> {
+    if (this.skipInventory) {
+      throw new Error(
+        `D1ShardIndex.listShards: skipInventory was enabled at construction; ` +
+        `no per-shard inventory was recorded. Re-create with ` +
+        `{ skipInventory: false } to use gap discovery.`,
+      )
+    }
+    const sql =
+      `SELECT tier, shard_dur, period_start, period_end, key ` +
+      `FROM ${quoteIdent(this.shardsTable)} WHERE pyramid = ?`
+    const res = await this.db.prepare(sql).bind(pyramidName).all<{
+      tier: string
+      shard_dur: string
+      period_start: number
+      period_end: number
+      key: string
+    }>()
+    return res.results.map(row => ({
+      tier: row.tier,
+      shardDur: row.shard_dur as Shard,
+      periodStart: new Date(row.period_start),
+      periodEnd: new Date(row.period_end),
+      key: row.key,
+    }))
   }
 
   async recordShard(input: RecordShardInput): Promise<void> {

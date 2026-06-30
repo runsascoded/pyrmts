@@ -295,16 +295,36 @@ function mockD1WithStore(): { db: D1Like } {
     latest_period_end: number
     updated_at: number
   }
+  interface ShardRow {
+    pyramid: string
+    tier: string
+    shard_dur: string
+    period_start: number
+    period_end: number
+    key: string
+    written_at: number
+  }
   const watermarks = new Map<string, WatermarkRow>()
+  const shards = new Map<string, ShardRow>()
   const wmKey = (p: string, t: string, s: string): string => `${p}|${t}|${s}`
+  const shardKey = (p: string, t: string, s: string, ps: number): string =>
+    `${p}|${t}|${s}|${ps}`
 
   function makeStmt(sql: string): D1PreparedStatement {
     let binds: unknown[] = []
-    const exec = (): { results: WatermarkRow[] } => {
+    const exec = (): { results: unknown[] } => {
       if (sql.startsWith('SELECT tier, shard_dur, latest_period_end')) {
         const pyramid = binds[0] as string
         const results: WatermarkRow[] = []
         for (const row of watermarks.values()) {
+          if (row.pyramid === pyramid) results.push(row)
+        }
+        return { results }
+      }
+      if (sql.startsWith('SELECT tier, shard_dur, period_start, period_end, key')) {
+        const pyramid = binds[0] as string
+        const results: ShardRow[] = []
+        for (const row of shards.values()) {
           if (row.pyramid === pyramid) results.push(row)
         }
         return { results }
@@ -320,8 +340,14 @@ function mockD1WithStore(): { db: D1Like } {
         watermarks.set(key, { pyramid, tier, shard_dur, latest_period_end: newEnd, updated_at })
         return { results: [] }
       }
-      // pyramid_shards inventory insert — no-op for conformance (conformance
-      // verifies watermark observability, not the inventory).
+      if (sql.includes('"pyramid_shards"') && sql.startsWith('INSERT INTO')) {
+        const [pyramid, tier, shard_dur, period_start, period_end, key, written_at] =
+          binds as [string, string, string, number, number, string, number]
+        shards.set(shardKey(pyramid, tier, shard_dur, period_start), {
+          pyramid, tier, shard_dur, period_start, period_end, key, written_at,
+        })
+        return { results: [] }
+      }
       return { results: [] }
     }
     const stmt: D1PreparedStatement = {
@@ -355,9 +381,22 @@ function mockD1WithStore(): { db: D1Like } {
   return { db }
 }
 
-describe('D1ShardIndex', () => {
-  assertShardIndexConformance(() => {
-    const { db } = mockD1WithStore()
-    return new D1ShardIndex(db, { now: () => 0 })
-  })
+describe('D1ShardIndex (inventory on)', () => {
+  assertShardIndexConformance(
+    () => {
+      const { db } = mockD1WithStore()
+      return new D1ShardIndex(db, { now: () => 0 })
+    },
+    { inventory: true },
+  )
+})
+
+describe('D1ShardIndex (inventory off)', () => {
+  assertShardIndexConformance(
+    () => {
+      const { db } = mockD1WithStore()
+      return new D1ShardIndex(db, { now: () => 0, skipInventory: true })
+    },
+    { inventory: false },
+  )
 })

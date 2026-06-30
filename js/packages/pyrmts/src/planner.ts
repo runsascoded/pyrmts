@@ -3,6 +3,7 @@
 // re-aggregate. No I/O.
 
 import { addSpan, binsInRange, fixedDurationMs, floorToSpan, parseDuration, shardPeriodsCovering } from './axis.js'
+import { substituteKey } from './keys.js'
 import { validateLadders } from './ladder.js'
 import { encodeWatermarkKey } from './shard-index.js'
 import type { Bin, Duration, Pyramid, Shard, Tier } from './types.js'
@@ -642,17 +643,6 @@ function shardKeys(
   )
 }
 
-function substituteKey(
-  template: string,
-  values: Record<string, string | number>,
-): string {
-  return template.replace(/\{(\w+)\}/g, (_, name: string) => {
-    if (!(name in values)) {
-      throw new Error(`planQuery: missing key template value for {${name}}`)
-    }
-    return String(values[name])
-  })
-}
 
 // Catalog of "nice" widths used when snapping a user-supplied smoothing
 // window to a representable Duration. All fixed-width (no mo/y); calendar

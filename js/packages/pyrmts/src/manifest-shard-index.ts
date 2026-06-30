@@ -33,6 +33,8 @@
 import {
   encodeWatermarkKey,
   type RecordShardInput,
+  type RecordedShard,
+  type Shard,
   type ShardIndex,
   type Storage,
 } from './index.js'
@@ -158,6 +160,28 @@ export class ManifestShardIndex implements ShardIndex {
       out.set(k, new Date(ms))
     }
     return out
+  }
+
+  async listShards(pyramidName: string): Promise<RecordedShard[]> {
+    if (!this.includeInventory) {
+      throw new Error(
+        `ManifestShardIndex.listShards: includeInventory was disabled at ` +
+        `construction; no per-shard inventory was recorded. Re-create with ` +
+        `{ includeInventory: true } to use gap discovery.`,
+      )
+    }
+    const key = resolveKey(this.opts.manifestKey, pyramidName)
+    const bytes = await this.storage.get(key)
+    if (bytes === null) return []
+    const manifest = parseManifest(bytes)
+    if (manifest === null || manifest.shards === undefined) return []
+    return manifest.shards.map(s => ({
+      tier: s.tier,
+      shardDur: s.shardDur as Shard,
+      periodStart: new Date(s.periodStart),
+      periodEnd: new Date(s.periodEnd),
+      key: s.key,
+    }))
   }
 
   async recordShard(input: RecordShardInput): Promise<void> {

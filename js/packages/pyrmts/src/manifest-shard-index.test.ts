@@ -5,10 +5,20 @@ import { ManifestShardIndex } from './manifest-shard-index.js'
 import { assertShardIndexConformance } from './shard-index-conformance.js'
 import { memStorage } from './storage.js'
 
-describe('ManifestShardIndex', () => {
+describe('ManifestShardIndex (inventory on)', () => {
   // Conformance: identical observable behavior to D1ShardIndex (and any
   // future `ShardIndex` impl). Fresh memStorage per test for isolation.
-  assertShardIndexConformance(() => new ManifestShardIndex(memStorage(), { now: () => 0 }))
+  assertShardIndexConformance(
+    () => new ManifestShardIndex(memStorage(), { now: () => 0, includeInventory: true }),
+    { inventory: true },
+  )
+})
+
+describe('ManifestShardIndex (inventory off)', () => {
+  assertShardIndexConformance(
+    () => new ManifestShardIndex(memStorage(), { now: () => 0 }),
+    { inventory: false },
+  )
 })
 
 const decoder = new TextDecoder()

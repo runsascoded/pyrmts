@@ -47,6 +47,16 @@ export interface RecordShardInput {
   key: string
 }
 
+// One inventory row in `ShardIndex.listShards`. Mirrors
+// `RecordShardInput` minus `pyramidName` (scoped by the listShards call).
+export interface RecordedShard {
+  tier: string
+  shardDur: Shard
+  periodStart: Date
+  periodEnd: Date
+  key: string
+}
+
 export interface ShardIndex {
   // Return all watermarks for `pyramidName` as a `Map<encodedKey, Date>`.
   // `Date` is the *end* of the latest sealed shard at that (tier, cadence) —
@@ -63,6 +73,17 @@ export interface ShardIndex {
   // this for free via row-level upsert; the manifest impl is single-writer
   // by construction).
   recordShard(input: RecordShardInput): Promise<void>
+
+  // List every recorded shard for `pyramidName`. Used by gap discovery
+  // (`listMissingShards`) and audit/debug flows. Order is implementation-
+  // defined; consumers should sort if they need stable output.
+  //
+  // Implementations that don't keep per-shard inventory (e.g.
+  // `D1ShardIndex({ skipInventory: true })`, `ManifestShardIndex(
+  // { includeInventory: false })`) MUST throw rather than return an
+  // empty list — the caller would silently see every expected shard as
+  // "missing" otherwise.
+  listShards(pyramidName: string): Promise<RecordedShard[]>
 }
 
 export interface CachedShardIndexOptions {
@@ -121,6 +142,13 @@ export class CachedShardIndex implements ShardIndex {
   async recordShard(input: RecordShardInput): Promise<void> {
     await this.underlying.recordShard(input)
     this.cache.delete(input.pyramidName)
+  }
+
+  // Passthrough; intentionally uncached. Gap-discovery callers are
+  // already infrequent (fsck/audit), and inventory state churns more
+  // than the watermark summary so a TTL would be net-negative.
+  async listShards(pyramidName: string): Promise<RecordedShard[]> {
+    return this.underlying.listShards(pyramidName)
   }
 
   // Test/diagnostic helper: drop the entire cache. Not part of the

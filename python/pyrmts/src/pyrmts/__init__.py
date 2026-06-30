@@ -12,6 +12,7 @@ from .axis import (
     shard_periods_covering,
 )
 from .cascade import CascadeResult, cascade_tiers
+from .gap_discovery import ExpectedShard, list_expected_shards
 from .keys import substitute_key
 from .monoids import Monoid, Row, get_monoid, state_columns
 from .storage import FsStorage, MemStorage, S3Storage
@@ -38,6 +39,7 @@ __all__ = [
     'add_span', 'bins_in_range', 'floor_to_span', 'format_period',
     'parse_duration', 'shard_periods_covering',
     'CascadeResult', 'cascade_tiers',
+    'ExpectedShard', 'list_expected_shards',
     'substitute_key',
     'Monoid', 'Row', 'get_monoid', 'state_columns',
     'FsStorage', 'MemStorage', 'S3Storage',

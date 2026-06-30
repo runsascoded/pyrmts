@@ -376,7 +376,7 @@ describe('planQuery: errors', () => {
       range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-02-01T00:00:00Z') },
       binBudget: 1000,
       // no `filter.device_id` supplied
-    })).toThrow('planQuery: missing key template value for {device_id}')
+    })).toThrow('substituteKey: missing value for {device_id}')
   })
 })
 

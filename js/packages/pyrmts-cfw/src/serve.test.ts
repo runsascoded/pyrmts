@@ -159,7 +159,7 @@ describe('serveQuery', () => {
     })
     expect(res.status).toBe(400)
     expect(await res.json()).toEqual({
-      error: 'planQuery: missing key template value for {device_id}',
+      error: 'substituteKey: missing value for {device_id}',
     })
   })
 

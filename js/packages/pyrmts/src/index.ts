@@ -69,8 +69,14 @@ export type {
   CachedShardIndexOptions,
   DecodedWatermarkKey,
   RecordShardInput,
+  RecordedShard,
   ShardIndex,
 } from './shard-index.js'
+
+export { listExpectedShards, listMissingShards } from './gap-discovery.js'
+export type { ExpectedShard } from './gap-discovery.js'
+
+export { substituteKey } from './keys.js'
 
 export { ManifestShardIndex } from './manifest-shard-index.js'
 export type { ManifestShardIndexOptions } from './manifest-shard-index.js'

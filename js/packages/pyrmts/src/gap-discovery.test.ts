@@ -23,6 +23,20 @@ function makePyramid(): Pyramid {
   }
 }
 
+function makeAvailV3Pyramid(): Pyramid {
+  return {
+    storage: { fetch: async () => { throw new Error('not used') } } as Pyramid['storage'],
+    keyTemplate: 'avail/{tier}/{shard}/{period}.parquet',
+    axis: 'time',
+    binCol: 'ts',
+    dims: [],
+    metrics: [{ name: 'n', monoid: 'count' }],
+    tiers: [
+      { name: '1m', bin: '1min', shards: ['5min', '10min', '30min', '1h', '3h', '12h', '1d'] },
+    ],
+  }
+}
+
 function makeCalendarPyramid(): Pyramid {
   return {
     storage: { fetch: async () => { throw new Error('not used') } } as Pyramid['storage'],
@@ -63,21 +77,19 @@ function summarize(
 }
 
 describe('listExpectedShards', () => {
-  test('one tier × 2 ladder rungs over 1h: 12 × 5min + 1 × 1h = 13 entries', () => {
+  test('to aligned to max-shard emits one max-shard, no trailing', () => {
     const p = makePyramid()
     const got = listExpectedShards(p, {
       from: d('2026-06-01T00:00:00Z'),
       to: d('2026-06-01T01:00:00Z'),
     })
-    expect(got).toHaveLength(13)
-    const byRung = got.reduce<Record<string, number>>((acc, s) => {
-      acc[s.shardDur] = (acc[s.shardDur] ?? 0) + 1
-      return acc
-    }, {})
-    expect(byRung).toEqual({ '5min': 12, '1h': 1 })
+    expect(got).toHaveLength(1)
+    expect(got[0]!).toMatchObject({
+      tier: '1m', shardDur: '1h', key: 'avail/1m/1h/2026-06-01T00.parquet',
+    })
   })
 
-  test('substitutes {tier}, {shard}, {period} into keyTemplate', () => {
+  test('trailing window tiles via largest fitting rungs', () => {
     const p = makePyramid()
     const got = listExpectedShards(p, {
       from: d('2026-06-01T00:00:00Z'),
@@ -85,10 +97,6 @@ describe('listExpectedShards', () => {
     })
     const summary = summarize(got).sort((a, b) => a.key.localeCompare(b.key))
     expect(summary).toEqual([
-      {
-        tier: '1m', shardDur: '1h', period: '2026-06-01T00:00:00.000Z',
-        key: 'avail/1m/1h/2026-06-01T00.parquet',
-      },
       {
         tier: '1m', shardDur: '5min', period: '2026-06-01T00:00:00.000Z',
         key: 'avail/1m/5min/2026-06-01T00-00.parquet',
@@ -104,21 +112,56 @@ describe('listExpectedShards', () => {
     ])
   })
 
-  test('calendar ladder (1d + 1mo over a 2-month range)', () => {
+  test('avail-v3 ladder over full day yields a single /1m@1d', () => {
+    const p = makeAvailV3Pyramid()
+    const got = listExpectedShards(p, {
+      from: d('2026-06-01T00:00:00Z'),
+      to: d('2026-06-02T00:00:00Z'),
+    })
+    expect(got).toHaveLength(1)
+    expect(got[0]!.shardDur).toBe('1d')
+    expect(got[0]!.periodStart.toISOString()).toBe('2026-06-01T00:00:00.000Z')
+  })
+
+  test('avail-v3 ladder partial-day trailing decomposes 18h35m → [12h, 3h, 3h, 30min, 5min]', () => {
+    const p = makeAvailV3Pyramid()
+    const got = listExpectedShards(p, {
+      from: d('2026-06-01T00:00:00Z'),
+      to: d('2026-06-01T18:35:00Z'),
+    })
+    expect(got.map(s => [String(s.shardDur), s.periodStart.toISOString()])).toEqual([
+      ['12h',   '2026-06-01T00:00:00.000Z'],
+      ['3h',    '2026-06-01T12:00:00.000Z'],
+      ['3h',    '2026-06-01T15:00:00.000Z'],
+      ['30min', '2026-06-01T18:00:00.000Z'],
+      ['5min',  '2026-06-01T18:30:00.000Z'],
+    ])
+  })
+
+  test('residual below smallest rung is left for next-finer tier', () => {
+    const p = makePyramid()  // shards: 5min, 1h
+    const got = listExpectedShards(p, {
+      from: d('2026-06-01T00:00:00Z'),
+      to: d('2026-06-01T00:07:00Z'),
+    })
+    // 7min = 1 × 5min (leading) + 2min residual → unmet.
+    expect(got).toEqual([
+      expect.objectContaining({ shardDur: '5min', key: 'avail/1m/5min/2026-06-01T00-00.parquet' }),
+    ])
+  })
+
+  test('calendar ladder yields max-shards only', () => {
     const p = makeCalendarPyramid()
     const got = listExpectedShards(p, {
       from: d('2026-06-01T00:00:00Z'),
       to: d('2026-08-01T00:00:00Z'),
     })
-    const byRung = got.reduce<Record<string, number>>((acc, s) => {
-      acc[s.shardDur] = (acc[s.shardDur] ?? 0) + 1
-      return acc
-    }, {})
-    // June has 30 days, July has 31 → 61 × 1d + 2 × 1mo.
-    expect(byRung).toEqual({ '1d': 61, '1mo': 2 })
+    // [Jun 1, Aug 1) tiles as 2 × 1mo. The 1d rung is non-max and the
+    // trailing window is empty (to is 1mo-aligned).
+    expect(got.map(s => String(s.shardDur))).toEqual(['1mo', '1mo'])
   })
 
-  test('filter values fill in custom keyTemplate placeholders', () => {
+  test('filter values fill custom keyTemplate placeholders', () => {
     const p = makeFilterPyramid()
     const got = listExpectedShards(
       p,
@@ -140,7 +183,7 @@ describe('listExpectedShards', () => {
 
 describe('listMissingShards', () => {
   test('returns expected ∖ recorded after recording half', async () => {
-    const p = makePyramid()
+    const p = makeAvailV3Pyramid()
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, {
       now: () => 0,
@@ -148,10 +191,12 @@ describe('listMissingShards', () => {
     })
 
     const expected = listExpectedShards(p, {
+      // Partial-day trailing decomp = 5 shards (12h, 3h, 3h, 30min, 5min).
       from: d('2026-06-01T00:00:00Z'),
-      to: d('2026-06-01T01:00:00Z'),
+      to: d('2026-06-01T18:35:00Z'),
     })
-    // Record every other expected entry.
+    expect(expected).toHaveLength(5)
+    // Record every other expected entry (indices 0, 2, 4 → 3 recorded).
     for (let i = 0; i < expected.length; i += 2) {
       const e = expected[i]!
       await idx.recordShard({
@@ -165,12 +210,10 @@ describe('listMissingShards', () => {
     }
     const missing = await listMissingShards(p, 'avail', idx, {
       from: d('2026-06-01T00:00:00Z'),
-      to: d('2026-06-01T01:00:00Z'),
+      to: d('2026-06-01T18:35:00Z'),
     })
-    // 13 expected → 7 recorded (indices 0,2,4,6,8,10,12) → 6 missing.
-    expect(missing).toHaveLength(6)
-    // Verify identity: every missing entry's (tier, shardDur, start) is
-    // not in the recorded set.
+    // 5 expected → 3 recorded (0, 2, 4) → 2 missing (1, 3).
+    expect(missing).toHaveLength(2)
     const recordedKeys = new Set<string>()
     for (let i = 0; i < expected.length; i += 2) {
       const e = expected[i]!
@@ -183,7 +226,7 @@ describe('listMissingShards', () => {
   })
 
   test('returns full expected set when index is empty', async () => {
-    const p = makePyramid()
+    const p = makeAvailV3Pyramid()
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, {
       now: () => 0,
@@ -191,13 +234,13 @@ describe('listMissingShards', () => {
     })
     const missing = await listMissingShards(p, 'avail', idx, {
       from: d('2026-06-01T00:00:00Z'),
-      to: d('2026-06-01T01:00:00Z'),
+      to: d('2026-06-01T18:35:00Z'),
     })
-    expect(missing).toHaveLength(13)
+    expect(missing).toHaveLength(5)
   })
 
   test('returns empty when every expected shard is recorded', async () => {
-    const p = makePyramid()
+    const p = makeAvailV3Pyramid()
     const storage = memStorage()
     const idx = new ManifestShardIndex(storage, {
       now: () => 0,
@@ -205,7 +248,7 @@ describe('listMissingShards', () => {
     })
     const expected = listExpectedShards(p, {
       from: d('2026-06-01T00:00:00Z'),
-      to: d('2026-06-01T01:00:00Z'),
+      to: d('2026-06-01T18:35:00Z'),
     })
     for (const e of expected) {
       await idx.recordShard({
@@ -219,7 +262,7 @@ describe('listMissingShards', () => {
     }
     expect(await listMissingShards(p, 'avail', idx, {
       from: d('2026-06-01T00:00:00Z'),
-      to: d('2026-06-01T01:00:00Z'),
+      to: d('2026-06-01T18:35:00Z'),
     })).toEqual([])
   })
 

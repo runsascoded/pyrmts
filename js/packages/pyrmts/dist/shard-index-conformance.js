@@ -13,7 +13,8 @@
 // The factory is invoked once per test; impls should return a fresh,
 // empty index each time so scenarios are isolated.
 import { describe, expect, test } from 'vitest';
-export function assertShardIndexConformance(makeIndex) {
+export function assertShardIndexConformance(makeIndex, opts = {}) {
+    const inventory = opts.inventory ?? true;
     describe('ShardIndex conformance', () => {
         test('getWatermarks on unknown pyramid returns empty Map', async () => {
             const idx = makeIndex();
@@ -113,6 +114,101 @@ export function assertShardIndexConformance(makeIndex) {
                 ['15m@1d', new Date('2026-06-21T16:00:00Z')],
             ]));
         });
+        if (inventory) {
+            test('listShards on unknown pyramid returns empty array', async () => {
+                const idx = makeIndex();
+                expect(await idx.listShards('avail')).toEqual([]);
+            });
+            test('listShards returns recorded inventory rows', async () => {
+                const idx = makeIndex();
+                const base = {
+                    pyramidName: 'avail',
+                    key: 'k',
+                };
+                await idx.recordShard({
+                    ...base,
+                    tier: '15m',
+                    shardDur: '1h',
+                    periodStart: new Date('2026-06-21T14:00:00Z'),
+                    periodEnd: new Date('2026-06-21T15:00:00Z'),
+                    key: 'avail/15m/1h/2026-06-21T14.parquet',
+                });
+                await idx.recordShard({
+                    ...base,
+                    tier: '15m',
+                    shardDur: '1h',
+                    periodStart: new Date('2026-06-21T15:00:00Z'),
+                    periodEnd: new Date('2026-06-21T16:00:00Z'),
+                    key: 'avail/15m/1h/2026-06-21T15.parquet',
+                });
+                await idx.recordShard({
+                    ...base,
+                    tier: '1h',
+                    shardDur: '1d',
+                    periodStart: new Date('2026-06-21T00:00:00Z'),
+                    periodEnd: new Date('2026-06-22T00:00:00Z'),
+                    key: 'avail/1h/1d/2026-06-21.parquet',
+                });
+                const got = await idx.listShards('avail');
+                const sorted = [...got].sort((a, b) => {
+                    if (a.tier !== b.tier)
+                        return a.tier.localeCompare(b.tier);
+                    if (a.shardDur !== b.shardDur)
+                        return String(a.shardDur).localeCompare(String(b.shardDur));
+                    return a.periodStart.getTime() - b.periodStart.getTime();
+                });
+                expect(sorted).toEqual([
+                    {
+                        tier: '15m', shardDur: '1h',
+                        periodStart: new Date('2026-06-21T14:00:00Z'),
+                        periodEnd: new Date('2026-06-21T15:00:00Z'),
+                        key: 'avail/15m/1h/2026-06-21T14.parquet',
+                    },
+                    {
+                        tier: '15m', shardDur: '1h',
+                        periodStart: new Date('2026-06-21T15:00:00Z'),
+                        periodEnd: new Date('2026-06-21T16:00:00Z'),
+                        key: 'avail/15m/1h/2026-06-21T15.parquet',
+                    },
+                    {
+                        tier: '1h', shardDur: '1d',
+                        periodStart: new Date('2026-06-21T00:00:00Z'),
+                        periodEnd: new Date('2026-06-22T00:00:00Z'),
+                        key: 'avail/1h/1d/2026-06-21.parquet',
+                    },
+                ]);
+            });
+            test('listShards: re-recording overwrites in place (no duplicates)', async () => {
+                const idx = makeIndex();
+                const input = {
+                    pyramidName: 'avail',
+                    tier: '15m',
+                    shardDur: '1h',
+                    periodStart: new Date('2026-06-21T14:00:00Z'),
+                    periodEnd: new Date('2026-06-21T15:00:00Z'),
+                    key: 'k1',
+                };
+                await idx.recordShard(input);
+                await idx.recordShard({ ...input, key: 'k2' });
+                const got = await idx.listShards('avail');
+                expect(got).toHaveLength(1);
+                expect(got[0].key).toBe('k2');
+            });
+        }
+        else {
+            test('listShards throws when inventory is disabled', async () => {
+                const idx = makeIndex();
+                await idx.recordShard({
+                    pyramidName: 'avail',
+                    tier: '15m',
+                    shardDur: '1h',
+                    periodStart: new Date('2026-06-21T14:00:00Z'),
+                    periodEnd: new Date('2026-06-21T15:00:00Z'),
+                    key: 'k',
+                });
+                await expect(idx.listShards('avail')).rejects.toThrow(/inventory/);
+            });
+        }
     });
 }
 //# sourceMappingURL=shard-index-conformance.js.map

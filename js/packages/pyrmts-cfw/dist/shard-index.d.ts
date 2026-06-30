@@ -1,4 +1,4 @@
-import { type RecordShardInput, type ShardIndex } from 'pyrmts';
+import { type RecordShardInput, type RecordedShard, type ShardIndex } from 'pyrmts';
 import type { D1Like } from './d1.js';
 export interface D1ShardIndexOptions {
     watermarksTable?: string;
@@ -14,6 +14,7 @@ export declare class D1ShardIndex implements ShardIndex {
     private readonly now;
     constructor(db: D1Like, opts?: D1ShardIndexOptions);
     getWatermarks(pyramidName: string): Promise<Map<string, Date>>;
+    listShards(pyramidName: string): Promise<RecordedShard[]>;
     recordShard(input: RecordShardInput): Promise<void>;
     static schemaSql(opts?: D1ShardIndexOptions): string[];
 }

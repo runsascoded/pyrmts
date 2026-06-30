@@ -2,6 +2,7 @@
 // emit a segmented plan describing which shards to read and where to
 // re-aggregate. No I/O.
 import { addSpan, binsInRange, fixedDurationMs, floorToSpan, parseDuration, shardPeriodsCovering } from './axis.js';
+import { substituteKey } from './keys.js';
 import { validateLadders } from './ladder.js';
 import { encodeWatermarkKey } from './shard-index.js';
 export const DEFAULT_AUTO_MULTIPLIER = 50;
@@ -444,14 +445,6 @@ function shardKeys(pyramid, tier, shardDur, from, to, filter) {
         shard: shardDur,
         period: p.label,
     }));
-}
-function substituteKey(template, values) {
-    return template.replace(/\{(\w+)\}/g, (_, name) => {
-        if (!(name in values)) {
-            throw new Error(`planQuery: missing key template value for {${name}}`);
-        }
-        return String(values[name]);
-    });
 }
 // Catalog of "nice" widths used when snapping a user-supplied smoothing
 // window to a representable Duration. All fixed-width (no mo/y); calendar

@@ -126,6 +126,27 @@ export class ManifestShardIndex {
         }
         return out;
     }
+    async listShards(pyramidName) {
+        if (!this.includeInventory) {
+            throw new Error(`ManifestShardIndex.listShards: includeInventory was disabled at ` +
+                `construction; no per-shard inventory was recorded. Re-create with ` +
+                `{ includeInventory: true } to use gap discovery.`);
+        }
+        const key = resolveKey(this.opts.manifestKey, pyramidName);
+        const bytes = await this.storage.get(key);
+        if (bytes === null)
+            return [];
+        const manifest = parseManifest(bytes);
+        if (manifest === null || manifest.shards === undefined)
+            return [];
+        return manifest.shards.map(s => ({
+            tier: s.tier,
+            shardDur: s.shardDur,
+            periodStart: new Date(s.periodStart),
+            periodEnd: new Date(s.periodEnd),
+            key: s.key,
+        }));
+    }
     async recordShard(input) {
         const key = resolveKey(this.opts.manifestKey, input.pyramidName);
         const existing = await this.storage.get(key);

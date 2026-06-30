@@ -63,6 +63,12 @@ export class CachedShardIndex {
         await this.underlying.recordShard(input);
         this.cache.delete(input.pyramidName);
     }
+    // Passthrough; intentionally uncached. Gap-discovery callers are
+    // already infrequent (fsck/audit), and inventory state churns more
+    // than the watermark summary so a TTL would be net-negative.
+    async listShards(pyramidName) {
+        return this.underlying.listShards(pyramidName);
+    }
     // Test/diagnostic helper: drop the entire cache. Not part of the
     // `ShardIndex` interface; consumers shouldn't depend on it.
     clear() {

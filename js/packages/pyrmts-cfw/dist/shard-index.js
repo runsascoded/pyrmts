@@ -39,6 +39,23 @@ export class D1ShardIndex {
         }
         return out;
     }
+    async listShards(pyramidName) {
+        if (this.skipInventory) {
+            throw new Error(`D1ShardIndex.listShards: skipInventory was enabled at construction; ` +
+                `no per-shard inventory was recorded. Re-create with ` +
+                `{ skipInventory: false } to use gap discovery.`);
+        }
+        const sql = `SELECT tier, shard_dur, period_start, period_end, key ` +
+            `FROM ${quoteIdent(this.shardsTable)} WHERE pyramid = ?`;
+        const res = await this.db.prepare(sql).bind(pyramidName).all();
+        return res.results.map(row => ({
+            tier: row.tier,
+            shardDur: row.shard_dur,
+            periodStart: new Date(row.period_start),
+            periodEnd: new Date(row.period_end),
+            key: row.key,
+        }));
+    }
     async recordShard(input) {
         const now = this.now();
         const periodEndMs = input.periodEnd.getTime();

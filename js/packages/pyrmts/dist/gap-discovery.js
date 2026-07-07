@@ -25,6 +25,11 @@ import { addSpan, floorToSpan, formatPeriod, parseDuration } from './axis.js';
 import { substituteKey } from './keys.js';
 // Per-tier minimal cover of `range`. See file docstring.
 //
+// Shards whose period is entirely outside `[range.from, range.to)` are
+// omitted — no in-range data could ever land in them. Shards that straddle
+// either boundary are emitted with `effective{Start,End}` clipped to the
+// query range so materializers can compute `inputsExpected` correctly.
+//
 // `filter` supplies additional `{name}` values for keyTemplate substitution
 // (e.g. `{ device_id: 17617 }` for an awair-style multi-tenant layout).
 // `{tier}`, `{shard}`, and `{period}` are filled internally.
@@ -41,14 +46,22 @@ function coverForTier(pyramid, tier, from, to, filter, out) {
     const maxSpan = parseDuration(maxShard);
     const lastMax = floorToSpan(to, maxSpan);
     const firstMax = floorToSpan(from, maxSpan);
-    // Closed-history region: max-shard tiles.
+    // Closed-history region: max-shard tiles. First tile may straddle `from`
+    // (its period extends into pre-genesis time); `makeExpected` clips
+    // `effectiveStart` accordingly. `next > from` is guaranteed by
+    // definition of `floorToSpan`, so no pre-genesis pruning needed here.
     let cur = firstMax;
     while (cur < lastMax) {
         const next = addSpan(cur, maxSpan);
-        out.push(makeExpected(pyramid, tier, maxShard, cur, next, filter));
+        out.push(makeExpected(pyramid, tier, maxShard, cur, next, from, to, filter));
         cur = next;
     }
     // Trailing partial-max window: greedy largest-fitting-rung descent.
+    // When `firstMax === lastMax` (short range within a single max-shard tile),
+    // `cur` starts at `lastMax` which may be < `from`; the greedy walk can
+    // then pick tiles ending at or before `from` (e.g. ctbk avail-v3
+    // `/3d/1440d/2017-04-24` when genesis is 2026-04-08). Prune those —
+    // they carry no in-range data.
     const nonMax = shards.slice(0, -1);
     cur = lastMax;
     while (cur < to) {
@@ -56,7 +69,9 @@ function coverForTier(pyramid, tier, from, to, filter, out) {
         if (chosen === null)
             break;
         const [rung, rungEnd] = chosen;
-        out.push(makeExpected(pyramid, tier, rung, cur, rungEnd, filter));
+        if (rungEnd > from) {
+            out.push(makeExpected(pyramid, tier, rung, cur, rungEnd, from, to, filter));
+        }
         cur = rungEnd;
     }
 }
@@ -73,13 +88,15 @@ function largestFittingRung(rungs, cur, upper) {
     }
     return null;
 }
-function makeExpected(pyramid, tier, shardDur, start, end, filter) {
+function makeExpected(pyramid, tier, shardDur, start, end, from, to, filter) {
     const span = parseDuration(shardDur);
     return {
         tier: tier.name,
         shardDur,
         periodStart: start,
         periodEnd: end,
+        effectiveStart: start < from ? from : start,
+        effectiveEnd: end > to ? to : end,
         key: substituteKey(pyramid.keyTemplate, {
             ...filter,
             tier: tier.name,

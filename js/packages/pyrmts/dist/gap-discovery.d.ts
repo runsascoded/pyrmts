@@ -5,6 +5,8 @@ export interface ExpectedShard {
     shardDur: Shard;
     periodStart: Date;
     periodEnd: Date;
+    effectiveStart: Date;
+    effectiveEnd: Date;
     key: string;
 }
 export declare function listExpectedShards(pyramid: Pyramid, range: {

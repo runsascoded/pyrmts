@@ -76,6 +76,36 @@ function summarize(
   }))
 }
 
+function makeStraddleFromPyramid(): Pyramid {
+  return {
+    storage: { fetch: async () => { throw new Error('not used') } } as Pyramid['storage'],
+    keyTemplate: 'a/{tier}/{shard}/{period}.parquet',
+    axis: 'time',
+    binCol: 'ts',
+    dims: [],
+    metrics: [{ name: 'n', monoid: 'count' }],
+    tiers: [{ name: '1d', bin: '1d', shards: ['1d', '1mo'] }],
+  }
+}
+
+// Ctbk avail-v3 `/3d` tier: `4320d` max-shard, `1440d` non-max. For any
+// short range where `floor(from, 4320d) === floor(to, 4320d)`, no max-
+// shard tiles emit and the trailing greedy walk starts pre-genesis
+// (`cur = floor(to, 4320d) = 2017-04-24` for `to` in 2026), grabbing
+// `1440d` tiles that end at 2021-04-03 and 2025-03-13 — both fully
+// pre-genesis and pruned by Fix A.
+function makeCtbkStyleTier(): Pyramid {
+  return {
+    storage: { fetch: async () => { throw new Error('not used') } } as Pyramid['storage'],
+    keyTemplate: 'a/{tier}/{shard}/{period}.parquet',
+    axis: 'time',
+    binCol: 'ts',
+    dims: [],
+    metrics: [{ name: 'n', monoid: 'count' }],
+    tiers: [{ name: '3d', bin: '3d', shards: ['3d', '1440d', '4320d'] }],
+  }
+}
+
 describe('listExpectedShards', () => {
   test('to aligned to max-shard emits one max-shard, no trailing', () => {
     const p = makePyramid()
@@ -178,6 +208,75 @@ describe('listExpectedShards', () => {
       from: d('2026-06-01T00:00:00Z'),
       to: d('2026-06-01T01:00:00Z'),
     })).toThrow('substituteKey: missing value for {device_id}')
+  })
+
+  describe('effective{Start,End}', () => {
+    test('shards fully inside range: effective === period', () => {
+      const p = makePyramid()
+      const got = listExpectedShards(p, {
+        from: d('2026-06-01T00:00:00Z'),
+        to: d('2026-06-01T01:00:00Z'),
+      })
+      // Every emitted tile fits inside `[00:00, 01:00)`; every entry has
+      // `effective === period`.
+      expect(got.length).toBeGreaterThan(0)
+      for (const s of got) {
+        expect(s.effectiveStart.getTime()).toBe(s.periodStart.getTime())
+        expect(s.effectiveEnd.getTime()).toBe(s.periodEnd.getTime())
+      }
+    })
+
+    test('max-shard tile straddling `from` clips effectiveStart to from', () => {
+      const p = makeStraddleFromPyramid()
+      const from = d('2026-06-15T00:00:00Z')
+      const to = d('2026-07-01T00:00:00Z')
+      const got = listExpectedShards(p, { from, to })
+      // `firstMax = 2026-06-01`, `lastMax = 2026-07-01`. Max walk emits
+      // one `1mo` tile `[2026-06-01, 2026-07-01)` straddling `from`. No
+      // trailing (to is month-aligned).
+      expect(got).toHaveLength(1)
+      const s = got[0]!
+      expect(s.shardDur).toBe('1mo')
+      expect(s.periodStart.toISOString()).toBe('2026-06-01T00:00:00.000Z')
+      expect(s.periodEnd.toISOString()).toBe('2026-07-01T00:00:00.000Z')
+      expect(s.effectiveStart.toISOString()).toBe(from.toISOString())
+      expect(s.effectiveEnd.toISOString()).toBe('2026-07-01T00:00:00.000Z')
+    })
+
+    test('trailing walk prunes fully-pre-genesis tiles (avail-v3 /3d shape)', () => {
+      const p = makeCtbkStyleTier()
+      const from = d('2026-04-08T00:00:00Z')
+      const to = d('2026-06-30T00:00:00Z')
+      const got = listExpectedShards(p, { from, to })
+      // Contract: no emitted tile has periodEnd ≤ from. Without Fix A, the
+      // walk would emit `1440d` tiles `[2017-04-24, 2021-04-03)` and
+      // `[2021-04-03, 2025-03-13)` (both fully pre-genesis) before reaching
+      // any in-range tile.
+      expect(got.length).toBeGreaterThan(0)
+      const fromMs = from.getTime()
+      for (const s of got) {
+        expect(s.periodEnd.getTime()).toBeGreaterThan(fromMs)
+      }
+      // The first emitted tile must straddle `from` (its periodStart ≤
+      // from, periodEnd > from), and its effectiveStart clips to from.
+      const first = got[0]!
+      expect(first.periodStart.getTime()).toBeLessThanOrEqual(fromMs)
+      expect(first.effectiveStart.toISOString()).toBe(from.toISOString())
+    })
+
+    test('no emitted tile has periodEnd > `to` (minimal cover never overshoots)', () => {
+      // The greedy trailing walk uses `rEnd <= to`, and the max walk stops
+      // at `lastMax = floor(to, maxSpan) ≤ to`. So `periodEnd ≤ to`
+      // invariantly, and `effectiveEnd === periodEnd` always.
+      const p = makeAvailV3Pyramid()
+      const to = d('2026-06-01T18:35:00Z')
+      const got = listExpectedShards(p, { from: d('2026-06-01T00:00:00Z'), to })
+      const toMs = to.getTime()
+      for (const s of got) {
+        expect(s.periodEnd.getTime()).toBeLessThanOrEqual(toMs)
+        expect(s.effectiveEnd.getTime()).toBe(s.periodEnd.getTime())
+      }
+    })
   })
 })
 

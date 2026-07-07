@@ -7,12 +7,20 @@ The cover for `[from, to)` per tier with shards `[s_0 < ... < s_max]`:
 - Max-shard tiles fill `[floor(from, s_max), floor(to, s_max))` (the
   closed-history region). The first tile may start before `from` — the
   shard's notional period contains pre-genesis time the materializer
-  just leaves empty.
+  just leaves empty. `effective_start` is clipped to `from` so the
+  materializer knows which sub-range to count sources against.
 - The trailing partial-max window `[floor(to, s_max), to)` is tiled
   greedily by the largest non-max rung that fits at each step. The
   ladder is divisibility-chained, so `cur` is always rung-aligned. If
   `to - cur` falls below the smallest non-max rung, the residual is
   left for the next-finer tier (whose bin can represent that resolution).
+
+Shards whose period is entirely outside `[from, to)` are pruned — the
+trailing greedy walk can pick a rung whose tile ends at or before `from`
+(e.g. ctbk avail-v3 `/3d/1440d/2017-04-24` and `/3d/1440d/2021-04-03`
+when `firstMax === lastMax` and the walk starts pre-genesis). Such
+tiles carry no in-range data and would perpetually register as
+`no_inputs` to a strict materializer.
 
 The two-region split mirrors the api-worker planner walk
 (largest-rung-first, falling back to smaller rungs). Historical periods
@@ -37,6 +45,13 @@ class ExpectedShard:
     shard_dur: str
     period_start: datetime
     period_end: datetime  # exclusive
+    # Intersection of `[period_start, period_end)` with `[from, to)`. Equal to
+    # the raw period for shards fully inside the query range; clipped for
+    # shards that straddle either boundary (e.g. genesis at head). Materializers
+    # that require full source coverage should count sources whose period
+    # intersects `[effective_start, effective_end)`, not the raw shard period.
+    effective_start: datetime
+    effective_end: datetime
     key: str  # pre-substituted keyTemplate path
 
 
@@ -68,14 +83,21 @@ def _cover_for_tier(
     first_max = floor_to_span(from_, max_span)
     out: list[ExpectedShard] = []
 
-    # Closed-history region: max-shard tiles.
+    # Closed-history region: max-shard tiles. First tile may straddle `from`
+    # (its period extends into pre-genesis time); `_make_expected` clips
+    # `effective_start` accordingly. `nxt > from_` is guaranteed by
+    # definition of `floor_to_span`, so no pre-genesis pruning needed here.
     cur = first_max
     while cur < last_max:
         nxt = add_span(cur, max_span)
-        out.append(_make_expected(pyramid, tier, max_shard, cur, nxt, filter))
+        out.append(_make_expected(pyramid, tier, max_shard, cur, nxt, from_, to, filter))
         cur = nxt
 
     # Trailing partial-max window: greedy largest-fitting-rung descent.
+    # When `first_max == last_max` (short range within a single max-shard
+    # tile), `cur` starts at `last_max` which may be < `from_`; the greedy
+    # walk can then pick tiles ending at or before `from_`. Prune those —
+    # they carry no in-range data.
     cur = last_max
     non_max = shards[:-1]
     while cur < to:
@@ -83,7 +105,8 @@ def _cover_for_tier(
         if chosen is None:
             break
         rung, rung_end = chosen
-        out.append(_make_expected(pyramid, tier, rung, cur, rung_end, filter))
+        if rung_end > from_:
+            out.append(_make_expected(pyramid, tier, rung, cur, rung_end, from_, to, filter))
         cur = rung_end
 
     return out
@@ -111,6 +134,8 @@ def _make_expected(
     shard_dur: str,
     start: datetime,
     end: datetime,
+    from_: datetime,
+    to: datetime,
     filter: dict,
 ) -> ExpectedShard:
     span = parse_duration(shard_dur)
@@ -124,5 +149,7 @@ def _make_expected(
         shard_dur=shard_dur,
         period_start=start,
         period_end=end,
+        effective_start=from_ if start < from_ else start,
+        effective_end=to if end > to else end,
         key=key,
     )

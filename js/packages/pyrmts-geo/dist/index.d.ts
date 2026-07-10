@@ -1,4 +1,4 @@
-export { bboxToCells, filterCellsAndRes, filterCellsByCover, planGeoQuery, } from './planner.js';
+export { bboxToCells, filterCellsAndRes, filterCellsByCover, planGeoQuery, planGeoQueryFromInventory, } from './planner.js';
 export type { BBox, GeoPlanSegment, GeoQueryPlan, PlanGeoQueryInput, } from './planner.js';
 export { serveGeoQuery } from './serve.js';
 export type { ServeGeoOptions } from './serve.js';

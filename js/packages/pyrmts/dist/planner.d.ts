@@ -1,3 +1,4 @@
+import { type RecordedShard } from './shard-index.js';
 import type { Bin, Duration, Pyramid, Shard, Tier } from './types.js';
 export type SmoothMode = 'centered' | 'trailing';
 export type SmoothingSpec = Duration | {
@@ -44,4 +45,5 @@ export interface QueryPlan {
     } | null;
 }
 export declare function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan;
+export declare function planQueryFromInventory(pyramid: Pyramid, input: PlanQueryInput, registeredShards: RecordedShard[]): QueryPlan;
 //# sourceMappingURL=planner.d.ts.map

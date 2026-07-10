@@ -39,21 +39,33 @@ export class D1ShardIndex {
         }
         return out;
     }
-    async listShards(pyramidName) {
+    async listShards(pyramidName, filter) {
         if (this.skipInventory) {
             throw new Error(`D1ShardIndex.listShards: skipInventory was enabled at construction; ` +
                 `no per-shard inventory was recorded. Re-create with ` +
                 `{ skipInventory: false } to use gap discovery.`);
         }
-        const sql = `SELECT tier, shard_dur, period_start, period_end, key ` +
-            `FROM ${quoteIdent(this.shardsTable)} WHERE pyramid = ?`;
-        const res = await this.db.prepare(sql).bind(pyramidName).all();
+        const clauses = ['pyramid = ?'];
+        const binds = [pyramidName];
+        if (filter?.tier !== undefined) {
+            clauses.push('tier = ?');
+            binds.push(filter.tier);
+        }
+        if (filter?.range !== undefined) {
+            // Intersect: period_end > range.from AND period_start < range.to.
+            clauses.push('period_end > ?', 'period_start < ?');
+            binds.push(filter.range.from.getTime(), filter.range.to.getTime());
+        }
+        const sql = `SELECT tier, shard_dur, period_start, period_end, key, written_at ` +
+            `FROM ${quoteIdent(this.shardsTable)} WHERE ${clauses.join(' AND ')}`;
+        const res = await this.db.prepare(sql).bind(...binds).all();
         return res.results.map(row => ({
             tier: row.tier,
             shardDur: row.shard_dur,
             periodStart: new Date(row.period_start),
             periodEnd: new Date(row.period_end),
             key: row.key,
+            writtenAt: new Date(row.written_at),
         }));
     }
     async recordShard(input) {

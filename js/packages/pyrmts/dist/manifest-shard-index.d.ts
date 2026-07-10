@@ -1,4 +1,4 @@
-import { type RecordShardInput, type RecordedShard, type ShardIndex, type Storage } from './index.js';
+import { type ListShardsFilter, type RecordShardInput, type RecordedShard, type ShardIndex, type Storage } from './index.js';
 export interface ManifestShardIndexOptions {
     manifestKey?: string | ((pyramidName: string) => string);
     includeInventory?: boolean;
@@ -11,7 +11,7 @@ export declare class ManifestShardIndex implements ShardIndex {
     private readonly now;
     constructor(storage: Storage, opts?: ManifestShardIndexOptions);
     getWatermarks(pyramidName: string): Promise<Map<string, Date>>;
-    listShards(pyramidName: string): Promise<RecordedShard[]>;
+    listShards(pyramidName: string, filter?: ListShardsFilter): Promise<RecordedShard[]>;
     recordShard(input: RecordShardInput): Promise<void>;
 }
 //# sourceMappingURL=manifest-shard-index.d.ts.map

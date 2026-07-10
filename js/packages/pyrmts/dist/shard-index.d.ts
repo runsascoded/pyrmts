@@ -20,11 +20,19 @@ export interface RecordedShard {
     periodStart: Date;
     periodEnd: Date;
     key: string;
+    writtenAt?: Date;
+}
+export interface ListShardsFilter {
+    tier?: string;
+    range?: {
+        from: Date;
+        to: Date;
+    };
 }
 export interface ShardIndex {
     getWatermarks(pyramidName: string): Promise<Map<string, Date>>;
     recordShard(input: RecordShardInput): Promise<void>;
-    listShards(pyramidName: string): Promise<RecordedShard[]>;
+    listShards(pyramidName: string, filter?: ListShardsFilter): Promise<RecordedShard[]>;
 }
 export interface CachedShardIndexOptions {
     ttlMs?: number;
@@ -39,7 +47,7 @@ export declare class CachedShardIndex implements ShardIndex {
     constructor(underlying: ShardIndex, opts?: CachedShardIndexOptions);
     getWatermarks(pyramidName: string): Promise<Map<string, Date>>;
     recordShard(input: RecordShardInput): Promise<void>;
-    listShards(pyramidName: string): Promise<RecordedShard[]>;
+    listShards(pyramidName: string, filter?: ListShardsFilter): Promise<RecordedShard[]>;
     clear(): void;
 }
 //# sourceMappingURL=shard-index.d.ts.map

@@ -1,7 +1,10 @@
+import { type ShardIndex } from 'pyrmts';
 import type { GeoPyramid } from './spatial-index.js';
 export interface ServeGeoOptions {
     pyramid: GeoPyramid;
     request: Request;
+    pyramidName?: string;
+    shardIndex?: ShardIndex;
     watermarks?: Record<string, Date> | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>);
     earliestWatermarks?: Record<string, Date> | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>);
     earliestPerShard?: Record<string, Date> | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>);

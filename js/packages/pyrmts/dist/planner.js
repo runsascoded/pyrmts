@@ -522,4 +522,367 @@ function extendForSmoothing(from, to, outputBin, smoothBinCount, mode) {
         to: addSpan(to, { count: tailBins * outSpan.count, unit: outSpan.unit }),
     };
 }
+// -----------------------------------------------------------------------------
+// Inventory-driven planning (min-cover-aware).
+//
+// `planQuery` above assumes the per-`(tier, shardDur)` watermark implies
+// dense coverage — i.e. if `effective ≥ periodEnd`, the shard at that
+// period exists. Under min-cover maintenance this is FALSE: rungs get
+// their tiles superseded by larger-rung consolidation, and the "last
+// constituent" of every closing rung is never materialized (it closes
+// and is superseded in the same tick).
+//
+// `planQueryFromInventory` fixes this by picking tiles from the
+// materialized inventory (a snapshot of `ShardIndex.listShards`) rather
+// than synthesizing keys. Watermarks retain their freshness/trust role
+// (`authoritativeEnd`, earliest-gates); only "does this tile exist?"
+// moves to inventory. See `specs/done/inventory-driven-read-walk.md`.
+// Rank tier's shard ladder (ascending). Returns -1 for unknown values so
+// stale rows whose shardDur is no longer in the ladder sort last.
+function shardOrderIndex(tier) {
+    const out = new Map();
+    for (let i = 0; i < tier.shards.length; i++) {
+        out.set(tier.shards[i], i);
+    }
+    return out;
+}
+// Pick the deterministic best row among candidates that all cover the
+// same cursor position. Tiebreak per
+// `specs/done/inventory-driven-read-walk.md`: largest `shardDur`
+// (widest span in `tier.shards`), then most-recent `periodStart`, then
+// most-recent `writtenAt`.
+function pickBestCovering(candidates, tier) {
+    const rank = shardOrderIndex(tier);
+    let best = candidates[0];
+    for (let i = 1; i < candidates.length; i++) {
+        const cur = candidates[i];
+        const rCur = rank.get(cur.shardDur) ?? -1;
+        const rBest = rank.get(best.shardDur) ?? -1;
+        if (rCur !== rBest) {
+            if (rCur > rBest)
+                best = cur;
+            continue;
+        }
+        const psCur = cur.periodStart.getTime();
+        const psBest = best.periodStart.getTime();
+        if (psCur !== psBest) {
+            if (psCur > psBest)
+                best = cur;
+            continue;
+        }
+        const wCur = cur.writtenAt?.getTime() ?? 0;
+        const wBest = best.writtenAt?.getTime() ?? 0;
+        if (wCur > wBest)
+            best = cur;
+    }
+    return best;
+}
+function buildTierInventory(rows) {
+    const out = new Map();
+    for (const row of rows) {
+        let bucket = out.get(row.tier);
+        if (bucket === undefined) {
+            bucket = [];
+            out.set(row.tier, bucket);
+        }
+        bucket.push(row);
+    }
+    for (const bucket of out.values()) {
+        bucket.sort((a, b) => a.periodStart.getTime() - b.periodStart.getTime());
+    }
+    return out;
+}
+// All registered rows at `tier` whose `[periodStart, periodEnd)` covers
+// `cursorMs`. In min-cover-normal operation this is 0 or 1; stale rows
+// may add more.
+function coveringRows(rows, cursorMs) {
+    const out = [];
+    for (const row of rows) {
+        if (row.periodStart.getTime() > cursorMs)
+            break; // sorted asc; further rows start even later
+        if (row.periodEnd.getTime() > cursorMs)
+            out.push(row);
+    }
+    return out;
+}
+// All registered rows at `tier` fully containing `[atomStartMs,
+// atomEndMs)`. Used by the ragged decomposer to check whether an atom
+// is materialized.
+function fullyContainingRows(rows, atomStartMs, atomEndMs) {
+    const out = [];
+    for (const row of rows) {
+        if (row.periodStart.getTime() > atomStartMs)
+            break;
+        if (row.periodEnd.getTime() >= atomEndMs)
+            out.push(row);
+    }
+    return out;
+}
+export function planQueryFromInventory(pyramid, input, registeredShards) {
+    if (pyramid.axis !== 'time') {
+        throw new Error(`planQueryFromInventory: axis '${pyramid.axis}' not yet implemented (only 'time')`);
+    }
+    if (pyramid.tiers.length === 0) {
+        throw new Error('planQueryFromInventory: pyramid has no tiers');
+    }
+    const { from, to } = input.range;
+    if (to <= from) {
+        throw new Error(`planQueryFromInventory: empty range (${from.toISOString()} → ${to.toISOString()})`);
+    }
+    validateLadders(pyramid);
+    const tierInventory = buildTierInventory(registeredShards);
+    if (input.targetBin !== undefined) {
+        return planRaggedFromInventory(pyramid, input, input.targetBin, tierInventory);
+    }
+    const outputTier = pickTier(pyramid.tiers, from, to, input.binBudget);
+    const outputIdx = pyramid.tiers.indexOf(outputTier);
+    const earliest = effectiveEarliestWatermarks(pyramid.tiers, input.earliestWatermarks ?? {});
+    const earliestPerShard = input.earliestPerShard ?? {};
+    const smoothMode = input.smoothMode ?? 'centered';
+    const smoothing = input.smoothing !== undefined
+        ? resolveSmoothing(input.smoothing, outputTier.bin, from, to, smoothMode)
+        : null;
+    const { from: plannedFrom, to: plannedTo } = smoothing
+        ? extendForSmoothing(from, to, outputTier.bin, smoothing.smoothBinCount, smoothMode)
+        : { from, to };
+    const segments = [];
+    let cursor = plannedFrom;
+    walk: while (cursor.getTime() < plannedTo.getTime()) {
+        const cursorMs = cursor.getTime();
+        for (let i = outputIdx; i >= 0; i--) {
+            const tier = pyramid.tiers[i];
+            const rows = tierInventory.get(tier.name);
+            if (rows === undefined)
+                continue;
+            let covering = coveringRows(rows, cursorMs);
+            if (covering.length === 0)
+                continue;
+            covering = covering.filter(row => {
+                const eps = earliestPerShard[encodeWatermarkKey(tier.name, row.shardDur)];
+                return eps === undefined || eps.getTime() <= row.periodStart.getTime();
+            });
+            if (covering.length === 0)
+                continue;
+            const chosen = pickBestCovering(covering, tier);
+            const earlyT = earliest[tier.name];
+            const segFromMs = earlyT !== undefined && earlyT.getTime() > cursorMs ? earlyT.getTime() : cursorMs;
+            const segToMs = Math.min(plannedTo.getTime(), chosen.periodEnd.getTime());
+            if (segToMs <= segFromMs) {
+                cursor = new Date(segToMs);
+                continue walk;
+            }
+            segments.push({
+                from: new Date(segFromMs),
+                to: new Date(segToMs),
+                shardTier: tier,
+                shardDur: chosen.shardDur,
+                keys: [chosen.key],
+                reaggregate: i !== outputIdx,
+            });
+            cursor = new Date(segToMs);
+            continue walk;
+        }
+        // No tier had inventory covering cursor — uncovered tail; stop walking.
+        break;
+    }
+    // Watermark-derived authoritativeEnd — same semantics as `planQuery`.
+    const grid = effectiveShardWatermarks(pyramid, input.watermarks ?? {}, earliestPerShard);
+    const rawTierName = pyramid.tiers[0].name;
+    const rawGrid = grid.byTier[rawTierName];
+    let rawMaxMs = 0;
+    for (const [, entry] of Object.entries(rawGrid)) {
+        if (entry.effective.getTime() > rawMaxMs)
+            rawMaxMs = entry.effective.getTime();
+    }
+    const rawWm = new Date(rawMaxMs);
+    const authoritativeEnd = rawWm < to ? rawWm : null;
+    return {
+        outputTier,
+        outputBin: outputTier.bin,
+        segments,
+        authoritativeEnd,
+        visibleRange: { from, to },
+        smoothing: smoothing
+            ? {
+                smoothBin: smoothing.smoothBin,
+                smoothBinCount: smoothing.smoothBinCount,
+                smoothMode,
+                smoothSourceTier: outputTier.name,
+            }
+            : null,
+    };
+}
+// Ragged-decomposition variant. Same shape as `planRagged` but the DP
+// only considers a tier-T atom `[cursor, cursor + tier.bin)` if a
+// registered shard at T fully contains it. Emitted segments carry the
+// covering shard's `key`; when a coalesced range spans multiple tiles,
+// each tile contributes one entry to `keys`.
+function planRaggedFromInventory(pyramid, input, targetBin, tierInventory) {
+    const { from, to } = input.range;
+    const tParsed = parseDuration(targetBin);
+    if (tParsed.unit === 'mo' || tParsed.unit === 'y') {
+        throw new Error(`planQueryFromInventory: targetBin '${targetBin}' is calendar-variable; ragged decomposition supports fixed-width units only`);
+    }
+    const targetBinMs = fixedDurationMs(targetBin);
+    const eligibleTiers = [];
+    for (const tier of pyramid.tiers) {
+        const tb = parseDuration(tier.bin);
+        if (tb.unit === 'mo' || tb.unit === 'y')
+            continue;
+        const ms = fixedDurationMs(tier.bin);
+        if (ms > targetBinMs)
+            continue;
+        eligibleTiers.push({ tier, ms });
+    }
+    if (eligibleTiers.length === 0) {
+        throw new Error(`planQueryFromInventory: no tier with fixed-width bin ≤ targetBin '${targetBin}' (pyramid tiers: ${pyramid.tiers.map(t => t.bin).join(', ')})`);
+    }
+    let tierGcd = eligibleTiers[0].ms;
+    for (let i = 1; i < eligibleTiers.length; i++) {
+        tierGcd = gcd(tierGcd, eligibleTiers[i].ms);
+    }
+    if (targetBinMs % tierGcd !== 0) {
+        throw new Error(`planQueryFromInventory: no decomposition of targetBin '${targetBin}' from eligible tiers (gcd ${tierGcd} doesn't divide ${targetBinMs})`);
+    }
+    eligibleTiers.sort((a, b) => a.ms - b.ms);
+    const outputTier = eligibleTiers.find(e => e.ms === targetBinMs)?.tier;
+    const smoothMode = input.smoothMode ?? 'centered';
+    const smoothing = input.smoothing !== undefined
+        ? resolveSmoothing(input.smoothing, targetBin, from, to, smoothMode)
+        : null;
+    const { from: plannedFrom, to: plannedTo } = smoothing
+        ? extendForSmoothing(from, to, targetBin, smoothing.smoothBinCount, smoothMode)
+        : { from, to };
+    const targetSpan = tParsed;
+    const firstBinStart = floorToSpan(plannedFrom, targetSpan);
+    const atoms = [];
+    let binStart = firstBinStart;
+    while (binStart < plannedTo) {
+        const binStartMs = binStart.getTime();
+        const binEnd = addSpan(binStart, targetSpan);
+        const binEndMs = binEnd.getTime();
+        // DP: shortest atom sequence packing [binStartMs, binEndMs), where
+        // each atom [absStart, absEnd) at tier T requires a registered shard
+        // at T that fully contains it.
+        const memo = new Map();
+        const solve = (cursor) => {
+            if (cursor === binEndMs)
+                return [];
+            const cached = memo.get(cursor);
+            if (cached !== undefined)
+                return cached;
+            let best = null;
+            for (const { tier, ms } of eligibleTiers) {
+                if (cursor + ms > binEndMs)
+                    continue;
+                if (cursor % ms !== 0)
+                    continue;
+                const rows = tierInventory.get(tier.name);
+                if (rows === undefined)
+                    continue;
+                if (fullyContainingRows(rows, cursor, cursor + ms).length === 0)
+                    continue;
+                const sub = solve(cursor + ms);
+                if (sub === null)
+                    continue;
+                const candidate = [
+                    { tier, offsetMs: cursor - binStartMs, durationMs: ms },
+                    ...sub,
+                ];
+                if (best === null || candidate.length < best.length)
+                    best = candidate;
+            }
+            memo.set(cursor, best);
+            return best;
+        };
+        const path = solve(binStartMs);
+        if (path === null) {
+            // No registered coverage for this output bin — leave it uncovered
+            // (mirrors planRagged's "eligible-tiers empty → skip" branch, but
+            // without the throw: inventory-driven planning treats an unlisted
+            // bin as intentional).
+            binStart = binEnd;
+            continue;
+        }
+        for (const atom of path) {
+            atoms.push({
+                tier: atom.tier,
+                absStartMs: binStartMs + atom.offsetMs,
+                absEndMs: binStartMs + atom.offsetMs + atom.durationMs,
+            });
+        }
+        binStart = binEnd;
+    }
+    // Coalesce adjacent same-tier atoms, then materialize each coalesced
+    // range against inventory to pull the covering tile key(s).
+    const segments = [];
+    if (atoms.length > 0) {
+        let curr = { ...atoms[0] };
+        const emit = (range) => {
+            const rows = tierInventory.get(range.tier.name) ?? [];
+            // Walk the range through inventory in period order, picking one
+            // tile per stretch. Under min-cover a single largest-fitting tile
+            // usually spans the whole coalesced range.
+            const keys = [];
+            let chosenShardDur = range.tier.shards[range.tier.shards.length - 1];
+            let widestOrder = -1;
+            const rank = shardOrderIndex(range.tier);
+            let cur = range.absStartMs;
+            while (cur < range.absEndMs) {
+                const covering = coveringRows(rows, cur);
+                if (covering.length === 0)
+                    break; // should not happen — atoms already checked
+                const chosen = pickBestCovering(covering, range.tier);
+                keys.push(chosen.key);
+                const r = rank.get(chosen.shardDur) ?? -1;
+                if (r > widestOrder) {
+                    widestOrder = r;
+                    chosenShardDur = chosen.shardDur;
+                }
+                const nextCur = chosen.periodEnd.getTime();
+                if (nextCur <= cur)
+                    break; // defensive; prevents infinite loop
+                cur = nextCur;
+            }
+            segments.push({
+                from: new Date(range.absStartMs),
+                to: new Date(range.absEndMs),
+                shardTier: range.tier,
+                shardDur: chosenShardDur,
+                keys,
+                reaggregate: fixedDurationMs(range.tier.bin) !== targetBinMs,
+            });
+        };
+        for (let i = 1; i < atoms.length; i++) {
+            const next = atoms[i];
+            if (next.tier === curr.tier && next.absStartMs === curr.absEndMs) {
+                curr.absEndMs = next.absEndMs;
+            }
+            else {
+                emit(curr);
+                curr = { ...next };
+            }
+        }
+        emit(curr);
+    }
+    // authoritativeEnd — watermark-derived (same as planRagged).
+    const effective = effectiveLargestShardWatermarks(pyramid.tiers, input.watermarks ?? {}, plannedTo);
+    const rawWm = effective[pyramid.tiers[0].name];
+    const authoritativeEnd = rawWm < to ? rawWm : null;
+    return {
+        ...(outputTier !== undefined ? { outputTier } : {}),
+        outputBin: targetBin,
+        segments,
+        authoritativeEnd,
+        visibleRange: { from, to },
+        smoothing: smoothing
+            ? {
+                smoothBin: smoothing.smoothBin,
+                smoothBinCount: smoothing.smoothBinCount,
+                smoothMode,
+                smoothSourceTier: outputTier?.name ?? `<ragged:${targetBin}>`,
+            }
+            : null,
+    };
+}
 //# sourceMappingURL=planner.js.map

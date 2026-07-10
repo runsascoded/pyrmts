@@ -89,13 +89,17 @@ function parseManifest(bytes) {
                 return null;
             if (typeof r.key !== 'string')
                 return null;
-            shards.push({
+            const rec = {
                 tier: r.tier,
                 shardDur: r.shardDur,
                 periodStart: r.periodStart,
                 periodEnd: r.periodEnd,
                 key: r.key,
-            });
+            };
+            if (typeof r.writtenAt === 'number' && Number.isFinite(r.writtenAt)) {
+                rec.writtenAt = r.writtenAt;
+            }
+            shards.push(rec);
         }
         out.shards = shards;
     }
@@ -126,7 +130,7 @@ export class ManifestShardIndex {
         }
         return out;
     }
-    async listShards(pyramidName) {
+    async listShards(pyramidName, filter) {
         if (!this.includeInventory) {
             throw new Error(`ManifestShardIndex.listShards: includeInventory was disabled at ` +
                 `construction; no per-shard inventory was recorded. Re-create with ` +
@@ -139,13 +143,27 @@ export class ManifestShardIndex {
         const manifest = parseManifest(bytes);
         if (manifest === null || manifest.shards === undefined)
             return [];
-        return manifest.shards.map(s => ({
-            tier: s.tier,
-            shardDur: s.shardDur,
-            periodStart: new Date(s.periodStart),
-            periodEnd: new Date(s.periodEnd),
-            key: s.key,
-        }));
+        const tierFilter = filter?.tier;
+        const rangeFromMs = filter?.range?.from.getTime();
+        const rangeToMs = filter?.range?.to.getTime();
+        const out = [];
+        for (const s of manifest.shards) {
+            if (tierFilter !== undefined && s.tier !== tierFilter)
+                continue;
+            if (rangeFromMs !== undefined && s.periodEnd <= rangeFromMs)
+                continue;
+            if (rangeToMs !== undefined && s.periodStart >= rangeToMs)
+                continue;
+            out.push({
+                tier: s.tier,
+                shardDur: s.shardDur,
+                periodStart: new Date(s.periodStart),
+                periodEnd: new Date(s.periodEnd),
+                key: s.key,
+                ...(s.writtenAt !== undefined ? { writtenAt: new Date(s.writtenAt) } : {}),
+            });
+        }
+        return out;
     }
     async recordShard(input) {
         const key = resolveKey(this.opts.manifestKey, input.pyramidName);
@@ -171,6 +189,7 @@ export class ManifestShardIndex {
                 periodStart: periodStartMs,
                 periodEnd: periodEndMs,
                 key: input.key,
+                writtenAt: now,
             };
             if (i === -1)
                 shards.push(record);

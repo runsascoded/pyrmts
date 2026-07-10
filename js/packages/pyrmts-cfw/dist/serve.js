@@ -10,7 +10,7 @@
 // Watermarks aren't a query param — they're consumer-supplied (this worker
 // knows where its raw shards end). Pass a `watermarks` callback to compute
 // them lazily on each request, or precompute and pass the map directly.
-import { planQuery, stitch, } from 'pyrmts';
+import { planQuery, planQueryFromInventory, stitch, } from 'pyrmts';
 export async function serveQuery(opts) {
     const { pyramid, request, cors } = opts;
     const url = new URL(request.url);
@@ -47,7 +47,7 @@ export async function serveQuery(opts) {
     const earliestPerShard = await resolveWatermarks(opts.earliestPerShard, request);
     let result;
     try {
-        const plan = planQuery(pyramid, {
+        const planInput = {
             range: { from, to },
             binBudget,
             watermarks,
@@ -56,7 +56,20 @@ export async function serveQuery(opts) {
             filter,
             ...(smoothing !== undefined ? { smoothing } : {}),
             ...(smoothMode !== undefined ? { smoothMode } : {}),
-        });
+        };
+        let plan;
+        if (opts.shardIndex !== undefined) {
+            if (opts.pyramidName === undefined) {
+                throw new Error('serveQuery: pyramidName is required when shardIndex is set');
+            }
+            const registered = await opts.shardIndex.listShards(opts.pyramidName, {
+                range: { from, to },
+            });
+            plan = planQueryFromInventory(pyramid, planInput, registered);
+        }
+        else {
+            plan = planQuery(pyramid, planInput);
+        }
         const shardRows = await Promise.all(plan.segments.map(seg => pyramid.storage.fetchSegment(seg, {
             binCol: pyramid.binCol,
             range: { from: seg.from, to: seg.to },

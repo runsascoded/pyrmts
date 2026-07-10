@@ -11,7 +11,7 @@
 // The planner consumes `Pyramid.geo` via the `SpatialIndex` abstraction
 // (`spatial-index.ts`); pyramids without an explicit `index` default to
 // `h3Index` (back-compat for rides-v1 / avail-v2 / etc).
-import { planQuery, } from 'pyrmts';
+import { planQuery, planQueryFromInventory, } from 'pyrmts';
 import { getSpatialIndex, h3Index } from './h3-index.js';
 // Standalone bbox→cells helper. Thin wrapper over `h3Index.bboxToCells`
 // for back-compat; pyramids with a non-H3 `index` should call
@@ -60,6 +60,64 @@ export function planGeoQuery(pyramid, input) {
     // Each segment carries the same cell list — every materialized resolution
     // lives in every shard, so the cell predicate is the same regardless of
     // which (finer) time tier the segment reads from.
+    const segments = timePlan.segments.map(seg => ({
+        from: seg.from,
+        to: seg.to,
+        shardTier: seg.shardTier,
+        shardDur: seg.shardDur,
+        keys: seg.keys,
+        reaggregate: seg.reaggregate,
+        cells: outputCells,
+    }));
+    return {
+        ...(timePlan.outputTier !== undefined ? { outputTier: timePlan.outputTier } : {}),
+        outputBin: timePlan.outputBin,
+        outputRes,
+        outputCells,
+        segments,
+        authoritativeEnd: timePlan.authoritativeEnd,
+        visibleRange: timePlan.visibleRange,
+        smoothing: timePlan.smoothing,
+    };
+}
+// Min-cover-aware variant: takes a snapshot of registered shards
+// (`shardIndex.listShards(...)`) and plans reads against it instead of
+// synthesizing keys from the ladder × watermark grid. Same shape as
+// `planGeoQuery` otherwise. See
+// `specs/done/inventory-driven-read-walk.md`.
+export function planGeoQueryFromInventory(pyramid, input, registeredShards) {
+    if (pyramid.geo === undefined) {
+        throw new Error('planGeoQueryFromInventory: pyramid has no `geo` config (use planQueryFromInventory for time-only)');
+    }
+    const resolutions = pyramid.geo.resolutions;
+    if (resolutions.length === 0) {
+        throw new Error('planGeoQueryFromInventory: pyramid.geo.resolutions is empty');
+    }
+    const haveBBox = input.bbox !== undefined;
+    const haveCells = input.outputCells !== undefined;
+    if (!haveBBox && !haveCells) {
+        throw new Error('planGeoQueryFromInventory: pass either `bbox` or `outputCells`');
+    }
+    if (haveBBox && haveCells) {
+        throw new Error('planGeoQueryFromInventory: pass `bbox` xor `outputCells`, not both');
+    }
+    if (haveBBox && input.cellBudget === undefined) {
+        throw new Error('planGeoQueryFromInventory: `cellBudget` required when `bbox` is provided');
+    }
+    const index = getSpatialIndex(pyramid);
+    const timePlan = planQueryFromInventory(pyramid, {
+        range: input.range,
+        binBudget: input.binBudget,
+        ...(input.watermarks !== undefined ? { watermarks: input.watermarks } : {}),
+        ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
+        ...(input.earliestPerShard !== undefined ? { earliestPerShard: input.earliestPerShard } : {}),
+        ...(input.filter !== undefined ? { filter: input.filter } : {}),
+        ...(input.smoothing !== undefined ? { smoothing: input.smoothing } : {}),
+        ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),
+    }, registeredShards);
+    const { outputRes, outputCells } = input.outputCells !== undefined
+        ? { outputRes: input.outputCells.res, outputCells: [...input.outputCells.cells] }
+        : pickResolution(index, input.bbox, resolutions, input.cellBudget);
     const segments = timePlan.segments.map(seg => ({
         from: seg.from,
         to: seg.to,

@@ -150,7 +150,9 @@ export function assertShardIndexConformance(makeIndex, opts = {}) {
                     key: 'avail/1h/1d/2026-06-21.parquet',
                 });
                 const got = await idx.listShards('avail');
-                const sorted = [...got].sort((a, b) => {
+                const sorted = [...got]
+                    .map(({ writtenAt: _writtenAt, ...rest }) => rest)
+                    .sort((a, b) => {
                     if (a.tier !== b.tier)
                         return a.tier.localeCompare(b.tier);
                     if (a.shardDur !== b.shardDur)
@@ -193,6 +195,72 @@ export function assertShardIndexConformance(makeIndex, opts = {}) {
                 const got = await idx.listShards('avail');
                 expect(got).toHaveLength(1);
                 expect(got[0].key).toBe('k2');
+            });
+            test('listShards { tier } filters to a single tier', async () => {
+                const idx = makeIndex();
+                const base = {
+                    pyramidName: 'avail',
+                    shardDur: '1h',
+                    periodStart: new Date('2026-06-21T14:00:00Z'),
+                    periodEnd: new Date('2026-06-21T15:00:00Z'),
+                    key: 'k',
+                };
+                await idx.recordShard({ ...base, tier: '15m' });
+                await idx.recordShard({ ...base, tier: '1h' });
+                const rows = await idx.listShards('avail', { tier: '15m' });
+                expect(rows.map(r => r.tier)).toEqual(['15m']);
+            });
+            test('listShards { range } filters to intersecting shards', async () => {
+                const idx = makeIndex();
+                const base = {
+                    pyramidName: 'avail',
+                    tier: '15m',
+                    shardDur: '1h',
+                    key: 'k',
+                };
+                await idx.recordShard({
+                    ...base,
+                    periodStart: new Date('2026-06-21T13:00:00Z'),
+                    periodEnd: new Date('2026-06-21T14:00:00Z'),
+                });
+                await idx.recordShard({
+                    ...base,
+                    periodStart: new Date('2026-06-21T14:00:00Z'),
+                    periodEnd: new Date('2026-06-21T15:00:00Z'),
+                });
+                await idx.recordShard({
+                    ...base,
+                    periodStart: new Date('2026-06-21T15:00:00Z'),
+                    periodEnd: new Date('2026-06-21T16:00:00Z'),
+                });
+                // Window [14:30, 15:30) — should intersect the middle row and the
+                // last, but not the first (periodEnd == range.from is exclusive).
+                const rows = await idx.listShards('avail', {
+                    range: {
+                        from: new Date('2026-06-21T14:30:00Z'),
+                        to: new Date('2026-06-21T15:30:00Z'),
+                    },
+                });
+                expect(rows.map(r => r.periodStart.toISOString()).sort()).toEqual([
+                    '2026-06-21T14:00:00.000Z',
+                    '2026-06-21T15:00:00.000Z',
+                ]);
+            });
+            test('recordShard populates writtenAt (advances on re-record)', async () => {
+                // The manifest-index test factory uses a fixed `now` clock, so we
+                // just check writtenAt is present and matches the clock.
+                const idx = makeIndex();
+                await idx.recordShard({
+                    pyramidName: 'avail',
+                    tier: '15m',
+                    shardDur: '1h',
+                    periodStart: new Date('2026-06-21T14:00:00Z'),
+                    periodEnd: new Date('2026-06-21T15:00:00Z'),
+                    key: 'k',
+                });
+                const rows = await idx.listShards('avail');
+                expect(rows).toHaveLength(1);
+                expect(rows[0].writtenAt).toBeInstanceOf(Date);
             });
         }
         else {

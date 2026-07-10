@@ -11,7 +11,7 @@
 //   <dim>=<v>    one per pyramid dim used in the key template
 import { stitch, } from 'pyrmts';
 import { getSpatialIndex } from './h3-index.js';
-import { filterCellsAndRes, planGeoQuery } from './planner.js';
+import { filterCellsAndRes, planGeoQuery, planGeoQueryFromInventory } from './planner.js';
 export async function serveGeoQuery(opts) {
     const { pyramid, request, cors } = opts;
     if (pyramid.geo === undefined) {
@@ -60,7 +60,7 @@ export async function serveGeoQuery(opts) {
     const earliestPerShard = await resolveWatermarks(opts.earliestPerShard, request);
     let result;
     try {
-        const plan = planGeoQuery(pyramid, {
+        const planInput = {
             range: { from, to },
             binBudget,
             bbox,
@@ -71,7 +71,20 @@ export async function serveGeoQuery(opts) {
             filter,
             ...(smoothing !== undefined ? { smoothing } : {}),
             ...(smoothMode !== undefined ? { smoothMode } : {}),
-        });
+        };
+        let plan;
+        if (opts.shardIndex !== undefined) {
+            if (opts.pyramidName === undefined) {
+                throw new Error('serveGeoQuery: pyramidName is required when shardIndex is set');
+            }
+            const registered = await opts.shardIndex.listShards(opts.pyramidName, {
+                range: { from, to },
+            });
+            plan = planGeoQueryFromInventory(pyramid, planInput, registered);
+        }
+        else {
+            plan = planGeoQuery(pyramid, planInput);
+        }
         const index = getSpatialIndex(pyramid);
         const shardRows = await Promise.all(plan.segments.map(seg => pyramid.storage.fetchSegment(seg, {
             binCol: pyramid.binCol,

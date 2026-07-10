@@ -1,5 +1,5 @@
 import { parquetWriteBuffer } from 'hyparquet-writer'
-import { memStorage, parquetBackend, type Pyramid } from 'pyrmts'
+import { ManifestShardIndex, memStorage, parquetBackend, type Pyramid } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
 import { serveQuery } from './serve.js'
 
@@ -370,6 +370,90 @@ describe('serveQuery', () => {
     expect(res.status).toBe(400)
     expect(await res.json()).toEqual({
       error: "invalid smooth 'garbage' (expected Duration like '4h' or 'auto[N]')",
+    })
+  })
+
+  test('shardIndex path plans from inventory (min-cover-aware)', async () => {
+    // Register only the h1 shard as inventory; watermark declares 1mo
+    // sealed. `planQuery` (no shardIndex) would still emit the correct
+    // key here (the shard exists), so this test's purpose is to prove
+    // the wiring — a subsequent test proves it also SKIPS phantom keys.
+    const pyramid = buildPyramid()
+    const shardIndex = new ManifestShardIndex(memStorage(), { includeInventory: true, now: () => 0 })
+    await shardIndex.recordShard({
+      pyramidName: 'awair',
+      tier: 'h1',
+      shardDur: '1mo',
+      periodStart: new Date('2026-01-01T00:00:00Z'),
+      periodEnd: new Date('2026-02-01T00:00:00Z'),
+      key: 'awair-17617/h1/2026-01.parquet',
+    })
+    const res = await serveQuery({
+      pyramid,
+      pyramidName: 'awair',
+      shardIndex,
+      request: new Request(
+        'https://serve.example/?'
+        + 'from=2026-01-01T00:00:00Z'
+        + '&to=2026-01-01T03:00:00Z'
+        + '&bin_budget=100'
+        + '&device_id=17617',
+      ),
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as ResponseBody
+    expect(body.plan.segments).toEqual([{
+      tier: 'h1',
+      shardDur: '1mo',
+      from: '2026-01-01T00:00:00.000Z',
+      to: '2026-01-01T03:00:00.000Z',
+      reaggregate: false,
+      keys: ['awair-17617/h1/2026-01.parquet'],
+    }])
+  })
+
+  test('shardIndex path skips phantom shards even when watermarks lie', async () => {
+    // Empty inventory but the watermark says h1 is sealed. Old planQuery
+    // would emit `awair-17617/h1/2026-01.parquet` and 500 on fetch (the
+    // ctbk bug). New shardIndex path emits zero segments — no phantom.
+    const pyramid = buildPyramid()
+    const shardIndex = new ManifestShardIndex(memStorage(), { includeInventory: true, now: () => 0 })
+    // No recordShard call — inventory is empty.
+    const res = await serveQuery({
+      pyramid,
+      pyramidName: 'awair',
+      shardIndex,
+      watermarks: { 'h1@1mo': new Date('2027-01-01T00:00:00Z') },  // lies
+      request: new Request(
+        'https://serve.example/?'
+        + 'from=2026-01-01T00:00:00Z'
+        + '&to=2026-01-01T03:00:00Z'
+        + '&bin_budget=100'
+        + '&device_id=17617',
+      ),
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as ResponseBody
+    expect(body.plan.segments).toEqual([])
+    expect(body.records).toEqual([])
+  })
+
+  test('shardIndex without pyramidName is a 400', async () => {
+    const pyramid = buildPyramid()
+    const shardIndex = new ManifestShardIndex(memStorage(), { includeInventory: true, now: () => 0 })
+    const res = await serveQuery({
+      pyramid,
+      shardIndex,  // no pyramidName
+      request: new Request(
+        'https://serve.example/?'
+        + 'from=2026-01-01T00:00:00Z'
+        + '&to=2026-01-01T03:00:00Z'
+        + '&device_id=17617',
+      ),
+    })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({
+      error: 'serveQuery: pyramidName is required when shardIndex is set',
     })
   })
 

@@ -13,8 +13,10 @@
 
 import {
   planQuery,
+  planQueryFromInventory,
   stitch,
   type Pyramid,
+  type ShardIndex,
   type SmoothingSpec,
   type SmoothMode,
 } from 'pyrmts'
@@ -22,6 +24,23 @@ import {
 export interface ServeOptions {
   pyramid: Pyramid
   request: Request
+  // Pyramid name used to fetch the inventory from `shardIndex.listShards`.
+  // Required when `shardIndex` is set. Matches the string the writer
+  // records shards under.
+  pyramidName?: string
+  // Min-cover-aware planning: when set, `serveQuery` calls
+  // `shardIndex.listShards(pyramidName, { range })` and hands the
+  // inventory to `planQueryFromInventory` instead of `planQuery`. Use
+  // for pyramids maintained under min-cover semantics (rungs get
+  // superseded by larger consolidations and never materialize their
+  // "last constituent"). Without this, planning uses the
+  // ladder × watermark grid and can synthesize keys for tiles that
+  // don't exist.
+  //
+  // Pass a `CachedShardIndex` if you want per-isolate `listShards`
+  // memoization. Watermarks (`watermarks` below) are still consulted for
+  // freshness gates (`authoritativeEnd`, `earliestPerShard`).
+  shardIndex?: ShardIndex
   // Per-tier latest-complete-bin instants. Missing tiers default to "complete
   // through `to`" (see planQuery semantics).
   watermarks?:
@@ -92,7 +111,7 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
 
   let result: { records: unknown[]; plan: unknown }
   try {
-    const plan = planQuery(pyramid, {
+    const planInput = {
       range: { from, to },
       binBudget,
       watermarks,
@@ -101,7 +120,19 @@ export async function serveQuery(opts: ServeOptions): Promise<Response> {
       filter,
       ...(smoothing !== undefined ? { smoothing } : {}),
       ...(smoothMode !== undefined ? { smoothMode } : {}),
-    })
+    }
+    let plan
+    if (opts.shardIndex !== undefined) {
+      if (opts.pyramidName === undefined) {
+        throw new Error('serveQuery: pyramidName is required when shardIndex is set')
+      }
+      const registered = await opts.shardIndex.listShards(opts.pyramidName, {
+        range: { from, to },
+      })
+      plan = planQueryFromInventory(pyramid, planInput, registered)
+    } else {
+      plan = planQuery(pyramid, planInput)
+    }
     const shardRows = await Promise.all(
       plan.segments.map(seg => pyramid.storage.fetchSegment(seg, {
         binCol: pyramid.binCol,

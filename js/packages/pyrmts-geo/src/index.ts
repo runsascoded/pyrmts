@@ -6,6 +6,7 @@ export {
   filterCellsAndRes,
   filterCellsByCover,
   planGeoQuery,
+  planGeoQueryFromInventory,
 } from './planner.js'
 export type {
   BBox,

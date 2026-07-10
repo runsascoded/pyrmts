@@ -13,6 +13,7 @@
 // `specs/done/unified-shard-ladder.md` §Watermark grid.
 
 import {
+  type ListShardsFilter,
   type RecordShardInput,
   type RecordedShard,
   type Shard,
@@ -68,7 +69,7 @@ export class D1ShardIndex implements ShardIndex {
     return out
   }
 
-  async listShards(pyramidName: string): Promise<RecordedShard[]> {
+  async listShards(pyramidName: string, filter?: ListShardsFilter): Promise<RecordedShard[]> {
     if (this.skipInventory) {
       throw new Error(
         `D1ShardIndex.listShards: skipInventory was enabled at construction; ` +
@@ -76,15 +77,27 @@ export class D1ShardIndex implements ShardIndex {
         `{ skipInventory: false } to use gap discovery.`,
       )
     }
+    const clauses = ['pyramid = ?']
+    const binds: (string | number)[] = [pyramidName]
+    if (filter?.tier !== undefined) {
+      clauses.push('tier = ?')
+      binds.push(filter.tier)
+    }
+    if (filter?.range !== undefined) {
+      // Intersect: period_end > range.from AND period_start < range.to.
+      clauses.push('period_end > ?', 'period_start < ?')
+      binds.push(filter.range.from.getTime(), filter.range.to.getTime())
+    }
     const sql =
-      `SELECT tier, shard_dur, period_start, period_end, key ` +
-      `FROM ${quoteIdent(this.shardsTable)} WHERE pyramid = ?`
-    const res = await this.db.prepare(sql).bind(pyramidName).all<{
+      `SELECT tier, shard_dur, period_start, period_end, key, written_at ` +
+      `FROM ${quoteIdent(this.shardsTable)} WHERE ${clauses.join(' AND ')}`
+    const res = await this.db.prepare(sql).bind(...binds).all<{
       tier: string
       shard_dur: string
       period_start: number
       period_end: number
       key: string
+      written_at: number
     }>()
     return res.results.map(row => ({
       tier: row.tier,
@@ -92,6 +105,7 @@ export class D1ShardIndex implements ShardIndex {
       periodStart: new Date(row.period_start),
       periodEnd: new Date(row.period_end),
       key: row.key,
+      writtenAt: new Date(row.written_at),
     }))
   }
 

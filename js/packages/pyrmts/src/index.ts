@@ -35,7 +35,7 @@ export {
 
 export type { ParsedTimeSpan } from './axis.js'
 
-export { DEFAULT_AUTO_MULTIPLIER, planQuery } from './planner.js'
+export { DEFAULT_AUTO_MULTIPLIER, planQuery, planQueryFromInventory } from './planner.js'
 export type {
   PlanQueryInput,
   PlanSegment,
@@ -68,6 +68,7 @@ export {
 export type {
   CachedShardIndexOptions,
   DecodedWatermarkKey,
+  ListShardsFilter,
   RecordShardInput,
   RecordedShard,
   ShardIndex,

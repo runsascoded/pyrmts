@@ -322,10 +322,22 @@ function mockD1WithStore(): { db: D1Like } {
         return { results }
       }
       if (sql.startsWith('SELECT tier, shard_dur, period_start, period_end, key')) {
-        const pyramid = binds[0] as string
+        // Order of binds follows the WHERE clauses emitted by
+        // `D1ShardIndex.listShards`: pyramid, then optional tier, then
+        // optional (period_end > from, period_start < to). Detect from SQL
+        // substrings to stay in step with the real impl.
+        let i = 0
+        const pyramid = binds[i++] as string
+        const tierFilter = sql.includes('tier = ?') ? binds[i++] as string : null
+        const rangeFrom = sql.includes('period_end > ?') ? binds[i++] as number : null
+        const rangeTo = sql.includes('period_start < ?') ? binds[i++] as number : null
         const results: ShardRow[] = []
         for (const row of shards.values()) {
-          if (row.pyramid === pyramid) results.push(row)
+          if (row.pyramid !== pyramid) continue
+          if (tierFilter !== null && row.tier !== tierFilter) continue
+          if (rangeFrom !== null && row.period_end <= rangeFrom) continue
+          if (rangeTo !== null && row.period_start >= rangeTo) continue
+          results.push(row)
         }
         return { results }
       }

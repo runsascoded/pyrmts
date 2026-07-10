@@ -14,16 +14,22 @@ import {
   stitch,
   type QueryPlan,
   type Row,
+  type ShardIndex,
   type SmoothingSpec,
   type SmoothMode,
 } from 'pyrmts'
 import { getSpatialIndex } from './h3-index.js'
-import { filterCellsAndRes, planGeoQuery, type BBox } from './planner.js'
+import { filterCellsAndRes, planGeoQuery, planGeoQueryFromInventory, type BBox } from './planner.js'
 import type { GeoPyramid } from './spatial-index.js'
 
 export interface ServeGeoOptions {
   pyramid: GeoPyramid
   request: Request
+  // See pyrmts-cfw `ServeOptions.pyramidName` / `ServeOptions.shardIndex`.
+  // Setting both switches planning to `planGeoQueryFromInventory` for
+  // min-cover safety.
+  pyramidName?: string
+  shardIndex?: ShardIndex
   watermarks?:
     | Record<string, Date>
     | ((req: Request) => Promise<Record<string, Date>> | Record<string, Date>)
@@ -97,7 +103,7 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
 
   let result: { records: unknown[]; plan: unknown }
   try {
-    const plan = planGeoQuery(pyramid, {
+    const planInput = {
       range: { from, to },
       binBudget,
       bbox,
@@ -108,7 +114,19 @@ export async function serveGeoQuery(opts: ServeGeoOptions): Promise<Response> {
       filter,
       ...(smoothing !== undefined ? { smoothing } : {}),
       ...(smoothMode !== undefined ? { smoothMode } : {}),
-    })
+    }
+    let plan
+    if (opts.shardIndex !== undefined) {
+      if (opts.pyramidName === undefined) {
+        throw new Error('serveGeoQuery: pyramidName is required when shardIndex is set')
+      }
+      const registered = await opts.shardIndex.listShards(opts.pyramidName, {
+        range: { from, to },
+      })
+      plan = planGeoQueryFromInventory(pyramid, planInput, registered)
+    } else {
+      plan = planGeoQuery(pyramid, planInput)
+    }
 
     const index = getSpatialIndex(pyramid)
     const shardRows = await Promise.all(

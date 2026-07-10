@@ -32,6 +32,7 @@
 
 import {
   encodeWatermarkKey,
+  type ListShardsFilter,
   type RecordShardInput,
   type RecordedShard,
   type Shard,
@@ -58,6 +59,7 @@ interface ManifestShardRecord {
   periodStart: number
   periodEnd: number
   key: string
+  writtenAt?: number
 }
 
 interface ManifestV1 {
@@ -124,13 +126,17 @@ function parseManifest(bytes: Uint8Array): ManifestV1 | null {
       if (typeof r.shardDur !== 'string') return null
       if (typeof r.periodStart !== 'number' || typeof r.periodEnd !== 'number') return null
       if (typeof r.key !== 'string') return null
-      shards.push({
+      const rec: ManifestShardRecord = {
         tier: r.tier,
         shardDur: r.shardDur,
         periodStart: r.periodStart,
         periodEnd: r.periodEnd,
         key: r.key,
-      })
+      }
+      if (typeof r.writtenAt === 'number' && Number.isFinite(r.writtenAt)) {
+        rec.writtenAt = r.writtenAt
+      }
+      shards.push(rec)
     }
     out.shards = shards
   }
@@ -162,7 +168,7 @@ export class ManifestShardIndex implements ShardIndex {
     return out
   }
 
-  async listShards(pyramidName: string): Promise<RecordedShard[]> {
+  async listShards(pyramidName: string, filter?: ListShardsFilter): Promise<RecordedShard[]> {
     if (!this.includeInventory) {
       throw new Error(
         `ManifestShardIndex.listShards: includeInventory was disabled at ` +
@@ -175,13 +181,24 @@ export class ManifestShardIndex implements ShardIndex {
     if (bytes === null) return []
     const manifest = parseManifest(bytes)
     if (manifest === null || manifest.shards === undefined) return []
-    return manifest.shards.map(s => ({
-      tier: s.tier,
-      shardDur: s.shardDur as Shard,
-      periodStart: new Date(s.periodStart),
-      periodEnd: new Date(s.periodEnd),
-      key: s.key,
-    }))
+    const tierFilter = filter?.tier
+    const rangeFromMs = filter?.range?.from.getTime()
+    const rangeToMs = filter?.range?.to.getTime()
+    const out: RecordedShard[] = []
+    for (const s of manifest.shards) {
+      if (tierFilter !== undefined && s.tier !== tierFilter) continue
+      if (rangeFromMs !== undefined && s.periodEnd <= rangeFromMs) continue
+      if (rangeToMs !== undefined && s.periodStart >= rangeToMs) continue
+      out.push({
+        tier: s.tier,
+        shardDur: s.shardDur as Shard,
+        periodStart: new Date(s.periodStart),
+        periodEnd: new Date(s.periodEnd),
+        key: s.key,
+        ...(s.writtenAt !== undefined ? { writtenAt: new Date(s.writtenAt) } : {}),
+      })
+    }
+    return out
   }
 
   async recordShard(input: RecordShardInput): Promise<void> {
@@ -210,6 +227,7 @@ export class ManifestShardIndex implements ShardIndex {
         periodStart: periodStartMs,
         periodEnd: periodEndMs,
         key: input.key,
+        writtenAt: now,
       }
       if (i === -1) shards.push(record)
       else shards[i] = record

@@ -164,6 +164,7 @@ describe('ManifestShardIndex.recordShard', () => {
         periodStart: new Date('2026-06-21T14:00:00Z').getTime(),
         periodEnd: new Date('2026-06-21T15:00:00Z').getTime(),
         key: 'avail/15m/1h/2026-06-21T14.parquet',
+        writtenAt: 0,
       },
       {
         tier: '15m',
@@ -171,6 +172,7 @@ describe('ManifestShardIndex.recordShard', () => {
         periodStart: new Date('2026-06-21T15:00:00Z').getTime(),
         periodEnd: new Date('2026-06-21T16:00:00Z').getTime(),
         key: 'avail/15m/1h/2026-06-21T15.parquet',
+        writtenAt: 0,
       },
     ])
   })

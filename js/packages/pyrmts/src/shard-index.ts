@@ -49,12 +49,28 @@ export interface RecordShardInput {
 
 // One inventory row in `ShardIndex.listShards`. Mirrors
 // `RecordShardInput` minus `pyramidName` (scoped by the listShards call).
+//
+// `writtenAt` is the epoch-ms instant the row was last upserted — used by
+// the inventory-driven planner to break ties among stale, overlapping
+// rows (see `planQueryFromInventory`). Optional so older manifests
+// without the field parse without loss.
 export interface RecordedShard {
   tier: string
   shardDur: Shard
   periodStart: Date
   periodEnd: Date
   key: string
+  writtenAt?: Date
+}
+
+// Optional filter for `ShardIndex.listShards`. `tier` filters to a single
+// tier; `range` filters to rows whose `[periodStart, periodEnd)`
+// intersects `[range.from, range.to)`. Both are advisory — callers may
+// further filter in memory. Impls should push the filter down when
+// possible (D1: WHERE clause; manifest: post-parse filter).
+export interface ListShardsFilter {
+  tier?: string
+  range?: { from: Date; to: Date }
 }
 
 export interface ShardIndex {
@@ -74,16 +90,20 @@ export interface ShardIndex {
   // by construction).
   recordShard(input: RecordShardInput): Promise<void>
 
-  // List every recorded shard for `pyramidName`. Used by gap discovery
-  // (`listMissingShards`) and audit/debug flows. Order is implementation-
-  // defined; consumers should sort if they need stable output.
+  // List recorded shards for `pyramidName`, optionally filtered by
+  // `filter.tier` and/or `filter.range` (intersection with
+  // `[periodStart, periodEnd)`). Used by gap discovery
+  // (`listMissingShards`), the inventory-driven planner
+  // (`planQueryFromInventory`), and audit/debug flows. Order is
+  // implementation-defined; consumers should sort if they need stable
+  // output.
   //
   // Implementations that don't keep per-shard inventory (e.g.
   // `D1ShardIndex({ skipInventory: true })`, `ManifestShardIndex(
   // { includeInventory: false })`) MUST throw rather than return an
   // empty list — the caller would silently see every expected shard as
   // "missing" otherwise.
-  listShards(pyramidName: string): Promise<RecordedShard[]>
+  listShards(pyramidName: string, filter?: ListShardsFilter): Promise<RecordedShard[]>
 }
 
 export interface CachedShardIndexOptions {
@@ -147,8 +167,8 @@ export class CachedShardIndex implements ShardIndex {
   // Passthrough; intentionally uncached. Gap-discovery callers are
   // already infrequent (fsck/audit), and inventory state churns more
   // than the watermark summary so a TTL would be net-negative.
-  async listShards(pyramidName: string): Promise<RecordedShard[]> {
-    return this.underlying.listShards(pyramidName)
+  async listShards(pyramidName: string, filter?: ListShardsFilter): Promise<RecordedShard[]> {
+    return this.underlying.listShards(pyramidName, filter)
   }
 
   // Test/diagnostic helper: drop the entire cache. Not part of the

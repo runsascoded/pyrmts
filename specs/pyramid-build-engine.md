@@ -159,3 +159,43 @@ the same build = the headline benchmark.
    raw-sync gap (raw `LastModified` > derived `written_at` goes
    undetected). Same discovery layer this engine plans from, but
    separable; track as its own spec.
+
+## Implementation notes (2026-07-18)
+
+Landed as `python/pyrmts_engine` (workspace member alongside `pyrmts`
+/ `pyrmts_geo`): `longform.py`, `plan.py`, `source.py`,
+`shard_index.py`, `engine.py`, `cli.py` (`pyrmts-engine plan|build`).
+Deviations / refinements vs the design above:
+
+- **Long form unifies monoid classes via the `metric` column**: for
+  scalar monoids it holds the *state-column* name (`m_n`/`m_sum`/
+  `m_sumsq` for sum; `m` for count), so a sum metric is three long
+  rows and every cascade edge is the same
+  `group_by(dims, bin, metric, state).sum(count)`.
+- **Dtypes**: `state: Int32` (not the decided int16 — headroom for
+  e.g. minute-valued histogram states, negligible cost);
+  `count: Float64` (exact for integers ≤ 2^53; cast back to Int64 at
+  wide-write for hist counts, count-monoid cols, and `_n`).
+- **Sources are pluggable** (`Source.read_window → long frame`);
+  `WideShardSource` reads an existing materialized rung (declares
+  `provides` so the engine skips re-writing it). App-specific raw
+  ingest (GBFS minutes, rides monthlies) implements `Source`
+  consumer-side.
+- **EMPTY-shard semantics**: zero-row expected shards are written and
+  registered (cover-complete + zero rows — the ctbk outage-scar
+  lesson). NB `cascade_tiers` *skips* these; the engine is the newer
+  semantic.
+- **Parallelism v0 is prefetch, not block-fanout**: a small thread
+  pool reads source windows ahead while polars' own threads
+  parallelize the group_bys. The ordered block-reduce across cores is
+  deferred until a profile shows the outer loop CPU-bound.
+- **Tests** (15): content conformance vs `cascade_tiers` on a
+  3-tier / 3-monoid fixture, an independent hand-derived aggregate
+  anchor, byte-identical output across window sizes (RGIP),
+  exact expected-key-set (== `list_expected_shards`), registration
+  records, EMPTY-shard write+register.
+
+**Validation (pending, ctbk-side)**: rebuild avail-v4 with
+`build_local` + a GBFS `Source` and require content equality vs the
+Lambda fan-out build, per §Validation. Spec stays in `specs/` until
+that passes.

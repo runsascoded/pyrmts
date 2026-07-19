@@ -198,14 +198,33 @@ Deviations / refinements vs the design above:
   exact expected-key-set (== `list_expected_shards`), registration
   records, EMPTY-shard write+register.
 
-**Validation (in progress, ctbk-side —
-`ctbk/specs/pyrmts-engine-validation.md`)**: 4-day smoke over real
-avail data (`/1m@2d` source via `WideShardSource`, window 12h):
-**content parity confirmed** — 8/13 shards EQUAL, 0 DIFF, across 8
-tiers vs the independent Lambda python-dict materializer (incl. an
-11.7M-row `/2m@4d` exact-key match); remaining 5 pending only on the
-fan-out's coarse tail finishing. Spec stays in `specs/` until the
-full-range build + compare passes.
+**Validation (PASSED 2026-07-19, ctbk-side —
+`ctbk/specs/pyrmts-engine-validation.md`)**: after the 4-day smoke
+(8/13 EQUAL, 0 DIFF), the full-history avail build produced 75 shards
+covering **every rung class across all 15 tiers** (all six `/128d`
+tiles, `/30m@64d`, `/3d@96d`, `/7d@896d` included) — **75/75
+content-EQUAL** vs the independent Lambda python-dict materializer,
+with identical min-cover planning. The only unproduced shards were
+trailing tiles with no new code path and ill-defined exact-compares
+against the fan-out's cutoff. ctbk closed its acceptance tasks
+(#164/#166) and cut over to the pinned source (`7fad0f5`).
+
+Post-validation perf findings (backlog, not correctness):
+
+- **Allocator retention**: the run's ~55 GB memory footprint was
+  allocator-retained virtual pages — actual RSS oscillated ~1-15 GB
+  (idle ~1 GB; peaks = large shard closes, e.g. `/15m@32d` at 12.7M
+  wide rows). Consider a post-shard-close allocator trim
+  (`malloc_trim` on glibc) before tightening Batch memory limits
+  below the retained-footprint level.
+- **~2.6-core saturation ceiling** (263 min CPU / 100 min wall):
+  polars doesn't saturate beyond ~2.6-2.7 cores in this workload —
+  the per-window rebin cascade is sequential and frames are modest.
+  This is the profile signal the "ordered block-reduce across cores"
+  deferral (above) was waiting for; also means high-vCPU job sizes
+  are wasted until addressed. Related: the run paid the hist-JSON
+  parse tax on ~5.5B source rows via `WideShardSource`; raw-ingest
+  Sources skip it (maybe 30-50% of wall on its own).
 
 Findings from that smoke, addressed 2026-07-18:
 

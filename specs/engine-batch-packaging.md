@@ -23,8 +23,9 @@ Requested by the ctbk session (2026-07-18), following up `specs/pyramid-build-en
 
 Post-spill (`3c79724`), the local executor is memory-bounded at ≈ one window's long frames + one closing shard's combine:
 
-- ctbk avail full history (~102 d, ~4.5k keys × 5 hist metrics, `12h` window, `/1m@2d` wide source): **RSS steady ~6-8 GB**, spill dir low-single-digit GB (cycles as shards close). (Final wall/peak numbers land in ctbk `specs/pyrmts-engine-validation.md` implementation notes when the run completes — copy them here before implementing.)
-- Suggested job-def defaults: **8-16 vCPU, 32 GB, ≥50 GB scratch** (spill + source cache headroom for bigger consumers), spot. `m7a/c7a.4xlarge`-class or Fargate 16 vCPU/64 GB both fit; polars saturates cores during rebin/combine, so vCPU is the wall-clock dial.
+- ctbk avail full history (~102 d, ~4.5k keys × 5 hist metrics, `12h` window, `/1m@2d` wide source), measured on the full-range validation runs (ctbk spec, 2026-07-19): **RSS oscillates ~1-15 GB** (idle ~1 GB between shard closes; peak = one closing shard's combine — largest observed close `/15m@32d`, 12.7M wide rows, 113 s), **spill dir cycles 1-5 GB**, wall **~2h45m** single-process on an M-series laptop at only **~2.6-2.7 effective cores** (263 min CPU / 100 min wall). Content: 75/75 shards EQUAL vs the Lambda fan-out (tail tiles pending a rerun).
+- Two implications: (1) 32 GB memory is comfortable (peak ~15 GB with headroom for bigger closes), 100 GB ephemeral is ample (spill ≤5 GB observed, budget 10× for bigger consumers); (2) **the wall-clock dial is NOT just vCPU count** — at ~2.6 effective cores, 16 vCPU won't get near 15-45 min without engine-side parallelism (window-level pipelining, or parallel per-tier rebins within a window). Also: this run paid the hist-JSON parse tax on ~5.5B source rows via `WideShardSource`; raw-ingest Sources skip it, which is worth maybe 30-50% of wall on its own.
+- Job-def defaults of 8 vCPU / 32 GiB / 100 GiB (as landed) are fine to keep; more vCPUs are wasted until the executor parallelizes across windows.
 
 ## App-side (ctbk, for reference — not pyrmts work)
 

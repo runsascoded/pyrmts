@@ -150,10 +150,13 @@ the same build = the headline benchmark.
 
 ## Open questions
 
-1. WIP shard-buffer spill policy for max-rung shards whose windows
-   span the whole history (hold in memory is fine at ctbk scale;
-   spill keeps the memory bound honest for larger consumers) —
-   defer until a consumer needs it.
+1. ~~WIP shard-buffer spill policy~~ — **resolved 2026-07-18: spill
+   required and implemented.** ctbk's 4-day smoke hit ~40 GB holding
+   open max-rung buffers in memory (full history extrapolated
+   50-70 GB+). `SpillBuffer` now routes each window's rows to
+   per-open-shard scratch parquet files (appended row-groups);
+   shard close = streaming scan + group_by combine + delete. Peak
+   memory ≈ one window's frames + one closing shard's long form.
 2. Stale-source invalidation (`list_stale_shards`, or
    `list_missing_shards(include_stale=True)`) — surfaced by awair's
    raw-sync gap (raw `LastModified` > derived `written_at` goes
@@ -195,7 +198,23 @@ Deviations / refinements vs the design above:
   exact expected-key-set (== `list_expected_shards`), registration
   records, EMPTY-shard write+register.
 
-**Validation (pending, ctbk-side)**: rebuild avail-v4 with
-`build_local` + a GBFS `Source` and require content equality vs the
-Lambda fan-out build, per §Validation. Spec stays in `specs/` until
-that passes.
+**Validation (in progress, ctbk-side —
+`ctbk/specs/pyrmts-engine-validation.md`)**: 4-day smoke over real
+avail data (`/1m@2d` source via `WideShardSource`, window 12h):
+**content parity confirmed** — 8/13 shards EQUAL, 0 DIFF, across 8
+tiers vs the independent Lambda python-dict materializer (incl. an
+11.7M-row `/2m@4d` exact-key match); remaining 5 pending only on the
+fan-out's coarse tail finishing. Spec stays in `specs/` until the
+full-range build + compare passes.
+
+Findings from that smoke, addressed 2026-07-18:
+
+- **Spill** (finding 1): `SpillBuffer` as above; all engine tests run
+  through the spill path, incl. byte-identical window invariance.
+- **Source re-parse** (finding 2): `WideShardSource` now caches parsed
+  shards across windows (thread-safe, evicted once the cursor passes
+  their period) — each blob is fetched/parsed once regardless of
+  window:shard_dur ratio.
+- **`row_group_size`** (finding 3): plumbed through `build_local`
+  (int for all tiers, or per-tier-name mapping — ctbk's 2048) and the
+  CLI (`-g/--rg-size`).

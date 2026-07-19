@@ -87,22 +87,26 @@ def plan(filters: tuple[str, ...], dot_out: str | None, fs_root: str | None, ran
 
 @cli.command()
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
+@option('-g', '--rg-size', type=int, help="Output-shard parquet row-group size (all tiers; per-tier via the library)")
 @option('-m', '--manifest', help="Record written shards to this JSONL manifest")
 @option('-n', '--pyramid-name', required=True, help="Pyramid name for shard registration")
 @option('-P', '--prefetch', default=2, help="Source windows to read ahead")
 @option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
 @option('-r', '--range', 'range_', required=True, help="Half-open build range, <from-iso>/<to-iso> (UTC)")
+@option('-S', '--spill-dir', help="Scratch dir for WIP spill files (default: fresh temp dir)")
 @option('-s', '--sort', 'sort_csv', help="Override shard sort columns (comma-separated)")
 @option('-v', '--verbose', is_flag=True, help="Per-flush progress on stderr")
 @option('-w', '--window', default='1d', help="Streaming window Duration (default 1d)")
 @argument('config')
 def build(
     filters: tuple[str, ...],
+    rg_size: int | None,
     manifest: str | None,
     pyramid_name: str,
     prefetch: int,
     fs_root: str | None,
     range_: str,
+    spill_dir: str | None,
     sort_csv: str | None,
     verbose: bool,
     window: str,
@@ -122,6 +126,8 @@ def build(
         window=window,
         filter=filter_,
         sort=sort_csv.split(',') if sort_csv else None,
+        row_group_size=rg_size,
+        spill_dir=spill_dir,
         prefetch=prefetch,
         verbose=verbose,
     )

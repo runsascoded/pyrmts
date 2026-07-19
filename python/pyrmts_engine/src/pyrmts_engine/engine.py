@@ -8,17 +8,21 @@ One pass over the source, window by window. Per window:
    predecessor's window frame (`group_by.sum` — one cheap aggregation per
    tier per window; sibling tiers share the predecessor frame, so fused
    fan-outs like `/2m,/3m,/5m ← /1m` scan their input once).
-3. Append each tier's window frame to its WIP buffer.
+3. Route each tier's window rows to the open expected shards they fall in,
+   appending row-groups to per-shard spill files (`SpillBuffer`). Rows
+   belonging to no expected shard (residual tails) are dropped immediately.
 4. Flush every expected shard whose period has closed (cursor ≥
-   `effective_end`): combine the buffer once, slice per shard, materialize
-   wide (hist-JSON built exactly once here), write via `write_tier_parquet`,
-   single `storage.put`, then `shard_index.record_shard` — registration
-   immediately after each PUT.
+   `effective_end`): streaming-combine its spill file (partial bins from
+   different windows merge here — exact, since long-form group_by-sum IS
+   the monoid combine), materialize wide (hist-JSON built exactly once),
+   write via `write_tier_parquet`, single `storage.put`, then
+   `shard_index.record_shard` — registration immediately after each PUT.
 
-Bins wider than the window (e.g. `1mo` tiers) accumulate partial-bin rows
-across windows; the combine at flush merges them — exact, since long-form
-group_by-sum IS the monoid combine. Max-rung WIP buffers accumulate across
-the whole run: no scaffold shards, ever.
+Peak memory ≈ one window's frames + one closing shard's combined long
+form — NOT the sum of open max-rung WIP buffers (ctbk measured ~40 GB
+that way on a 4-day smoke; see the spill module docstring). Max-rung
+shards accumulate on scratch disk across the whole run: no scaffold
+shards, ever.
 
 Zero-row expected shards are written (and registered) as EMPTY shards —
 cover-complete + zero rows is a legitimate state (outage windows), not a
@@ -27,12 +31,14 @@ from __future__ import annotations
 
 import io
 import sys
+import tempfile
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Sequence
+from pathlib import Path
+from typing import Mapping, Sequence
 
 import polars as pl
 
@@ -43,10 +49,12 @@ from pyrmts import (
     shard_periods_covering,
     write_tier_parquet,
 )
-from .longform import combine_long, long_to_wide, rebin_long
+
+from .longform import long_to_wide, rebin_long
 from .plan import UNIT_MS, bin_floor_expr, compile_plan
 from .shard_index import NoopShardIndex, ShardIndex, ShardRecord, now_ms
 from .source import Source
+from .spill import SpillBuffer
 
 
 @dataclass(frozen=True)
@@ -91,6 +99,8 @@ def build_local(
     filter: dict[str, str | int] | None = None,
     skip_rungs: set[tuple[str, str]] | None = None,
     sort: Sequence[str] | None = None,
+    row_group_size: int | Mapping[str, int] | None = None,
+    spill_dir: str | Path | None = None,
     prefetch: int = 2,
     verbose: bool = False,
 ) -> BuildResult:
@@ -112,6 +122,11 @@ def build_local(
             the rung being read).
         sort: override `write_tier_parquet` sort cols (e.g. cell-first for
             ctbk avail).
+        row_group_size: output-shard row-group size — an int for all tiers
+            or a per-tier-name mapping (e.g. ctbk's 2048); default = the
+            writer's row-count heuristic.
+        spill_dir: scratch dir for WIP spill files (deleted as shards
+            close). Default: a fresh temp dir, removed at the end.
         prefetch: source windows to read ahead (thread pool).
         verbose: per-flush progress lines on stderr.
     """
@@ -134,35 +149,54 @@ def build_local(
     tiers = pyramid.tiers
     bin_col = pyramid.binCol
     floor_exprs = {t.name: bin_floor_expr(bin_col, t.bin) for t in tiers}
-    buffers: dict[str, list[pl.DataFrame]] = {t.name: [] for t in tiers}
     pending: dict[str, deque[ExpectedShard]] = {
         t.name: deque(sorted(plan.outputs_for_tier(t.name), key=lambda e: e.period_start))
         for t in tiers
     }
 
+    own_spill = spill_dir is None
+    spill_root = Path(tempfile.mkdtemp(prefix='pyrmts-engine-')) if own_spill else Path(spill_dir)
+    spill = SpillBuffer(spill_root, pyramid)
+
     def log(msg: str) -> None:
         if verbose:
             print(msg, file=sys.stderr)
 
+    def rg_size_for(tier_name: str) -> int | None:
+        if row_group_size is None:
+            return None
+        if isinstance(row_group_size, int):
+            return row_group_size
+        return row_group_size.get(tier_name)
+
+    def route(tier_name: str, tf: pl.DataFrame, w_end: datetime) -> None:
+        """Append `tf`'s rows to the spill files of the pending shards they
+        fall in. Shard periods are tier-bin-aligned and disjoint, so each
+        (floored) bin lands in exactly one shard; rows past the last
+        pending shard (residual tail) are dropped."""
+        if tf.height == 0:
+            return
+        for shard in pending[tier_name]:
+            if shard.period_start >= w_end:
+                break
+            s_ms, e_ms = _ms(shard.period_start), _ms(shard.period_end)
+            rows = tf.filter((pl.col(bin_col) >= s_ms) & (pl.col(bin_col) < e_ms))
+            spill.append(shard.key, rows)
+
     def flush_ready(tier_name: str, cursor: datetime) -> None:
         q = pending[tier_name]
-        ready: list[ExpectedShard] = []
         while q and q[0].effective_end <= cursor:
-            ready.append(q.popleft())
-        if not ready:
-            return
-        combined = combine_long(buffers[tier_name], pyramid)
-        for shard in ready:
-            s_ms, e_ms = _ms(shard.period_start), _ms(shard.period_end)
-            rows = combined.filter((pl.col(bin_col) >= s_ms) & (pl.col(bin_col) < e_ms))
-            _write_shard(shard, rows)
-        buffers[tier_name] = [combined.filter(pl.col(bin_col) >= _ms(ready[-1].period_end))]
+            shard = q.popleft()
+            _write_shard(shard, spill.close_shard(shard.key))
 
     def _write_shard(shard: ExpectedShard, rows: pl.DataFrame) -> None:
         t_flush = time.time()
         wide = long_to_wide(rows, pyramid)
         buf = io.BytesIO()
-        kwargs = {'sort': list(sort)} if sort is not None else {}
+        kwargs: dict = {'sort': list(sort)} if sort is not None else {}
+        rgs = rg_size_for(shard.tier)
+        if rgs is not None:
+            kwargs['row_group_size'] = rgs
         n_bytes = write_tier_parquet(wide.to_arrow(), pyramid, out=buf, **kwargs)
         pyramid.storage.put(shard.key, buf.getvalue())
         shard_index.record_shard(ShardRecord(
@@ -189,11 +223,7 @@ def build_local(
             src = frame if pred is None else window_frames[pred]
             tf = rebin_long(src, pyramid, floor_exprs[tier.name])
             window_frames[tier.name] = tf
-            # Only buffer for tiers that still have shards to flush —
-            # rungs the source provides (or an exhausted pending queue)
-            # would otherwise accumulate frames unboundedly.
-            if pending[tier.name]:
-                buffers[tier.name].append(tf)
+            route(tier.name, tf, w_end)
         cursor = min(w_end, to)
         for tier in tiers:
             flush_ready(tier.name, cursor)
@@ -204,27 +234,35 @@ def build_local(
     def read(p) -> pl.DataFrame:
         return source.read_window(max(p.start, from_), min(p.end, to))
 
-    if prefetch > 1:
-        with ThreadPoolExecutor(max_workers=prefetch) as pool:
-            futs = deque()
-            it = iter(periods)
-            for p in it:
-                futs.append((pool.submit(read, p), p))
-                if len(futs) >= prefetch:
-                    break
-            while futs:
-                fut, p = futs.popleft()
-                process_window(fut.result(), p.end)
-                nxt = next(it, None)
-                if nxt is not None:
-                    futs.append((pool.submit(read, nxt), nxt))
-    else:
-        for p in periods:
-            process_window(read(p), p.end)
+    try:
+        if prefetch > 1:
+            with ThreadPoolExecutor(max_workers=prefetch) as pool:
+                futs = deque()
+                it = iter(periods)
+                for p in it:
+                    futs.append((pool.submit(read, p), p))
+                    if len(futs) >= prefetch:
+                        break
+                while futs:
+                    fut, p = futs.popleft()
+                    process_window(fut.result(), p.end)
+                    nxt = next(it, None)
+                    if nxt is not None:
+                        futs.append((pool.submit(read, nxt), nxt))
+        else:
+            for p in periods:
+                process_window(read(p), p.end)
 
-    leftover = [(t, len(q)) for t, q in pending.items() if q]
-    if leftover:
-        raise AssertionError(f"build_local: unflushed shards after final window: {leftover}")
+        leftover = [(t, len(q)) for t, q in pending.items() if q]
+        if leftover:
+            raise AssertionError(f"build_local: unflushed shards after final window: {leftover}")
+    finally:
+        spill.close()
+        if own_spill:
+            try:
+                spill_root.rmdir()
+            except OSError:
+                pass  # leftover spill files after an abort — keep for debugging
 
     result.wall_seconds = time.time() - t0
     return result

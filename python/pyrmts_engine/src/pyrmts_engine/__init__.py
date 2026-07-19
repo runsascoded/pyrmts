@@ -23,6 +23,7 @@ from .shard_index import (
     NoopShardIndex,
     ShardIndex,
     ShardRecord,
+    StorageJsonlShardIndex,
 )
 from .source import Source, WideShardSource
 
@@ -35,6 +36,6 @@ __all__ = [
     'combine_long', 'empty_long', 'long_schema', 'long_to_wide',
     'rebin_long', 'wide_to_long',
     'D1ShardIndex', 'JsonlShardIndex', 'MemShardIndex', 'NoopShardIndex',
-    'ShardIndex', 'ShardRecord',
+    'ShardIndex', 'ShardRecord', 'StorageJsonlShardIndex',
     'Source', 'WideShardSource',
 ]

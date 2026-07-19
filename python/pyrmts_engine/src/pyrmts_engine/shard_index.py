@@ -69,6 +69,44 @@ class JsonlShardIndex:
             f.write(json.dumps(row) + '\n')
 
 
+class StorageJsonlShardIndex:
+    """JSONL manifest written through a pyrmts `Storage` (S3/R2/fs/mem) —
+    for ephemeral runners (Batch/Fargate) where local disk dies with the
+    container. Buffers records and re-PUTs the full manifest every
+    `flush_every` records (object stores can't append), plus a final PUT
+    from `close()` (which `build_local` calls when the index has one)."""
+
+    def __init__(self, storage, key: str, flush_every: int = 25) -> None:
+        self.storage = storage
+        self.key = key
+        self.flush_every = flush_every
+        self._lines: list[str] = []
+        self._unflushed = 0
+
+    def record_shard(self, record: ShardRecord) -> None:
+        row = {
+            'pyramid': record.pyramid,
+            'tier': record.tier,
+            'shard_dur': record.shard_dur,
+            'period_start': record.period_start_ms,
+            'period_end': record.period_end_ms,
+            'key': record.key,
+            'written_at': record.written_at_ms,
+        }
+        self._lines.append(json.dumps(row))
+        self._unflushed += 1
+        if self._unflushed >= self.flush_every:
+            self._flush()
+
+    def _flush(self) -> None:
+        self.storage.put(self.key, ('\n'.join(self._lines) + '\n').encode())
+        self._unflushed = 0
+
+    def close(self) -> None:
+        if self._lines and self._unflushed:
+            self._flush()
+
+
 class D1ShardIndex:
     """Registers into the `pyramid_shards` D1 table over Cloudflare's REST
     API. Env: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and

@@ -257,6 +257,9 @@ def build_local(
         if leftover:
             raise AssertionError(f"build_local: unflushed shards after final window: {leftover}")
     finally:
+        close_index = getattr(shard_index, 'close', None)
+        if close_index is not None:
+            close_index()
         spill.close()
         if own_spill:
             try:

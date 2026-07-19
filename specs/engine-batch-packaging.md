@@ -36,3 +36,20 @@ Post-spill (`3c79724`), the local executor is memory-bounded at ≈ one window's
 - No distributed executor work (still deferred per the build-engine spec).
 - No standing instances — that's the point. `e`-class boxes remain available but shouldn't be required for any pyramid build.
 - No GPU, no multi-job orchestration; one build = one job.
+
+## Implementation notes (pyrmts session, 2026-07-18)
+
+Decisions on the spec's open choices:
+
+- **Registry: ECR** (not GHCR). Batch pulls are IAM-native, same-region, free; GHCR would add registry-auth secret plumbing + cross-cloud pulls. Publishing starts as local `docker build` + push tagged with the git rev (no GHA until cadence demands); `bootstrap` creates the repo if missing.
+- **App plugin: (b) derived images**, as recommended. The `--source module:attr` hook landed anyway (factory called as `factory(pyramid, filter) → Source`) so thin consumers can run raw-ingest builds from base-image + pip layer without their own driver CLI.
+- **Compute: Fargate Spot** (16 vCPU / 120 GB / 200 GB-ephemeral ceiling; no AMI or instance-role management). EC2-spot CE is a follow-up if cost/wall demands. Networking = default-VPC subnets + default SG, public IP (needed for R2/ECR egress without NAT).
+- Two entrypoint realities folded in: **config via `s3://` URL** (Batch has no bind mounts — "mounted file" isn't a thing there; the CLI now fetches `s3://bucket/key` through the standard `R2_*`/`AWS_*` env) and **`StorageJsonlShardIndex`** (manifest re-PUT through a pyrmts `Storage` every N records + at close — local JSONL dies with the container; `build_local` now calls `shard_index.close()` when present, `-m s3://...` wires it from the CLI).
+
+Landed:
+
+- `python/pyrmts_engine/Dockerfile` — build from repo root: `docker build -f python/pyrmts_engine/Dockerfile -t pyrmts-engine:$(git rev-parse --short HEAD) .`; entrypoint `pyrmts-engine`. **Not yet built/pushed** (Docker daemon wasn't running locally); first `docker build` + ECR push is the remaining manual step.
+- `pyrmts_engine/batch.py` — pure spec builders (`job_definition_spec`, `compute_environment_spec`, `build_command`, `submit_overrides`; unit-tested exactly) + thin boto3 `bootstrap`/`submit` (+`--watch` log tailing). `pyrmts-engine batch bootstrap|submit` CLI. boto3 via the `[batch]` extra.
+- Job-def defaults: 8 vCPU / 32 GiB / 100 GiB ephemeral / spot-retry ×2 — **provisional until ctbk's full-run numbers land** (§3 copy-numbers step still owed; adjust `bootstrap` defaults then).
+
+Remaining: copy final ctbk measurements into §3; first image build + push; ctbk-side derived image + `submit` passthrough once the raw-ingest Source exists.

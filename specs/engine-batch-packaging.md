@@ -48,7 +48,7 @@ Decisions on the spec's open choices:
 
 Landed:
 
-- `python/pyrmts_engine/Dockerfile` — build from repo root: `docker build -f python/pyrmts_engine/Dockerfile -t pyrmts-engine:$(git rev-parse --short HEAD) .`; entrypoint `pyrmts-engine`. **Not yet built/pushed** (Docker daemon wasn't running locally); first `docker build` + ECR push is the remaining manual step.
+- `python/pyrmts_engine/Dockerfile` — build from repo root: `docker build -f python/pyrmts_engine/Dockerfile -t pyrmts-engine:$(git rev-parse --short HEAD) .`; entrypoint `pyrmts-engine`. Built + verified at `be489ec` (744 MB; containerized fixture build produced byte-identical shards to the host run — determinism holds across linux/arm64 vs macOS). ECR push remains (needs account creds; note Batch Fargate is amd64 — push with `docker build --platform linux/amd64` or buildx multi-arch).
 - `pyrmts_engine/batch.py` — pure spec builders (`job_definition_spec`, `compute_environment_spec`, `build_command`, `submit_overrides`; unit-tested exactly) + thin boto3 `bootstrap`/`submit` (+`--watch` log tailing). `pyrmts-engine batch bootstrap|submit` CLI. boto3 via the `[batch]` extra.
 - Job-def defaults: 8 vCPU / 32 GiB / 100 GiB ephemeral / spot-retry ×2 — **provisional until ctbk's full-run numbers land** (§3 copy-numbers step still owed; adjust `bootstrap` defaults then).
 

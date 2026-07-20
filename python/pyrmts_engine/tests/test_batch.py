@@ -11,6 +11,7 @@ from pyrmts_engine.batch import (
     build_command,
     compute_environment_spec,
     job_definition_spec,
+    push_commands,
     submit_overrides,
 )
 
@@ -28,6 +29,10 @@ def test_job_definition_spec():
         'platformCapabilities': ['FARGATE'],
         'containerProperties': {
             'image': '123.dkr.ecr.us-east-1.amazonaws.com/pyrmts-engine:abc1234',
+            'runtimePlatform': {
+                'operatingSystemFamily': 'LINUX',
+                'cpuArchitecture': 'X86_64',
+            },
             'resourceRequirements': [
                 {'type': 'VCPU', 'value': '8'},
                 {'type': 'MEMORY', 'value': '32768'},
@@ -45,6 +50,35 @@ def test_job_definition_spec():
         },
         'retryStrategy': {'attempts': 2},
     }
+
+
+def test_job_definition_spec_arm64():
+    spec = job_definition_spec(
+        image='img',
+        arch='ARM64',
+        execution_role_arn='arn',
+    )
+    assert spec['containerProperties']['runtimePlatform'] == {
+        'operatingSystemFamily': 'LINUX',
+        'cpuArchitecture': 'ARM64',
+    }
+
+
+def test_push_commands():
+    ref = '123.dkr.ecr.us-east-1.amazonaws.com/pyrmts-engine:abc1234'
+    assert push_commands(
+        ref,
+        dockerfile='python/pyrmts_engine/Dockerfile',
+    ) == [
+        ['docker', 'build', '-t', ref, '--platform', 'linux/amd64',
+         '-f', 'python/pyrmts_engine/Dockerfile', '.'],
+        ['docker', 'push', ref],
+    ]
+    assert push_commands(ref, build=False) == [['docker', 'push', ref]]
+    assert push_commands(ref, platform=None, context='wt/x') == [
+        ['docker', 'build', '-t', ref, 'wt/x'],
+        ['docker', 'push', ref],
+    ]
 
 
 def test_compute_environment_spec():

@@ -53,4 +53,21 @@ Landed:
 - `pyrmts_engine/batch.py` — pure spec builders (`job_definition_spec`, `compute_environment_spec`, `build_command`, `submit_overrides`; unit-tested exactly) + thin boto3 `bootstrap`/`submit` (+`--watch` log tailing). `pyrmts-engine batch bootstrap|submit` CLI. boto3 via the `[batch]` extra.
 - Job-def defaults: 8 vCPU / 32 GiB / 100 GiB ephemeral / spot-retry ×2 — **provisional until ctbk's full-run numbers land** (§3 copy-numbers step still owed; adjust `bootstrap` defaults then).
 
-Remaining: copy final ctbk measurements into §3; first image build + push; ctbk-side derived image + `submit` passthrough once the raw-ingest Source exists.
+Added 2026-07-19 (closing the "ctbk owns the AWS infra" gaps — everything below runs from ctbk's account/creds with no pyrmts-side AWS access):
+
+- **`pyrmts-engine batch push <ecr-ref>`** — ECR-login docker (token via boto3), `docker build` (default `--platform linux/amd64`; `-B` to skip, `-c`/`-f` for context/Dockerfile), `docker push`. Creates the ECR repo if missing, so push can precede `bootstrap`.
+- **`bootstrap --arch {X86_64,ARM64}`** — sets the job definition's Fargate `runtimePlatform`. **ARM64 is the low-risk path**: the linux/arm64 image is the one already runtime-verified (byte-identical to host builds); amd64 can't be runtime-verified locally (Rosetta/AVX2, above), and Graviton Fargate Spot is also ~20% cheaper. Pair `push -p linux/arm64` with `bootstrap -a ARM64`.
+
+Consumer runbook (ctbk, one-time then per-build):
+
+```bash
+# 1. base or derived image → ECR (from pyrmts repo root for the base image)
+pyrmts-engine batch push -p linux/arm64 -f python/pyrmts_engine/Dockerfile \
+  <acct>.dkr.ecr.<region>.amazonaws.com/pyrmts-engine:<rev>
+# 2. one-time infra (role, logs, CE, queue, job def; re-run to bump the job def)
+pyrmts-engine batch bootstrap -a ARM64 -i <ecr-ref> -e R2_ENDPOINT_URL=... -e R2_ACCESS_KEY_ID=... -e R2_SECRET_ACCESS_KEY=...
+# 3. per-build
+pyrmts-engine batch submit -n avail -r <from>/<to> -w 12h -g 2048 -m s3://.../manifest.jsonl -W s3://.../config.yaml
+```
+
+Remaining: first real `push` + `bootstrap` + `submit --watch` smoke (ctbk-side; doubles as the clean wall benchmark and — if X86_64 is ever wanted — the amd64 runtime check). ctbk-side derived image once the raw-ingest Source exists. No teardown command on purpose: idle CE/queue/role/log-group cost nothing; ECR storage is pennies.

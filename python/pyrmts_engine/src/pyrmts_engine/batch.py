@@ -63,6 +63,7 @@ def job_definition_spec(
     *,
     name: str = PREFIX,
     image: str,
+    arch: str = 'X86_64',
     vcpus: int = 8,
     memory_mib: int = 32768,
     ephemeral_gib: int = 100,
@@ -76,6 +77,10 @@ def job_definition_spec(
         'platformCapabilities': ['FARGATE'],
         'containerProperties': {
             'image': image,
+            'runtimePlatform': {
+                'operatingSystemFamily': 'LINUX',
+                'cpuArchitecture': arch,
+            },
             'resourceRequirements': [
                 {'type': 'VCPU', 'value': str(vcpus)},
                 {'type': 'MEMORY', 'value': str(memory_mib)},
@@ -93,6 +98,27 @@ def job_definition_spec(
         },
         'retryStrategy': {'attempts': 2},  # spot reclaim gets one retry
     }
+
+
+def push_commands(
+    image: str,
+    *,
+    dockerfile: str | None = None,
+    context: str = '.',
+    platform: str | None = 'linux/amd64',
+    build: bool = True,
+) -> list[list[str]]:
+    """Docker argvs for `push` (login is separate — it needs the ECR token)."""
+    cmds = []
+    if build:
+        cmd = ['docker', 'build', '-t', image]
+        if platform is not None:
+            cmd += ['--platform', platform]
+        if dockerfile is not None:
+            cmd += ['-f', dockerfile]
+        cmds.append(cmd + [context])
+    cmds.append(['docker', 'push', image])
+    return cmds
 
 
 def build_command(
@@ -158,9 +184,49 @@ def _clients():
     return {name: boto3.client(name) for name in ('iam', 'logs', 'ecr', 'ec2', 'batch')}
 
 
+def _ensure_repo(ecr, image: str) -> None:
+    repo_name = image.split('/')[-1].split(':')[0]
+    try:
+        ecr.describe_repositories(repositoryNames=[repo_name])
+        err(f'ecr repo {repo_name}: exists')
+    except ecr.exceptions.RepositoryNotFoundException:
+        ecr.create_repository(repositoryName=repo_name)
+        err(f'ecr repo {repo_name}: created')
+
+
+def push_image(
+    image: str,
+    *,
+    dockerfile: str | None = None,
+    context: str = '.',
+    platform: str | None = 'linux/amd64',
+    build: bool = True,
+) -> None:
+    """ECR-login docker, then build (unless disabled) + push `image`.
+    Creates the repo if missing, so push can run before `bootstrap`."""
+    import base64
+    from subprocess import run
+    import boto3
+    ecr = boto3.client('ecr')
+    _ensure_repo(ecr, image)
+    auth = ecr.get_authorization_token()['authorizationData'][0]
+    password = base64.b64decode(auth['authorizationToken']).decode().split(':', 1)[1]
+    registry = auth['proxyEndpoint']
+    run(
+        ['docker', 'login', '--username', 'AWS', '--password-stdin', registry],
+        input=password.encode(), check=True,
+    )
+    for cmd in push_commands(
+        image, dockerfile=dockerfile, context=context, platform=platform, build=build,
+    ):
+        err(f'+ {" ".join(cmd)}')
+        run(cmd, check=True)
+
+
 def bootstrap(
     *,
     image: str,
+    arch: str = 'X86_64',
     max_vcpus: int = 16,
     vcpus: int = 8,
     memory_mib: int = 32768,
@@ -190,13 +256,7 @@ def bootstrap(
         err(f'log group {LOG_GROUP}: exists')
 
     # ECR repo (only if the image ref looks like ECR-in-this-account).
-    repo_name = image.split('/')[-1].split(':')[0]
-    try:
-        c['ecr'].describe_repositories(repositoryNames=[repo_name])
-        err(f'ecr repo {repo_name}: exists')
-    except c['ecr'].exceptions.RepositoryNotFoundException:
-        c['ecr'].create_repository(repositoryName=repo_name)
-        err(f'ecr repo {repo_name}: created (push the image before submitting)')
+    _ensure_repo(c['ecr'], image)
 
     # Default-VPC networking.
     subnets = [
@@ -246,6 +306,7 @@ def bootstrap(
     # Job definition — always (re-)registered; revisions are harmless.
     c['batch'].register_job_definition(**job_definition_spec(
         image=image,
+        arch=arch,
         vcpus=vcpus,
         memory_mib=memory_mib,
         ephemeral_gib=ephemeral_gib,

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
-from click import argument, group, option
+from click import Choice, argument, group, option
 
 from pyrmts import FsStorage, S3Storage, parse_pyramid_yaml, pyramid_from_config
 from .engine import build_local
@@ -168,23 +168,45 @@ def batch() -> None:
 
 
 @batch.command()
+@option('-a', '--arch', default='X86_64', type=Choice(['X86_64', 'ARM64']), help="Fargate CPU architecture (default X86_64; ARM64 = Graviton, matches an arm64 image build)")
 @option('-e', '--env', 'envs', multiple=True, help="Job-definition env var, NAME=VALUE (repeatable; e.g. R2 creds)")
 @option('-g', '--ephemeral', default=100, help="Ephemeral storage GiB (spill scratch; default 100)")
 @option('-i', '--image', required=True, help="Container image ref (ECR); repo is created if missing")
 @option('-M', '--max-vcpus', default=16, help="Compute-environment max vCPUs (default 16)")
 @option('-m', '--memory', default=32768, help="Job-definition memory MiB (default 32768)")
 @option('-v', '--vcpus', default=8, help="Job-definition vCPUs (default 8)")
-def bootstrap(envs: tuple[str, ...], ephemeral: int, image: str, max_vcpus: int, memory: int, vcpus: int) -> None:
+def bootstrap(arch: str, envs: tuple[str, ...], ephemeral: int, image: str, max_vcpus: int, memory: int, vcpus: int) -> None:
     """Idempotently create the role, log group, ECR repo, Fargate-Spot
     compute environment, queue, and job definition."""
     from .batch import bootstrap as _bootstrap
     _bootstrap(
         image=image,
+        arch=arch,
         max_vcpus=max_vcpus,
         vcpus=vcpus,
         memory_mib=memory,
         ephemeral_gib=ephemeral,
         environment=_parse_filters(envs),
+    )
+
+
+@batch.command('push')
+@option('-B', '--no-build', is_flag=True, help="Skip docker build (image tag already exists locally)")
+@option('-c', '--context', default='.', help="Docker build context (default: cwd; base image needs the pyrmts repo root)")
+@option('-f', '--dockerfile', help="Dockerfile path (default: <context>/Dockerfile)")
+@option('-p', '--platform', default='linux/amd64', help="Target platform (default linux/amd64; use linux/arm64 with `bootstrap --arch ARM64`)")
+@argument('image')
+def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: str, image: str) -> None:
+    """ECR-login docker, build (unless -B), and push IMAGE (a full ECR ref,
+    e.g. <acct>.dkr.ecr.<region>.amazonaws.com/pyrmts-engine:<rev>).
+    Creates the ECR repo if missing, so this can run before `bootstrap`."""
+    from .batch import push_image
+    push_image(
+        image,
+        dockerfile=dockerfile,
+        context=context,
+        platform=platform,
+        build=not no_build,
     )
 
 

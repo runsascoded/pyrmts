@@ -4,9 +4,10 @@ wrapper over these builders.)"""
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from pyrmts import MemStorage
-from pyrmts_engine import StorageJsonlShardIndex, WideShardSource, build_local
+from pyrmts_engine import ShardRecord, StorageJsonlShardIndex, WideShardSource, build_local
 from pyrmts_engine.batch import (
     build_command,
     compute_environment_spec,
@@ -93,6 +94,17 @@ def test_compute_environment_spec():
             'securityGroupIds': ['sg-1'],
         },
     }
+    assert compute_environment_spec(spot=False, subnets=['subnet-1'], security_group_ids=['sg-1']) == {
+        'computeEnvironmentName': 'pyrmts-engine-od',
+        'type': 'MANAGED',
+        'state': 'ENABLED',
+        'computeResources': {
+            'type': 'FARGATE',
+            'maxvCpus': 16,
+            'subnets': ['subnet-1'],
+            'securityGroupIds': ['sg-1'],
+        },
+    }
 
 
 def test_build_command():
@@ -116,6 +128,28 @@ def test_build_command():
         '-F', 'device_id=17617',
         '-v',
         's3://ctbk/configs/avail-v4.yaml',
+    ]
+
+
+def test_build_command_source_rung_resume_allow_empty():
+    assert build_command(
+        'cfg.yaml',
+        pyramid_name='avail-v4',
+        range_='2026-04-01T00:00/2026-07-18T00:00',
+        source_tier='1m',
+        source_shard='2d',
+        resume=True,
+        allow_empty=True,
+    ) == [
+        'build',
+        '-n', 'avail-v4',
+        '-r', '2026-04-01T00:00/2026-07-18T00:00',
+        '-t', '1m',
+        '-d', '2d',
+        '-u',
+        '-e',
+        '-v',
+        'cfg.yaml',
     ]
 
 
@@ -160,3 +194,26 @@ def test_storage_jsonl_shard_index_flushes_and_closes():
     assert puts == [4, 8, 11]
     lines = manifest_store.get('manifests/run.jsonl').decode().rstrip('\n').split('\n')
     assert sorted(json.loads(l)['key'] for l in lines) == sorted(w.key for w in result.written)
+
+
+def test_storage_jsonl_shard_index_default_cadence_and_reload():
+    """Default flush_every=1: a PUT per record (a reclaimed container loses
+    nothing). A fresh index over the same key loads prior records —
+    `existing_keys()` feeds resume, and re-PUTs stay cumulative."""
+    store = MemStorage()
+    idx = StorageJsonlShardIndex(store, 'm.jsonl')
+    rec = ShardRecord(
+        pyramid='p', tier='t', shard_dur='1d',
+        period_start_ms=0, period_end_ms=1, key='k1', written_at_ms=5,
+    )
+    idx.record_shard(rec)
+    assert store.get('m.jsonl').decode() == (
+        '{"pyramid": "p", "tier": "t", "shard_dur": "1d", "period_start": 0, '
+        '"period_end": 1, "key": "k1", "written_at": 5}\n'
+    )
+
+    idx2 = StorageJsonlShardIndex(store, 'm.jsonl')
+    assert idx2.existing_keys() == {'k1'}
+    idx2.record_shard(replace(rec, key='k2'))
+    lines = store.get('m.jsonl').decode().rstrip('\n').split('\n')
+    assert [json.loads(l)['key'] for l in lines] == ['k1', 'k2']

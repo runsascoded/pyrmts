@@ -41,17 +41,18 @@ ECS_EXECUTION_POLICY_ARN = 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskEx
 
 def compute_environment_spec(
     *,
-    name: str = f'{PREFIX}-spot',
+    name: str | None = None,
+    spot: bool = True,
     max_vcpus: int = 16,
     subnets: list[str],
     security_group_ids: list[str],
 ) -> dict:
     return {
-        'computeEnvironmentName': name,
+        'computeEnvironmentName': name or (f'{PREFIX}-spot' if spot else f'{PREFIX}-od'),
         'type': 'MANAGED',
         'state': 'ENABLED',
         'computeResources': {
-            'type': 'FARGATE_SPOT',
+            'type': 'FARGATE_SPOT' if spot else 'FARGATE',
             'maxvCpus': max_vcpus,
             'subnets': subnets,
             'securityGroupIds': security_group_ids,
@@ -130,7 +131,11 @@ def build_command(
     rg_size: int | None = None,
     sort: str | None = None,
     source: str | None = None,
+    source_tier: str | None = None,
+    source_shard: str | None = None,
     manifest: str | None = None,
+    resume: bool = False,
+    allow_empty: bool = False,
     filters: tuple[str, ...] = (),
     verbose: bool = True,
 ) -> list[str]:
@@ -145,8 +150,16 @@ def build_command(
         cmd += ['-s', sort]
     if source is not None:
         cmd += ['-x', source]
+    if source_tier is not None:
+        cmd += ['-t', source_tier]
+    if source_shard is not None:
+        cmd += ['-d', source_shard]
     if manifest is not None:
         cmd += ['-m', manifest]
+    if resume:
+        cmd += ['-u']
+    if allow_empty:
+        cmd += ['-e']
     for f in filters:
         cmd += ['-F', f]
     if verbose:
@@ -231,6 +244,7 @@ def bootstrap(
     vcpus: int = 8,
     memory_mib: int = 32768,
     ephemeral_gib: int = 100,
+    on_demand: bool = False,
     environment: dict[str, str] | None = None,
 ) -> None:
     c = _clients()
@@ -274,34 +288,39 @@ def bootstrap(
         )['SecurityGroups']
     ][:1]
 
-    # Compute environment.
-    ce_name = f'{PREFIX}-spot'
-    existing = c['batch'].describe_compute_environments(
-        computeEnvironments=[ce_name],
-    )['computeEnvironments']
-    if not existing:
-        c['batch'].create_compute_environment(
-            **compute_environment_spec(max_vcpus=max_vcpus, subnets=subnets, security_group_ids=sgs),
+    # Compute environments + queues: the spot pair always; an on-demand
+    # pair (queue `<prefix>-od`) when requested — ~3.3× compute cost but
+    # immune to Spot reclaims, for "final" runs until resume makes Spot
+    # reclaims cheap.
+    pairs = [(True, PREFIX)] + ([(False, f'{PREFIX}-od')] if on_demand else [])
+    for spot, queue_name in pairs:
+        spec = compute_environment_spec(
+            spot=spot, max_vcpus=max_vcpus, subnets=subnets, security_group_ids=sgs,
         )
-        err(f'compute environment {ce_name}: created')
-    else:
-        err(f'compute environment {ce_name}: exists ({existing[0]["status"]})')
-    _wait(lambda: c['batch'].describe_compute_environments(
-        computeEnvironments=[ce_name],
-    )['computeEnvironments'][0]['status'] == 'VALID', 'compute environment VALID')
+        ce_name = spec['computeEnvironmentName']
+        existing = c['batch'].describe_compute_environments(
+            computeEnvironments=[ce_name],
+        )['computeEnvironments']
+        if not existing:
+            c['batch'].create_compute_environment(**spec)
+            err(f'compute environment {ce_name}: created')
+        else:
+            err(f'compute environment {ce_name}: exists ({existing[0]["status"]})')
+        _wait(lambda: c['batch'].describe_compute_environments(
+            computeEnvironments=[ce_name],
+        )['computeEnvironments'][0]['status'] == 'VALID', 'compute environment VALID')
 
-    # Queue.
-    queues = c['batch'].describe_job_queues(jobQueues=[PREFIX])['jobQueues']
-    if not queues:
-        c['batch'].create_job_queue(
-            jobQueueName=PREFIX,
-            state='ENABLED',
-            priority=1,
-            computeEnvironmentOrder=[{'order': 1, 'computeEnvironment': ce_name}],
-        )
-        err(f'job queue {PREFIX}: created')
-    else:
-        err(f'job queue {PREFIX}: exists')
+        queues = c['batch'].describe_job_queues(jobQueues=[queue_name])['jobQueues']
+        if not queues:
+            c['batch'].create_job_queue(
+                jobQueueName=queue_name,
+                state='ENABLED',
+                priority=1,
+                computeEnvironmentOrder=[{'order': 1, 'computeEnvironment': ce_name}],
+            )
+            err(f'job queue {queue_name}: created')
+        else:
+            err(f'job queue {queue_name}: exists')
 
     # Job definition — always (re-)registered; revisions are harmless.
     c['batch'].register_job_definition(**job_definition_spec(
@@ -320,6 +339,7 @@ def submit(
     *,
     command: list[str],
     job_name: str,
+    queue: str = PREFIX,
     vcpus: int | None = None,
     memory_mib: int | None = None,
     environment: dict[str, str] | None = None,
@@ -330,7 +350,7 @@ def submit(
     c = _clients()
     job = c['batch'].submit_job(
         jobName=job_name,
-        jobQueue=PREFIX,
+        jobQueue=queue,
         jobDefinition=PREFIX,
         containerOverrides=submit_overrides(
             command, vcpus=vcpus, memory_mib=memory_mib, environment=environment,

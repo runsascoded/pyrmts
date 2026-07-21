@@ -57,6 +57,12 @@ from .source import Source
 from .spill import SpillBuffer
 
 
+class EmptySourceError(RuntimeError):
+    """The source produced zero rows across the entire range — almost
+    always a mis-specified source rung, not real data. (The zero-row
+    outputs were still written/registered before this raised.)"""
+
+
 @dataclass(frozen=True)
 class WrittenShard:
     key: str
@@ -70,18 +76,42 @@ class WrittenShard:
 class BuildResult:
     written: list[WrittenShard] = field(default_factory=list)
     skipped_rungs: int = 0
+    resumed_shards: int = 0
     source_rows: int = 0
     windows: int = 0
     wall_seconds: float = 0.0
 
     def summary(self) -> str:
         total_bytes = sum(w.bytes for w in self.written)
+        resumed = f"{self.resumed_shards} manifested shards skipped, " if self.resumed_shards else ""
         return (
             f"build_local: {self.windows} windows, {self.source_rows:,} source rows → "
             f"{len(self.written)} shards ({total_bytes:,} bytes), "
-            f"{self.skipped_rungs} source-provided rungs skipped, "
+            f"{self.skipped_rungs} source-provided rungs skipped, {resumed}"
             f"wall {self.wall_seconds:.1f}s"
         )
+
+
+_libc: object = None
+
+
+def _trim_allocator() -> None:
+    """Return freed heap pages to the OS after shard closes (glibc only —
+    a no-op elsewhere). Without this, allocator-retained pages grow the
+    container footprint ~monotonically (ctbk measured a 90-120 GB
+    extrapolated footprint against a ≤15 GB working set; Fargate has no
+    swap, so retention OOMs the cgroup). Only effective for allocations
+    made through the system allocator — pair with
+    `ARROW_DEFAULT_MEMORY_POOL=system` (baked into the engine image)."""
+    global _libc
+    if _libc is None:
+        try:
+            import ctypes
+            _libc = ctypes.CDLL('libc.so.6')
+        except OSError:
+            _libc = False
+    if _libc:
+        _libc.malloc_trim(0)
 
 
 def _ms(t: datetime) -> int:
@@ -102,6 +132,8 @@ def build_local(
     row_group_size: int | Mapping[str, int] | None = None,
     spill_dir: str | Path | None = None,
     prefetch: int = 2,
+    resume: bool = False,
+    allow_empty: bool = False,
     verbose: bool = False,
 ) -> BuildResult:
     """Build every expected shard of `pyramid` over `time_range` from
@@ -128,6 +160,16 @@ def build_local(
         spill_dir: scratch dir for WIP spill files (deleted as shards
             close). Default: a fresh temp dir, removed at the end.
         prefetch: source windows to read ahead (thread pool).
+        resume: skip shards already recorded in `shard_index` (which must
+            expose `existing_keys()` — the JSONL manifest impls do), and
+            skip source windows that only feed skipped shards. Shards are
+            deterministic, so a Spot-reclaimed run resumes for the cost of
+            the first unfinished shard's windows, not the whole range.
+        allow_empty: permit a build whose source produced 0 rows over the
+            whole range (all-EMPTY outputs). Off by default: a 0-row
+            full-range build is ~always a mis-specified source rung, and
+            silently `SUCCEEDED` empty runs clobber real data —
+            `EmptySourceError` is raised at end-of-run instead.
         verbose: per-flush progress lines on stderr.
     """
     t0 = time.time()
@@ -153,6 +195,22 @@ def build_local(
         t.name: deque(sorted(plan.outputs_for_tier(t.name), key=lambda e: e.period_start))
         for t in tiers
     }
+
+    resume_from = from_
+    if resume:
+        existing_keys = getattr(shard_index, 'existing_keys', None)
+        if existing_keys is None:
+            raise ValueError(
+                "build_local: resume=True needs a shard_index that can list prior "
+                "records (existing_keys()) — e.g. a JSONL manifest index"
+            )
+        done = existing_keys()
+        for name, q in pending.items():
+            kept = deque(e for e in q if e.key not in done)
+            result.resumed_shards += len(q) - len(kept)
+            pending[name] = kept
+        remaining_starts = [e.effective_start for q in pending.values() for e in q]
+        resume_from = min(remaining_starts, default=to)
 
     own_spill = spill_dir is None
     spill_root = Path(tempfile.mkdtemp(prefix='pyrmts-engine-')) if own_spill else Path(spill_dir)
@@ -183,11 +241,14 @@ def build_local(
             rows = tf.filter((pl.col(bin_col) >= s_ms) & (pl.col(bin_col) < e_ms))
             spill.append(shard.key, rows)
 
-    def flush_ready(tier_name: str, cursor: datetime) -> None:
+    def flush_ready(tier_name: str, cursor: datetime) -> int:
         q = pending[tier_name]
+        n = 0
         while q and q[0].effective_end <= cursor:
             shard = q.popleft()
             _write_shard(shard, spill.close_shard(shard.key))
+            n += 1
+        return n
 
     def _write_shard(shard: ExpectedShard, rows: pl.DataFrame) -> None:
         t_flush = time.time()
@@ -225,11 +286,20 @@ def build_local(
             window_frames[tier.name] = tf
             route(tier.name, tf, w_end)
         cursor = min(w_end, to)
+        flushed = 0
         for tier in tiers:
-            flush_ready(tier.name, cursor)
+            flushed += flush_ready(tier.name, cursor)
+        if flushed:
+            _trim_allocator()
         result.windows += 1
 
-    periods = shard_periods_covering(from_, to, window)
+    periods = [
+        p for p in shard_periods_covering(from_, to, window)
+        if p.end > resume_from
+    ]
+    if resume and result.resumed_shards:
+        log(f"resume: {result.resumed_shards} manifested shards skipped, "
+            f"restarting from {resume_from:%Y-%m-%dT%H:%M} ({len(periods)} windows)")
 
     def read(p) -> pl.DataFrame:
         return source.read_window(max(p.start, from_), min(p.end, to))
@@ -240,7 +310,13 @@ def build_local(
                 futs = deque()
                 it = iter(periods)
                 for p in it:
-                    futs.append((pool.submit(read, p), p))
+                    fut = pool.submit(read, p)
+                    if not futs:
+                        # Serialize the very first read: concurrent cold-start
+                        # `pq.read_table` calls race pyarrow's lazy init
+                        # (intermittent SIGSEGV on aarch64 — ctbk finding 6).
+                        fut.result()
+                    futs.append((fut, p))
                     if len(futs) >= prefetch:
                         break
                 while futs:
@@ -256,6 +332,13 @@ def build_local(
         leftover = [(t, len(q)) for t, q in pending.items() if q]
         if leftover:
             raise AssertionError(f"build_local: unflushed shards after final window: {leftover}")
+        if result.windows and not result.source_rows and not allow_empty:
+            raise EmptySourceError(
+                f"build_local: 0 source rows across {result.windows} windows — "
+                f"almost always a mis-specified source rung (the "
+                f"{len(result.written)} zero-row shards WERE written/registered); "
+                f"pass allow_empty=True / --allow-empty if intentional"
+            )
     finally:
         close_index = getattr(shard_index, 'close', None)
         if close_index is not None:

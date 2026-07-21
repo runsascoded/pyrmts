@@ -12,7 +12,7 @@ from pathlib import Path
 from click import Choice, argument, group, option
 
 from pyrmts import FsStorage, S3Storage, parse_pyramid_yaml, pyramid_from_config
-from .engine import build_local
+from .engine import EmptySourceError, build_local
 from .plan import compile_plan
 from .shard_index import JsonlShardIndex, NoopShardIndex, StorageJsonlShardIndex
 from .source import WideShardSource
@@ -98,6 +98,8 @@ def plan(filters: tuple[str, ...], dot_out: str | None, fs_root: str | None, ran
 
 
 @cli.command()
+@option('-d', '--source-shard', help="Source rung shard Duration for the default WideShardSource (default: the base tier's smallest; ctbk-style durable rungs are usually the LARGEST)")
+@option('-e', '--allow-empty', is_flag=True, help="Permit a 0-source-row (all-EMPTY) build; without it that exits nonzero (~always a mis-specified source rung)")
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
 @option('-g', '--rg-size', type=int, help="Output-shard parquet row-group size (all tiers; per-tier via the library)")
 @option('-m', '--manifest', help="Record written shards to this JSONL manifest")
@@ -107,11 +109,15 @@ def plan(filters: tuple[str, ...], dot_out: str | None, fs_root: str | None, ran
 @option('-r', '--range', 'range_', required=True, help="Half-open build range, <from-iso>/<to-iso> (UTC)")
 @option('-S', '--spill-dir', help="Scratch dir for WIP spill files (default: fresh temp dir)")
 @option('-s', '--sort', 'sort_csv', help="Override shard sort columns (comma-separated)")
+@option('-t', '--source-tier', help="Source rung tier name for the default WideShardSource (default: base tier)")
+@option('-u', '--resume', is_flag=True, help="Skip shards already in the manifest (-m required) and the windows that only feed them")
 @option('-v', '--verbose', is_flag=True, help="Per-flush progress on stderr")
 @option('-w', '--window', default='1d', help="Streaming window Duration (default 1d)")
 @option('-x', '--source', 'source_spec', help="Source factory `module:attr`, called as factory(pyramid, filter) → Source (default: WideShardSource on the base rung)")
 @argument('config')
 def build(
+    source_shard: str | None,
+    allow_empty: bool,
     filters: tuple[str, ...],
     rg_size: int | None,
     manifest: str | None,
@@ -121,6 +127,8 @@ def build(
     range_: str,
     spill_dir: str | None,
     sort_csv: str | None,
+    source_tier: str | None,
+    resume: bool,
     verbose: bool,
     window: str,
     source_spec: str | None,
@@ -131,34 +139,44 @@ def build(
     pyramid = _load_pyramid(config, fs_root)
     filter_ = _parse_filters(filters)
     if source_spec is not None:
+        if source_tier is not None or source_shard is not None:
+            raise SystemExit("-t/--source-tier and -d/--source-shard only apply to the default WideShardSource (not -x/--source)")
         from importlib import import_module
         mod_name, _, attr = source_spec.partition(':')
         if not attr:
             raise SystemExit(f"invalid --source {source_spec!r} (want module:attr)")
         source = getattr(import_module(mod_name), attr)(pyramid, filter_)
     else:
-        source = WideShardSource(pyramid, filter=filter_)
+        source = WideShardSource(pyramid, tier_name=source_tier, shard_dur=source_shard, filter=filter_)
     if manifest is None:
+        if resume:
+            raise SystemExit("-u/--resume needs -m/--manifest (prior records are what get skipped)")
         shard_index = NoopShardIndex()
     elif manifest.startswith('s3://'):
         bucket, _, key = manifest[len('s3://'):].partition('/')
         shard_index = StorageJsonlShardIndex(S3Storage(bucket=bucket), key)
     else:
         shard_index = JsonlShardIndex(manifest)
-    result = build_local(
-        pyramid,
-        _parse_range(range_),
-        source,
-        pyramid_name=pyramid_name,
-        shard_index=shard_index,
-        window=window,
-        filter=filter_,
-        sort=sort_csv.split(',') if sort_csv else None,
-        row_group_size=rg_size,
-        spill_dir=spill_dir,
-        prefetch=prefetch,
-        verbose=verbose,
-    )
+    try:
+        result = build_local(
+            pyramid,
+            _parse_range(range_),
+            source,
+            pyramid_name=pyramid_name,
+            shard_index=shard_index,
+            window=window,
+            filter=filter_,
+            sort=sort_csv.split(',') if sort_csv else None,
+            row_group_size=rg_size,
+            spill_dir=spill_dir,
+            prefetch=prefetch,
+            resume=resume,
+            allow_empty=allow_empty,
+            verbose=verbose,
+        )
+    except EmptySourceError as e:
+        err(str(e))
+        raise SystemExit(3)
     print(result.summary())
 
 
@@ -174,8 +192,9 @@ def batch() -> None:
 @option('-i', '--image', required=True, help="Container image ref (ECR); repo is created if missing")
 @option('-M', '--max-vcpus', default=16, help="Compute-environment max vCPUs (default 16)")
 @option('-m', '--memory', default=32768, help="Job-definition memory MiB (default 32768)")
+@option('-o', '--on-demand', is_flag=True, help="Also create an on-demand (non-Spot) CE + queue `pyrmts-engine-od` (submit -O targets it)")
 @option('-v', '--vcpus', default=8, help="Job-definition vCPUs (default 8)")
-def bootstrap(arch: str, envs: tuple[str, ...], ephemeral: int, image: str, max_vcpus: int, memory: int, vcpus: int) -> None:
+def bootstrap(arch: str, envs: tuple[str, ...], ephemeral: int, image: str, max_vcpus: int, memory: int, on_demand: bool, vcpus: int) -> None:
     """Idempotently create the role, log group, ECR repo, Fargate-Spot
     compute environment, queue, and job definition."""
     from .batch import bootstrap as _bootstrap
@@ -186,6 +205,7 @@ def bootstrap(arch: str, envs: tuple[str, ...], ephemeral: int, image: str, max_
         vcpus=vcpus,
         memory_mib=memory,
         ephemeral_gib=ephemeral,
+        on_demand=on_demand,
         environment=_parse_filters(envs),
     )
 
@@ -211,30 +231,40 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 
 
 @batch.command('submit')
+@option('-d', '--source-shard', help="Source rung shard Duration (WideShardSource; durable rungs are usually the LARGEST)")
 @option('-e', '--env', 'envs', multiple=True, help="Extra container env var, NAME=VALUE (repeatable)")
+@option('-E', '--allow-empty', is_flag=True, help="Permit a 0-source-row (all-EMPTY) build")
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
 @option('-g', '--rg-size', type=int, help="Output-shard parquet row-group size")
 @option('-j', '--job-name', help="Batch job name (default: derived from pyramid name)")
 @option('-m', '--manifest', help="Manifest destination (use s3:// — container disk is ephemeral)")
 @option('-M', '--memory', type=int, help="Override job memory MiB")
 @option('-n', '--pyramid-name', required=True, help="Pyramid name for shard registration")
+@option('-O', '--on-demand', is_flag=True, help="Submit to the on-demand queue (needs `bootstrap -o`); no Spot reclaims")
 @option('-r', '--range', 'range_', required=True, help="Half-open build range, <from-iso>/<to-iso> (UTC)")
 @option('-s', '--sort', 'sort_csv', help="Override shard sort columns (comma-separated)")
+@option('-t', '--source-tier', help="Source rung tier name (WideShardSource)")
+@option('-u', '--resume', is_flag=True, help="Skip shards already in the manifest (-m required)")
 @option('-V', '--vcpus', type=int, help="Override job vCPUs")
 @option('-w', '--window', help="Streaming window Duration")
 @option('-W', '--watch', is_flag=True, help="Tail the job's log stream; exit with its status")
 @option('-x', '--source', 'source_spec', help="Source factory module:attr (needs an app-derived image)")
 @argument('config')
 def batch_submit(
+    source_shard: str | None,
     envs: tuple[str, ...],
+    allow_empty: bool,
     filters: tuple[str, ...],
     rg_size: int | None,
     job_name: str | None,
     manifest: str | None,
     memory: int | None,
     pyramid_name: str,
+    on_demand: bool,
     range_: str,
     sort_csv: str | None,
+    source_tier: str | None,
+    resume: bool,
     vcpus: int | None,
     window: str | None,
     watch: bool,
@@ -243,7 +273,7 @@ def batch_submit(
 ) -> None:
     """Submit a build of CONFIG (an s3:// URL — the container has no local
     files) to the bootstrapped queue."""
-    from .batch import build_command, submit as _submit
+    from .batch import PREFIX, build_command, submit as _submit
     code = _submit(
         command=build_command(
             config,
@@ -253,10 +283,15 @@ def batch_submit(
             rg_size=rg_size,
             sort=sort_csv,
             source=source_spec,
+            source_tier=source_tier,
+            source_shard=source_shard,
             manifest=manifest,
+            resume=resume,
+            allow_empty=allow_empty,
             filters=filters,
         ),
         job_name=job_name or f'{pyramid_name}-build',
+        queue=f'{PREFIX}-od' if on_demand else PREFIX,
         vcpus=vcpus,
         memory_mib=memory,
         environment=_parse_filters(envs),

@@ -42,12 +42,27 @@ class NoopShardIndex:
         return None
 
 
+def _row(record: ShardRecord) -> dict:
+    return {
+        'pyramid': record.pyramid,
+        'tier': record.tier,
+        'shard_dur': record.shard_dur,
+        'period_start': record.period_start_ms,
+        'period_end': record.period_end_ms,
+        'key': record.key,
+        'written_at': record.written_at_ms,
+    }
+
+
 @dataclass
 class MemShardIndex:
     records: list[ShardRecord] = field(default_factory=list)
 
     def record_shard(self, record: ShardRecord) -> None:
         self.records.append(record)
+
+    def existing_keys(self) -> set[str]:
+        return {r.key for r in self.records}
 
 
 class JsonlShardIndex:
@@ -56,44 +71,46 @@ class JsonlShardIndex:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def record_shard(self, record: ShardRecord) -> None:
-        row = {
-            'pyramid': record.pyramid,
-            'tier': record.tier,
-            'shard_dur': record.shard_dur,
-            'period_start': record.period_start_ms,
-            'period_end': record.period_end_ms,
-            'key': record.key,
-            'written_at': record.written_at_ms,
-        }
         with open(self.path, 'a') as f:
-            f.write(json.dumps(row) + '\n')
+            f.write(json.dumps(_row(record)) + '\n')
+
+    def existing_keys(self) -> set[str]:
+        if not self.path.exists():
+            return set()
+        return {
+            json.loads(line)['key']
+            for line in self.path.read_text().splitlines()
+            if line
+        }
 
 
 class StorageJsonlShardIndex:
     """JSONL manifest written through a pyrmts `Storage` (S3/R2/fs/mem) —
     for ephemeral runners (Batch/Fargate) where local disk dies with the
-    container. Buffers records and re-PUTs the full manifest every
-    `flush_every` records (object stores can't append), plus a final PUT
-    from `close()` (which `build_local` calls when the index has one)."""
+    container. Re-PUTs the full manifest every `flush_every` records
+    (object stores can't append; default 1 — a manifest PUT is noise next
+    to the shard write it records, and per-close cadence is what makes
+    `resume` trustworthy after a Spot reclaim), plus a final PUT from
+    `close()` (which `build_local` calls when the index has one).
 
-    def __init__(self, storage, key: str, flush_every: int = 25) -> None:
+    An existing manifest at `key` is loaded on init, so records survive
+    across resumed runs and `existing_keys()` reflects prior attempts."""
+
+    def __init__(self, storage, key: str, flush_every: int = 1) -> None:
         self.storage = storage
         self.key = key
         self.flush_every = flush_every
-        self._lines: list[str] = []
+        existing = storage.get(key)
+        self._lines: list[str] = (
+            existing.decode().rstrip('\n').split('\n') if existing else []
+        )
         self._unflushed = 0
 
+    def existing_keys(self) -> set[str]:
+        return {json.loads(line)['key'] for line in self._lines}
+
     def record_shard(self, record: ShardRecord) -> None:
-        row = {
-            'pyramid': record.pyramid,
-            'tier': record.tier,
-            'shard_dur': record.shard_dur,
-            'period_start': record.period_start_ms,
-            'period_end': record.period_end_ms,
-            'key': record.key,
-            'written_at': record.written_at_ms,
-        }
-        self._lines.append(json.dumps(row))
+        self._lines.append(json.dumps(_row(record)))
         self._unflushed += 1
         if self._unflushed >= self.flush_every:
             self._flush()

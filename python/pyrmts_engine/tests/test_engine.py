@@ -14,9 +14,10 @@ import json
 from datetime import datetime, timezone
 
 import pyarrow.parquet as pq
+import pytest
 
 from pyrmts import MemStorage, cascade_tiers, list_expected_shards
-from pyrmts_engine import MemShardIndex, WideShardSource, build_local
+from pyrmts_engine import EmptySourceError, MemShardIndex, WideShardSource, build_local
 
 from conftest import (
     CELLS,
@@ -152,6 +153,70 @@ def test_registration_records():
     )
     assert got == expected
     assert all(t0_ms <= r.written_at_ms <= t1_ms for r in index.records)
+
+
+def test_resume_from_manifest():
+    """Spot-reclaim recovery: shards recorded in the manifest are skipped,
+    windows that only feed them are never processed, and the resumed run's
+    outputs are byte-identical to an uninterrupted build."""
+    full_pyramid, full_result, full_index = _run_engine()
+
+    # Simulate a run reclaimed after the shards closing by Jan 5 landed.
+    cutoff_ms = int(datetime(2026, 1, 5, tzinfo=timezone.utc).timestamp() * 1000)
+    done = [r for r in full_index.records if r.period_end_ms <= cutoff_ms]
+    assert sorted(r.key for r in done) == [
+        'pyr/d/4d/2025-12-30.parquet',
+        'pyr/h/4d/2025-12-30.parquet',
+        'pyr/q/1d/2026-01-02.parquet',
+        'pyr/q/1d/2026-01-03.parquet',
+        'pyr/q/1d/2026-01-04.parquet',
+    ]
+    done_keys = {r.key for r in done}
+
+    pyramid = make_pyramid()
+    write_base_shards(pyramid)
+    index = MemShardIndex(records=list(done))
+    result = build_local(
+        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid_name='test', shard_index=index, resume=True,
+    )
+    assert result.resumed_shards == 5
+    # The earliest unfinished shard (h/4d/2026-01-03) starts Jan 3, so the
+    # Jan-02 window is skipped outright: 5 of 6 windows processed.
+    assert result.windows == 5
+    assert sorted(w.key for w in result.written) == [
+        k for k in EXPECTED_KEYS if k not in done_keys
+    ]
+    for w in result.written:
+        assert pyramid.storage.get(w.key) == full_pyramid.storage.get(w.key), w.key
+    # Manifest ends complete: prior records + the resumed run's.
+    assert sorted(r.key for r in index.records) == EXPECTED_KEYS
+
+
+def test_zero_source_rows_raises_unless_allowed():
+    """A source that yields nothing over the whole range (the mis-specified
+    source-rung shape) fails loudly — after writing/registering its
+    zero-row outputs — unless `allow_empty` opts in."""
+    pyramid = make_pyramid()  # no base shards seeded
+    index = MemShardIndex()
+    with pytest.raises(EmptySourceError) as exc:
+        build_local(
+            pyramid, (FROM, TO), WideShardSource(pyramid),
+            pyramid_name='test', shard_index=index,
+        )
+    assert str(exc.value) == (
+        'build_local: 0 source rows across 6 windows — almost always a '
+        'mis-specified source rung (the 11 zero-row shards WERE '
+        'written/registered); pass allow_empty=True / --allow-empty if intentional'
+    )
+    assert sorted(r.key for r in index.records) == EXPECTED_KEYS
+
+    pyramid2 = make_pyramid()
+    result = build_local(
+        pyramid2, (FROM, TO), WideShardSource(pyramid2),
+        pyramid_name='test', allow_empty=True,
+    )
+    assert sorted(w.key for w in result.written) == EXPECTED_KEYS
 
 
 def test_zero_row_period_writes_empty_shard():

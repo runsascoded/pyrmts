@@ -23,4 +23,16 @@ COPY python/pyrmts_engine/ pyrmts_engine/
 
 RUN pip install --no-cache-dir './pyrmts[s3]' './pyrmts_engine[batch]'
 
+# Fargate/aarch64 runtime hardening (ctbk first-smoke findings 5-6):
+# - faulthandler turns mute SIGSEGVs (exit 139) into tracebacks;
+# - the system Arrow pool sidesteps pyarrow's bundled-jemalloc cold-start
+#   segv AND routes Arrow buffers through glibc so the engine's post-flush
+#   malloc_trim can actually return freed pages to the cgroup;
+# - the jemalloc decay conf bounds polars' own retention (py-polars reads
+#   the _RJEM_-prefixed env).
+# All overridable via job-def / submit env.
+ENV PYTHONFAULTHANDLER=1 \
+    ARROW_DEFAULT_MEMORY_POOL=system \
+    _RJEM_MALLOC_CONF=dirty_decay_ms:1000,muzzy_decay_ms:1000
+
 ENTRYPOINT ["pyrmts-engine"]

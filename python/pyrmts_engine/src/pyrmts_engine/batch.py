@@ -197,6 +197,34 @@ def _clients():
     return {name: boto3.client(name) for name in ('iam', 'logs', 'ecr', 'ec2', 'batch')}
 
 
+ECR_LIFECYCLE_POLICY = {
+    'rules': [
+        {
+            'rulePriority': 1,
+            'description': 'expire untagged (superseded buildx manifests) after 7 days',
+            'selection': {
+                'tagStatus': 'untagged',
+                'countType': 'sinceImagePushed',
+                'countUnit': 'days',
+                'countNumber': 7,
+            },
+            'action': {'type': 'expire'},
+        },
+        {
+            'rulePriority': 2,
+            'description': 'keep the 4 most recent tags',
+            'selection': {
+                'tagStatus': 'tagged',
+                'tagPatternList': ['*'],
+                'countType': 'imageCountMoreThan',
+                'countNumber': 4,
+            },
+            'action': {'type': 'expire'},
+        },
+    ],
+}
+
+
 def _ensure_repo(ecr, image: str) -> None:
     repo_name = image.split('/')[-1].split(':')[0]
     try:
@@ -204,7 +232,14 @@ def _ensure_repo(ecr, image: str) -> None:
         err(f'ecr repo {repo_name}: exists')
     except ecr.exceptions.RepositoryNotFoundException:
         ecr.create_repository(repositoryName=repo_name)
-        err(f'ecr repo {repo_name}: created')
+        # Self-maintaining pruning from day one (only on creation — an
+        # existing repo may carry a customized policy).
+        import json
+        ecr.put_lifecycle_policy(
+            repositoryName=repo_name,
+            lifecyclePolicyText=json.dumps(ECR_LIFECYCLE_POLICY),
+        )
+        err(f'ecr repo {repo_name}: created (lifecycle: keep 4 tags, expire untagged >7d)')
 
 
 def push_image(

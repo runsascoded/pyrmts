@@ -9,6 +9,7 @@ from dataclasses import replace
 from pyrmts import MemStorage
 from pyrmts_engine import ShardRecord, StorageJsonlShardIndex, WideShardSource, build_local
 from pyrmts_engine.batch import (
+    ECR_LIFECYCLE_POLICY,
     build_command,
     compute_environment_spec,
     job_definition_spec,
@@ -62,6 +63,35 @@ def test_job_definition_spec_arm64():
     assert spec['containerProperties']['runtimePlatform'] == {
         'operatingSystemFamily': 'LINUX',
         'cpuArchitecture': 'ARM64',
+    }
+
+
+def test_ecr_lifecycle_policy():
+    assert ECR_LIFECYCLE_POLICY == {
+        'rules': [
+            {
+                'rulePriority': 1,
+                'description': 'expire untagged (superseded buildx manifests) after 7 days',
+                'selection': {
+                    'tagStatus': 'untagged',
+                    'countType': 'sinceImagePushed',
+                    'countUnit': 'days',
+                    'countNumber': 7,
+                },
+                'action': {'type': 'expire'},
+            },
+            {
+                'rulePriority': 2,
+                'description': 'keep the 4 most recent tags',
+                'selection': {
+                    'tagStatus': 'tagged',
+                    'tagPatternList': ['*'],
+                    'countType': 'imageCountMoreThan',
+                    'countNumber': 4,
+                },
+                'action': {'type': 'expire'},
+            },
+        ],
     }
 
 

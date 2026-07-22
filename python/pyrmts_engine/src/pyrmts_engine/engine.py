@@ -46,15 +46,21 @@ completed windows, and further claims are admitted only while
 Gating on *actual RSS* (not an estimate of committed bytes) makes the
 controller feedback-driven: source-cache growth, parse/group-by
 transients, close-thread spikes, and allocator slack all show up in RSS
-and shrink further admission, while the `(inflight + 1) × 2 × est` term
-reserves worst-case room for tasks that were claimed but haven't
-materialized their frames yet (a claim's RSS lands seconds later; the
-first 61 GB OOM on `e` was exactly claim-time-only accounting). Mature
-in-flight tasks are double-counted (already in RSS *and* reserved) —
-deliberately conservative. The budget defaults to 70% of the detected
-memory limit (cgroup v2/v1, then MemTotal), so an oversized `workers`
-degrades to throttled parallelism instead of a silent OOM kill. At
-least one window is always admitted.
+and shrink further admission, while the reservation term covers tasks
+that were claimed but haven't materialized their frames yet (a claim's
+RSS lands seconds later; the first 61 GB OOM on `e` was exactly
+claim-time-only accounting). `est` is retained-frame bytes only — the
+true per-task RSS delta measured ~5× that on ctbk avail (group-by hash
+tables, per-shard filter + to_arrow copies in spill appends, allocator
+churn) — hence ×4 headroom *plus* two burst limiters: at most 2 new
+claims per scheduler pass (slow start: RSS reflects each admission
+before the next burst), and no claims at all above 85% of budget (the
+last 15% absorbs close-thread spikes, which no per-window term models).
+Mature in-flight tasks are double-counted (already in RSS *and*
+reserved) — deliberately conservative. The budget defaults to 70% of
+the detected memory limit (cgroup v2/v1, then MemTotal), so an
+oversized `workers` degrades to throttled parallelism instead of a
+silent OOM kill. At least one window is always admitted.
 
 Observability (ctbk finding 9 — two OOM'd Batch runs produced zero log
 lines): a startup banner (resolved workers/K/budget, window count,
@@ -218,10 +224,20 @@ def _warmup_arrow() -> None:
     pq.read_table(buf)
 
 
-# Admission headroom over retained frame bytes: group-by/parse transients
-# roughly double a window task's peak footprint (measured on ctbk avail:
-# ~2.5 GB retained → ~4-5 GB task RSS delta).
-_ADMIT_HEADROOM = 2
+# Admission headroom over retained frame bytes. The measured per-task RSS
+# delta on ctbk avail was ~5× retained frames (group-by hash tables,
+# routing filter + to_arrow copies, allocator churn); 4× suffices because
+# slow-start + the 85%-of-budget claim ceiling bound the un-materialized
+# claim burst that headroom has to absorb.
+_ADMIT_HEADROOM = 4
+# No new claims above this fraction of `mem_budget`: leaves room for
+# close-thread transients (combine + wide/hist-JSON materialization),
+# which per-window reservations don't model.
+_ADMIT_RSS_CEILING = 0.85
+# Max new claims per scheduler pass (slow start): each admission's RSS
+# should be observable before the next burst — 16 claims in one pass at
+# cold start is how the first two OOMs got past claim-time gating.
+_ADMIT_BURST = 2
 
 
 def build_local(
@@ -520,6 +536,7 @@ def build_local(
             f"written, {inflight} in-flight (cap {min(inflight_cap, admitted_cap())})"
             + (f", rss {rss / 1e9:.1f}GB" if rss is not None else '')
             + (f", cache {cache_bytes() / 1e9:.1f}GB" if cache_bytes is not None else '')
+            + (f", est {est_window / 1e9:.2f}GB" if est_window else '')
         )
 
     window_pool = ThreadPoolExecutor(max_workers=n_workers)
@@ -553,13 +570,24 @@ def build_local(
         inflight: dict[Future, int] = {}
         next_i = 0
 
+        def admit_ok() -> bool:
+            if not inflight:
+                return True  # progress guarantee
+            if mem_budget:
+                rss = _rss_bytes()
+                if rss is not None and rss >= _ADMIT_RSS_CEILING * mem_budget:
+                    return False
+            return len(inflight) < admitted_cap()
+
         def claim() -> None:
             nonlocal next_i, est_window
+            burst = 0
             while (
                 next_i < n
+                and burst < _ADMIT_BURST
                 and len(inflight) < n_workers
                 and next_i - watermark < inflight_cap
-                and (not inflight or len(inflight) < admitted_cap())
+                and admit_ok()
             ):
                 fut = window_pool.submit(window_task, next_i)
                 if next_i == 0:
@@ -571,6 +599,7 @@ def build_local(
                     est_window = max(est_window, est0)
                 inflight[fut] = next_i
                 next_i += 1
+                burst += 1
 
         claim()
         while inflight:

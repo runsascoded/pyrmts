@@ -49,6 +49,12 @@ Landed (each with its own commit):
 
 Key structural insight: `-w` is the real per-task-memory dial (the spec's "stream/chunk the rebin cascade" ≡ smaller windows, since everything is monoid and spill-close combines partial bins). 12h windows → ~6.5 GB true per-task footprint → even correct admission can only run ~4-5 workers in 24 GB; 1h windows → ~0.5-0.7 GB/task → all 16 workers fit.
 
+**First completing run** (`j16-2w-1h`, 2-week slice, `-w 1h -j 16 -b 24g`): wall 941 s, CPU 63.9 min → **4.08 effective cores**, walk-phase RSS 10-19 GB, 751M source rows, 26 shards, resume worked. Two residues: peak RSS 36.9 GB from *close-path* transients (a max-rung close materializes ~100M-row combined long + non-streaming pivot ≈ 10 GB, stacking with the walk), and the serial close-drain tail ate roughly half the wall (extrapolated full-range wall ≈ 1h55m ≈ Fargate pacing, not yet <1h).
+
+- **Chunked closes** (`a7b6097`): closes over an estimated 2 GiB combined-long are split into disjoint bin-range chunks (combine+widen per chunk, concat wides, one global sort at write; ≤64 chunks). Byte-identity proven by uniqueness of wide rows per (dims, bin) + total writer sort; regression-tested with a forced 3-chunk build. This was the "close-time memory binds" trigger, taken at the lightweight end short of phase-2 sorted-run merges.
+
+Full-range run (`j16-full-1h`, fresh `manifest-full.jsonl`, outputs overwrite byte-identically) in progress — wall/eff-cores/peak-RSS to be recorded here. If wall lands meaningfully >1h, next lever is parallel close *computation* with deterministic-order registration (the close thread is single-threaded by design only for ShardIndex ordering, which a completion-order registration barrier preserves).
+
 ## Notes
 
 - Iterate code here directly (this clone), commit on `main` as usual; the laptop sessions will `git fetch` from `e` / get pushed-back commits — coordinate via this spec's status line.

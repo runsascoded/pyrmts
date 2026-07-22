@@ -174,6 +174,16 @@ def test_registration_records():
     assert all(t0_ms <= r.written_at_ms <= t1_ms for r in index.records)
 
 
+def test_parallel_close_registration_order_deterministic():
+    """Close compute runs on a pool, but registration order must equal
+    the sequential run's (the ordered-`seq` barrier): identical record
+    sequences, not just identical sets."""
+    _, _, idx1 = _run_engine(window='6h', workers=1)
+    _, _, idx4 = _run_engine(window='6h', workers=4)
+    strip = lambda r: (r.pyramid, r.tier, r.shard_dur, r.period_start_ms, r.period_end_ms, r.key)
+    assert [strip(r) for r in idx4.records] == [strip(r) for r in idx1.records]
+
+
 def test_resume_from_manifest():
     """Spot-reclaim recovery: shards recorded in the manifest are skipped,
     windows that only feed them are never processed, and the resumed run's

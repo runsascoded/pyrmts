@@ -15,13 +15,15 @@
 
 A **completion watermark** (largest prefix of finished windows — not the
 claim cursor) gates shard closes: when it passes a shard's
-`effective_end`, the coordinator hands the close to a dedicated close
-thread — combine the shard's runs (group_by-sum IS the monoid combine),
-materialize wide (hist-JSON built exactly once), write via
-`write_tier_parquet`, single `storage.put`, then
-`shard_index.record_shard` — registration immediately after each PUT,
-in deterministic (sequential-equivalent) close order, so the ShardIndex
-needs no locking and closes never stall the walk. Out-of-order spill
+`effective_end`, the coordinator hands the close to a small close pool —
+combine the shard's runs (group_by-sum IS the monoid combine; chunked by
+bin-range when large), materialize wide (hist-JSON built exactly once),
+write via `write_tier_parquet`, single `storage.put`, then
+`shard_index.record_shard`. Close *compute* (and PUTs) overlap freely;
+registration + result bookkeeping pass through an ordered barrier in
+submission order, so the ShardIndex sees the deterministic
+(sequential-equivalent) sequence without locking of its own, and closes
+never stall the walk. Out-of-order spill
 appends are safe: close combines + sorts, so append order can't reach
 output bytes (regression-tested: N-worker builds are byte-identical to
 `workers=1`).
@@ -77,6 +79,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 import time
 from bisect import bisect_right
 from collections import deque
@@ -247,6 +250,11 @@ _ADMIT_BURST = 2
 _CLOSE_CHUNK_BYTES = 2 << 30
 _SPILL_LONG_RATIO = 12
 _CLOSE_MAX_CHUNKS = 64
+# Concurrent close computations (combine/widen/PUT). Registration stays
+# in submission order regardless. Chunking bounds each worker's
+# transient; the admission RSS ceiling pauses the walk if a burst of
+# closes spikes anyway.
+_CLOSE_WORKERS = 3
 
 
 def build_local(
@@ -394,7 +402,8 @@ def build_local(
     }
     route_starts = {name: [s for s, _, _ in lst] for name, lst in route_shards.items()}
 
-    def _write_shard(shard: ExpectedShard, wide: pl.DataFrame, t_flush: float) -> None:
+    def _write_shard(shard: ExpectedShard, wide: pl.DataFrame, t_flush: float, seq: int) -> None:
+        nonlocal next_reg
         buf = io.BytesIO()
         kwargs: dict = {'sort': list(sort)} if sort is not None else {}
         rgs = rg_size_for(shard.tier)
@@ -402,19 +411,24 @@ def build_local(
             kwargs['row_group_size'] = rgs
         n_bytes = write_tier_parquet(wide.to_arrow(), pyramid, out=buf, **kwargs)
         pyramid.storage.put(shard.key, buf.getvalue())
-        shard_index.record_shard(ShardRecord(
-            pyramid=pyramid_name,
-            tier=shard.tier,
-            shard_dur=shard.shard_dur,
-            period_start_ms=_ms(shard.period_start),
-            period_end_ms=_ms(shard.period_end),
-            key=shard.key,
-            written_at_ms=now_ms(),
-        ))
-        result.written.append(WrittenShard(
-            key=shard.key, tier=shard.tier, shard_dur=shard.shard_dur,
-            rows=wide.height, bytes=n_bytes,
-        ))
+        with reg_cond:
+            while next_reg != seq:
+                reg_cond.wait()
+            shard_index.record_shard(ShardRecord(
+                pyramid=pyramid_name,
+                tier=shard.tier,
+                shard_dur=shard.shard_dur,
+                period_start_ms=_ms(shard.period_start),
+                period_end_ms=_ms(shard.period_end),
+                key=shard.key,
+                written_at_ms=now_ms(),
+            ))
+            result.written.append(WrittenShard(
+                key=shard.key, tier=shard.tier, shard_dur=shard.shard_dur,
+                rows=wide.height, bytes=n_bytes,
+            ))
+            next_reg += 1
+            reg_cond.notify_all()
         log(f"  flush {shard.tier:6s} {shard.key}: {wide.height:,} rows, "
             f"{n_bytes/1024:.0f} KiB, {time.time() - t_flush:.1f}s")
 
@@ -489,7 +503,10 @@ def build_local(
             del tf
         return rows, peak
 
-    def close_task(shard: ExpectedShard) -> None:
+    reg_cond = threading.Condition()
+    next_reg = 0
+
+    def close_task(shard: ExpectedShard, seq: int) -> None:
         """Combine a shard's spill runs and write it. Shards whose
         estimated combined long frame exceeds `_CLOSE_CHUNK_BYTES` are
         closed in disjoint bin-range chunks (combine + widen each, concat
@@ -497,28 +514,45 @@ def build_local(
         max-rung close was materializing a ~100M-row long frame plus a
         non-streaming pivot (~10 GB transient) on top of the walk. Bins
         partition across chunks and wide rows are unique per (dims, bin),
-        so chunking cannot reach output bytes."""
-        t_flush = time.time()
-        paths, run_bytes = spill.take_shard(shard.key)
-        n_chunks = min(
-            _CLOSE_MAX_CHUNKS,
-            max(1, -(-run_bytes * _SPILL_LONG_RATIO // _CLOSE_CHUNK_BYTES)),
-        )
-        if n_chunks == 1:
-            wide = long_to_wide(spill.combine_runs(paths), pyramid)
-        else:
-            s_ms, e_ms = _ms(shard.period_start), _ms(shard.period_end)
-            edges = [s_ms + (e_ms - s_ms) * k // n_chunks for k in range(n_chunks + 1)]
-            wides = [
-                long_to_wide(w, pyramid)
-                for lo, hi in zip(edges, edges[1:])
-                if (w := spill.combine_runs(paths, bin_range=(lo, hi))).height
-            ]
-            wide = pl.concat(wides) if wides else long_to_wide(spill.combine_runs([]), pyramid)
-        for path in paths:
-            path.unlink()
-        _write_shard(shard, wide, t_flush)
-        _trim_allocator()
+        so chunking cannot reach output bytes.
+
+        Compute (and the PUT) runs on any of `_CLOSE_WORKERS` threads;
+        registration + result bookkeeping wait for submission order
+        (`seq`), so the ShardIndex sees the sequential-equivalent order
+        with no locking of its own. Deadlock-free: the pool queue is
+        FIFO, so task k only ever waits on strictly-earlier tasks that
+        are already running or done."""
+        nonlocal next_reg
+        try:
+            t_flush = time.time()
+            paths, run_bytes = spill.take_shard(shard.key)
+            n_chunks = min(
+                _CLOSE_MAX_CHUNKS,
+                max(1, -(-run_bytes * _SPILL_LONG_RATIO // _CLOSE_CHUNK_BYTES)),
+            )
+            if n_chunks == 1:
+                wide = long_to_wide(spill.combine_runs(paths), pyramid)
+            else:
+                s_ms, e_ms = _ms(shard.period_start), _ms(shard.period_end)
+                edges = [s_ms + (e_ms - s_ms) * k // n_chunks for k in range(n_chunks + 1)]
+                wides = [
+                    long_to_wide(w, pyramid)
+                    for lo, hi in zip(edges, edges[1:])
+                    if (w := spill.combine_runs(paths, bin_range=(lo, hi))).height
+                ]
+                wide = pl.concat(wides) if wides else long_to_wide(spill.combine_runs([]), pyramid)
+            for path in paths:
+                path.unlink()
+            _write_shard(shard, wide, t_flush, seq)
+        finally:
+            with reg_cond:
+                if next_reg == seq:
+                    # Exception before registration: release the ordered
+                    # wait so later closes don't block behind a dead seq
+                    # (the error still surfaces via this task's Future).
+                    next_reg += 1
+                    reg_cond.notify_all()
+            _trim_allocator()
 
     n = len(periods)
     n_workers = workers or os.cpu_count() or 4
@@ -531,6 +565,7 @@ def build_local(
     watermark = 0
     evict = getattr(source, 'evict_before', None)
     cache_bytes = getattr(source, 'cache_bytes', None)
+    prefetch = getattr(source, 'prefetch', None)
     est_window = 0  # max observed per-window peak retained bytes
     last_progress = 0.0
 
@@ -574,10 +609,12 @@ def build_local(
         )
 
     window_pool = ThreadPoolExecutor(max_workers=n_workers)
-    # Dedicated close thread: closes never stall the walk, and the
-    # ShardIndex / result bookkeeping stay single-threaded with
-    # deterministic (sequential-equivalent) close order.
-    close_pool = ThreadPoolExecutor(max_workers=1)
+    # Close pool: closes never stall the walk, and compute (+PUT) runs on
+    # a few threads — the serial close-drain tail was ~half the wall on
+    # the 2-week probe. ShardIndex / result bookkeeping still happen in
+    # deterministic submission order via the `seq` ordered-registration
+    # barrier in `_write_shard`.
+    close_pool = ThreadPoolExecutor(max_workers=_CLOSE_WORKERS)
     close_futs: list[Future] = []
 
     def advance_watermark() -> None:
@@ -598,7 +635,7 @@ def build_local(
         for tier in tiers:
             q = pending[tier.name]
             while q and q[0].effective_end <= cursor:
-                close_futs.append(close_pool.submit(close_task, q.popleft()))
+                close_futs.append(close_pool.submit(close_task, q.popleft(), len(close_futs)))
 
     try:
         inflight: dict[Future, int] = {}
@@ -634,6 +671,11 @@ def build_local(
                 inflight[fut] = next_i
                 next_i += 1
                 burst += 1
+                if prefetch is not None and next_i + inflight_cap < n:
+                    # Warm the shard the claim frontier will reach next
+                    # (in-range by construction, so a miss is a real
+                    # coverage miss like any foreground read's).
+                    prefetch(max(periods[next_i + inflight_cap].start, from_))
 
         claim()
         while inflight:
@@ -679,6 +721,9 @@ def build_local(
     finally:
         window_pool.shutdown(wait=True, cancel_futures=True)
         close_pool.shutdown(wait=True, cancel_futures=True)
+        close_source = getattr(source, 'close', None)
+        if close_source is not None:
+            close_source()
         close_index = getattr(shard_index, 'close', None)
         if close_index is not None:
             close_index()

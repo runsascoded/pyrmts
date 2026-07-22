@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import io
 import threading
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from typing import Protocol
 
 import polars as pl
@@ -70,6 +71,7 @@ class WideShardSource:
         self._n_periods = 0
         self._missing: list[str] = []
         self._lock = threading.Lock()
+        self._ra_pool: ThreadPoolExecutor | None = None
 
     @property
     def provides(self) -> tuple[str, str]:
@@ -134,6 +136,14 @@ class WideShardSource:
             frames = [e.frame for e in self._cache.values() if e.frame is not None]
         return sum(f.estimated_size() for f in frames)
 
+    def close(self) -> None:
+        """Stop the readahead pool (a parse in progress is abandoned to
+        finish on its own thread; nothing waits on it)."""
+        with self._lock:
+            pool, self._ra_pool = self._ra_pool, None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+
     def evict_before(self, start_ms: int) -> None:
         """Drop cached periods ending at/before `start_ms` (the earliest
         possibly-active window start — i.e. the executor's watermark)."""
@@ -144,6 +154,28 @@ class WideShardSource:
             ]
             for label in dead:
                 del self._cache[label]
+
+    def prefetch(self, at: datetime) -> None:
+        """Background-load the shard period covering instant `at` (one
+        readahead slot; single-flight with foreground loads via the
+        cache). The engine calls this with upcoming *in-range* window
+        starts, so a prefetch miss is a legitimate coverage miss exactly
+        like a foreground one. Without readahead every shard boundary
+        stalls all window workers for ~one parse (~30 s on ctbk avail —
+        ~25 min serialized across a full-range walk)."""
+        span_end = shard_periods_covering(at, at + timedelta(milliseconds=1), self.shard_dur)
+        if not span_end:
+            return
+        period = span_end[0]
+        with self._lock:
+            if period.label in self._cache:
+                return
+            if self._ra_pool is None:
+                self._ra_pool = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix='source-readahead',
+                )
+            pool = self._ra_pool
+        pool.submit(self._period_frame, period.label, int(period.end.timestamp() * 1000))
 
     def read_window(self, start: datetime, end: datetime) -> pl.DataFrame:
         pyramid = self.pyramid

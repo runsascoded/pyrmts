@@ -247,14 +247,16 @@ _ADMIT_BURST = 2
 # from run-file sizes (measured ~12-13× on ctbk avail spill runs), and a
 # chunk-count cap (each chunk rescans the shard's runs — local snappy
 # parquet, cheap, but not free).
-_CLOSE_CHUNK_BYTES = 2 << 30
+_CLOSE_CHUNK_BYTES = 1 << 30
 _SPILL_LONG_RATIO = 12
 _CLOSE_MAX_CHUNKS = 64
 # Concurrent close computations (combine/widen/PUT). Registration stays
 # in submission order regardless. Chunking bounds each worker's
 # transient; the admission RSS ceiling pauses the walk if a burst of
-# closes spikes anyway.
-_CLOSE_WORKERS = 3
+# closes spikes anyway. 2 (down from 3): the first full-range run's
+# close pool had slack (92/99 closed before walk-end) while concurrent
+# close transients drove the 37 GB peak RSS.
+_CLOSE_WORKERS = 2
 
 
 def build_local(

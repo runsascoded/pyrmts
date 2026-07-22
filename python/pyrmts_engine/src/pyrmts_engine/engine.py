@@ -275,6 +275,8 @@ def build_local(
     workers: int | None = None,
     max_inflight: int | None = None,
     mem_budget: int | None = None,
+    close_workers: int | None = None,
+    close_chunk_bytes: int | None = None,
     resume: bool = False,
     allow_empty: bool = False,
     max_missing_source: float = 0.0,
@@ -315,6 +317,13 @@ def build_local(
             docstring). Default: 70% of the detected memory limit
             (cgroup, then MemTotal); pass 0 to disable byte-aware
             admission entirely.
+        close_workers: concurrent close computations (default
+            `_CLOSE_WORKERS`). More overlaps closes with the walk
+            (wall) at the cost of stacked close transients (peak RSS) —
+            the par-vs-mem profile dial, with `window`/`mem_budget`.
+        close_chunk_bytes: target combined-long bytes per close chunk
+            (default `_CLOSE_CHUNK_BYTES`); smaller bounds each close's
+            transient tighter.
         resume: skip shards already recorded in `shard_index` (which must
             expose `existing_keys()` — the JSONL manifest impls do), and
             skip source windows that only feed skipped shards. Shards are
@@ -507,6 +516,7 @@ def build_local(
 
     reg_cond = threading.Condition()
     next_reg = 0
+    chunk_bytes = close_chunk_bytes or _CLOSE_CHUNK_BYTES
 
     def close_task(shard: ExpectedShard, seq: int) -> None:
         """Combine a shard's spill runs and write it. Shards whose
@@ -518,7 +528,7 @@ def build_local(
         partition across chunks and wide rows are unique per (dims, bin),
         so chunking cannot reach output bytes.
 
-        Compute (and the PUT) runs on any of `_CLOSE_WORKERS` threads;
+        Compute (and the PUT) runs on any of the close pool's threads;
         registration + result bookkeeping wait for submission order
         (`seq`), so the ShardIndex sees the sequential-equivalent order
         with no locking of its own. Deadlock-free: the pool queue is
@@ -530,7 +540,7 @@ def build_local(
             paths, run_bytes = spill.take_shard(shard.key)
             n_chunks = min(
                 _CLOSE_MAX_CHUNKS,
-                max(1, -(-run_bytes * _SPILL_LONG_RATIO // _CLOSE_CHUNK_BYTES)),
+                max(1, -(-run_bytes * _SPILL_LONG_RATIO // chunk_bytes)),
             )
             if n_chunks == 1:
                 wide = long_to_wide(spill.combine_runs(paths), pyramid)
@@ -616,7 +626,7 @@ def build_local(
     # the 2-week probe. ShardIndex / result bookkeeping still happen in
     # deterministic submission order via the `seq` ordered-registration
     # barrier in `_write_shard`.
-    close_pool = ThreadPoolExecutor(max_workers=_CLOSE_WORKERS)
+    close_pool = ThreadPoolExecutor(max_workers=close_workers or _CLOSE_WORKERS)
     close_futs: list[Future] = []
 
     def advance_watermark() -> None:

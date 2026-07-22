@@ -141,6 +141,8 @@ def build_command(
     workers: int | None = None,
     max_inflight: int | None = None,
     mem_budget: str | None = None,
+    close_workers: int | None = None,
+    close_chunk: str | None = None,
     verbose: bool = True,
 ) -> list[str]:
     """Container command for the base image (whose entrypoint is
@@ -174,6 +176,10 @@ def build_command(
         cmd += ['-K', str(max_inflight)]
     if mem_budget is not None:
         cmd += ['-b', mem_budget]
+    if close_workers is not None:
+        cmd += ['-C', str(close_workers)]
+    if close_chunk is not None:
+        cmd += ['-c', close_chunk]
     if verbose:
         cmd += ['-v']
     cmd += [config]

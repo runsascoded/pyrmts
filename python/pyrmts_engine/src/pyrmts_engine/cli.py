@@ -108,6 +108,8 @@ def plan(filters: tuple[str, ...], dot_out: str | None, fs_root: str | None, ran
 
 @cli.command()
 @option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the detected memory limit; 0 disables)")
+@option('-C', '--close-workers', type=int, help="Concurrent close computations (default 2): more overlaps closes with the walk (wall) at the cost of stacked close transients (peak RSS)")
+@option('-c', '--close-chunk', help="Target combined-long bytes per close chunk, e.g. 1g (default 1g); smaller bounds each close's transient tighter")
 @option('-d', '--source-shard', help="Source rung shard Duration for the default WideShardSource (default: the base tier's smallest; ctbk-style durable rungs are usually the LARGEST)")
 @option('-e', '--allow-empty', is_flag=True, help="Permit a 0-source-row (all-EMPTY) build; without it that exits nonzero (~always a mis-specified source rung)")
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
@@ -129,6 +131,8 @@ def plan(filters: tuple[str, ...], dot_out: str | None, fs_root: str | None, ran
 @argument('config')
 def build(
     mem_budget: str | None,
+    close_workers: int | None,
+    close_chunk: str | None,
     source_shard: str | None,
     allow_empty: bool,
     filters: tuple[str, ...],
@@ -187,6 +191,8 @@ def build(
             workers=workers,
             max_inflight=max_inflight,
             mem_budget=_parse_bytes(mem_budget) if mem_budget is not None else None,
+            close_workers=close_workers,
+            close_chunk_bytes=_parse_bytes(close_chunk) if close_chunk is not None else None,
             resume=resume,
             allow_empty=allow_empty,
             max_missing_source=max_missing,
@@ -253,6 +259,8 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 
 @batch.command('submit')
 @option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the container's cgroup limit; 0 disables)")
+@option('-C', '--close-workers', type=int, help="build -C: concurrent close computations")
+@option('-c', '--close-chunk', help="build -c: target combined-long bytes per close chunk, e.g. 1g")
 @option('-d', '--source-shard', help="Source rung shard Duration (WideShardSource; durable rungs are usually the LARGEST)")
 @option('-e', '--env', 'envs', multiple=True, help="Extra container env var, NAME=VALUE (repeatable)")
 @option('-E', '--allow-empty', is_flag=True, help="Permit a 0-source-row (all-EMPTY) build")
@@ -277,6 +285,8 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 @argument('config')
 def batch_submit(
     mem_budget: str | None,
+    close_workers: int | None,
+    close_chunk: str | None,
     source_shard: str | None,
     envs: tuple[str, ...],
     allow_empty: bool,
@@ -322,6 +332,8 @@ def batch_submit(
             workers=workers,
             max_inflight=max_inflight,
             mem_budget=mem_budget,
+            close_workers=close_workers,
+            close_chunk=close_chunk,
         ),
         job_name=job_name or f'{pyramid_name}-build',
         queue=f'{PREFIX}-od' if on_demand else PREFIX,

@@ -125,11 +125,12 @@ def test_batch_submit_tuning_passthrough():
     from pyrmts_engine.batch import build_command
     cmd = build_command(
         's3://b/config.yaml', pyramid_name='p', range_='2026-01-01T00:00/2026-01-02T00:00',
-        workers=16, max_inflight=8, mem_budget='24g',
+        workers=16, max_inflight=8, mem_budget='24g', close_workers=3, close_chunk='2g',
     )
     assert cmd == [
         'build', '-n', 'p', '-r', '2026-01-01T00:00/2026-01-02T00:00',
-        '-j', '16', '-K', '8', '-b', '24g', '-v', 's3://b/config.yaml',
+        '-j', '16', '-K', '8', '-b', '24g', '-C', '3', '-c', '2g', '-v',
+        's3://b/config.yaml',
     ]
 
 
@@ -146,12 +147,12 @@ def test_chunked_close_byte_identical(monkeypatch):
         p_ref, (FROM, TO), WideShardSource(p_ref), pyramid_name='test',
     )
 
-    monkeypatch.setattr(engine_mod, '_CLOSE_CHUNK_BYTES', 1)
     monkeypatch.setattr(engine_mod, '_CLOSE_MAX_CHUNKS', 3)
     p_chunked = make_pyramid()
     write_base_shards(p_chunked)
     r_chunked = build_local(
         p_chunked, (FROM, TO), WideShardSource(p_chunked), pyramid_name='test',
+        close_chunk_bytes=1,
     )
     assert sorted(w.key for w in r_chunked.written) == sorted(w.key for w in r_ref.written)
     for w in r_ref.written:

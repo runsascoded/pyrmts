@@ -102,8 +102,8 @@ def test_mem_budget_throttles_but_completes_byte_identical():
 
 
 def test_source_cache_bytes_tracks_residency():
-    """`cache_bytes` (admission's cache term) grows with parsed shards and
-    returns to 0 once the watermark evicts them."""
+    """`cache_bytes` (the progress line's cache column) grows with parsed
+    shards and returns to 0 once the watermark evicts them."""
     pyramid = make_pyramid()
     write_base_shards(pyramid)
     src = WideShardSource(pyramid)

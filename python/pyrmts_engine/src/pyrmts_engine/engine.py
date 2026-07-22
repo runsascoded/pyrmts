@@ -38,13 +38,23 @@ On top of the `max_inflight` count bound, claims are **byte-aware**
 (ctbk finding 10: `j=16` alone busted a 61 GB box regardless of `K`):
 window 0 — already serialized for cold-start safety — measures its own
 peak live bytes (window frame + cascade frames, freed eagerly as their
-consumers finish), and further claims are admitted only while
-`(inflight + 1) × 2 × est + source_cache_bytes ≤ mem_budget` (the ×2
-covers group-by/parse transients above retained frames; the estimate is
-the max observed across completed windows). The budget defaults to 70%
-of the detected memory limit (cgroup v2/v1, then MemTotal), so an
-oversized `workers` degrades to throttled parallelism instead of a
-silent OOM kill. At least one window is always admitted.
+consumers finish), the estimate is thereafter the max observed across
+completed windows, and further claims are admitted only while
+
+    current_rss + (inflight + 1) × 2 × est ≤ mem_budget
+
+Gating on *actual RSS* (not an estimate of committed bytes) makes the
+controller feedback-driven: source-cache growth, parse/group-by
+transients, close-thread spikes, and allocator slack all show up in RSS
+and shrink further admission, while the `(inflight + 1) × 2 × est` term
+reserves worst-case room for tasks that were claimed but haven't
+materialized their frames yet (a claim's RSS lands seconds later; the
+first 61 GB OOM on `e` was exactly claim-time-only accounting). Mature
+in-flight tasks are double-counted (already in RSS *and* reserved) —
+deliberately conservative. The budget defaults to 70% of the detected
+memory limit (cgroup v2/v1, then MemTotal), so an oversized `workers`
+degrades to throttled parallelism instead of a silent OOM kill. At
+least one window is always admitted.
 
 Observability (ctbk finding 9 — two OOM'd Batch runs produced zero log
 lines): a startup banner (resolved workers/K/budget, window count,
@@ -396,10 +406,9 @@ def build_local(
     # Cascade consumer counts: a tier's window frame is freed as soon as
     # its last consumer has re-binned from it (finding 10: retaining all
     # tiers' frames for the task's whole life ~tripled per-window bytes).
-    _BASE = ''  # frames-dict key for the source window frame
-    n_succ: dict[str, int] = {_BASE: 0, **{t.name: 0 for t in tiers}}
-    for t in tiers:
-        n_succ[plan.preds[t.name] or _BASE] += 1
+    n_succ: dict[str, int] = {t.name: 0 for t in tiers}
+    for t in tiers[1:]:
+        n_succ[plan.preds[t.name]] += 1
 
     def window_task(i: int) -> tuple[int, int]:
         """Returns (source rows, peak retained frame bytes) — the latter
@@ -409,28 +418,42 @@ def build_local(
         rows = frame.height
         w_start_ms = _ms(max(p.start, from_))
         w_end_ms = _ms(min(p.end, to))
-        frames: dict[str, pl.DataFrame] = {_BASE: frame}
-        sizes: dict[str, int] = {_BASE: frame.estimated_size()}
+
+        def route(tier_name: str, tf: pl.DataFrame) -> None:
+            if not tf.height:
+                return
+            shards = route_shards[tier_name]
+            lo = max(bisect_right(route_starts[tier_name], w_start_ms) - 1, 0)
+            for s_ms, e_ms, key in shards[lo:]:
+                if s_ms >= w_end_ms:
+                    break
+                if e_ms <= w_start_ms:
+                    continue
+                spill.append(key, tf.filter(
+                    (pl.col(bin_col) >= s_ms) & (pl.col(bin_col) < e_ms)
+                ))
+
+        # Base-tier passthrough: the Source contract guarantees bins
+        # already floored to the base bin, so a rebin here would be an
+        # identity group_by — a full copy plus transients per window.
+        # Duplicate keys a source might emit combine at spill close.
+        base = tiers[0].name
         remaining = dict(n_succ)
+        frames = {base: frame}
+        sizes = {base: frame.estimated_size()}
+        live = peak = sizes[base]
+        route(base, frame)
+        if not remaining[base]:
+            del frames[base]
+            live -= sizes.pop(base)
         del frame
-        live = peak = sizes[_BASE]
-        for tier in tiers:
-            pred = plan.preds[tier.name] or _BASE
+        for tier in tiers[1:]:
+            pred = plan.preds[tier.name]
             tf = rebin_long(frames[pred], pyramid, floor_exprs[tier.name])
             sz = tf.estimated_size()
             live += sz
             peak = max(peak, live)
-            if tf.height:
-                shards = route_shards[tier.name]
-                lo = max(bisect_right(route_starts[tier.name], w_start_ms) - 1, 0)
-                for s_ms, e_ms, key in shards[lo:]:
-                    if s_ms >= w_end_ms:
-                        break
-                    if e_ms <= w_start_ms:
-                        continue
-                    spill.append(key, tf.filter(
-                        (pl.col(bin_col) >= s_ms) & (pl.col(bin_col) < e_ms)
-                    ))
+            route(tier.name, tf)
             remaining[pred] -= 1
             if remaining[pred] == 0:
                 del frames[pred]
@@ -476,11 +499,15 @@ def build_local(
     _warmup_arrow()
 
     def admitted_cap() -> int:
-        """Windows the byte budget currently admits (≥1 for progress)."""
+        """Windows the byte budget currently admits (≥1 for progress):
+        actual RSS + a worst-case reservation per in-flight window must
+        stay under budget."""
         if not (mem_budget and est_window):
             return inflight_cap
-        cached = cache_bytes() if cache_bytes is not None else 0
-        return max(1, int((mem_budget - cached) // (_ADMIT_HEADROOM * est_window)))
+        rss = _rss_bytes()
+        if rss is None:
+            return inflight_cap
+        return max(1, int((mem_budget - rss) // (_ADMIT_HEADROOM * est_window)))
 
     def progress(inflight: int) -> None:
         nonlocal last_progress
@@ -492,6 +519,7 @@ def build_local(
             f"progress: {watermark}/{n} windows, {len(result.written)} shards "
             f"written, {inflight} in-flight (cap {min(inflight_cap, admitted_cap())})"
             + (f", rss {rss / 1e9:.1f}GB" if rss is not None else '')
+            + (f", cache {cache_bytes() / 1e9:.1f}GB" if cache_bytes is not None else '')
         )
 
     window_pool = ThreadPoolExecutor(max_workers=n_workers)

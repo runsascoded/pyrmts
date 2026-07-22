@@ -239,6 +239,15 @@ _ADMIT_RSS_CEILING = 0.85
 # cold start is how the first two OOMs got past claim-time gating.
 _ADMIT_BURST = 2
 
+# Chunked-close sizing: target combined-long bytes per close chunk, the
+# snappy-parquet → in-memory long-frame inflation used to estimate them
+# from run-file sizes (measured ~12-13× on ctbk avail spill runs), and a
+# chunk-count cap (each chunk rescans the shard's runs — local snappy
+# parquet, cheap, but not free).
+_CLOSE_CHUNK_BYTES = 2 << 30
+_SPILL_LONG_RATIO = 12
+_CLOSE_MAX_CHUNKS = 64
+
 
 def build_local(
     pyramid: Pyramid,
@@ -385,9 +394,7 @@ def build_local(
     }
     route_starts = {name: [s for s, _, _ in lst] for name, lst in route_shards.items()}
 
-    def _write_shard(shard: ExpectedShard, rows: pl.DataFrame) -> None:
-        t_flush = time.time()
-        wide = long_to_wide(rows, pyramid)
+    def _write_shard(shard: ExpectedShard, wide: pl.DataFrame, t_flush: float) -> None:
         buf = io.BytesIO()
         kwargs: dict = {'sort': list(sort)} if sort is not None else {}
         rgs = rg_size_for(shard.tier)
@@ -483,7 +490,34 @@ def build_local(
         return rows, peak
 
     def close_task(shard: ExpectedShard) -> None:
-        _write_shard(shard, spill.close_shard(shard.key))
+        """Combine a shard's spill runs and write it. Shards whose
+        estimated combined long frame exceeds `_CLOSE_CHUNK_BYTES` are
+        closed in disjoint bin-range chunks (combine + widen each, concat
+        the far-smaller wide frames, one global sort at write): a 4d
+        max-rung close was materializing a ~100M-row long frame plus a
+        non-streaming pivot (~10 GB transient) on top of the walk. Bins
+        partition across chunks and wide rows are unique per (dims, bin),
+        so chunking cannot reach output bytes."""
+        t_flush = time.time()
+        paths, run_bytes = spill.take_shard(shard.key)
+        n_chunks = min(
+            _CLOSE_MAX_CHUNKS,
+            max(1, -(-run_bytes * _SPILL_LONG_RATIO // _CLOSE_CHUNK_BYTES)),
+        )
+        if n_chunks == 1:
+            wide = long_to_wide(spill.combine_runs(paths), pyramid)
+        else:
+            s_ms, e_ms = _ms(shard.period_start), _ms(shard.period_end)
+            edges = [s_ms + (e_ms - s_ms) * k // n_chunks for k in range(n_chunks + 1)]
+            wides = [
+                long_to_wide(w, pyramid)
+                for lo, hi in zip(edges, edges[1:])
+                if (w := spill.combine_runs(paths, bin_range=(lo, hi))).height
+            ]
+            wide = pl.concat(wides) if wides else long_to_wide(spill.combine_runs([]), pyramid)
+        for path in paths:
+            path.unlink()
+        _write_shard(shard, wide, t_flush)
         _trim_allocator()
 
     n = len(periods)

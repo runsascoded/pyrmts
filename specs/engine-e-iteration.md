@@ -1,6 +1,6 @@
 # Engine executor iteration on `e` (ctbk avail workload)
 
-Status: **open** (2026-07-22, written by the ctbk laptop session). Iterate `pyrmts-engine`'s parallel window executor on this box (m6g.4xlarge: 16× Graviton2, 61 GB, aarch64 — same arch family as the Fargate target) until the full-range ctbk avail build completes with bounded memory and a wall/effective-cores number worth reporting. Batch is parked until this converges; the final proof run goes back there (image rebuild → `bootstrap -i` → Spot + `-u` resume).
+Status: **in progress** (2026-07-22, e session iterating; findings 8-11 landed, memory controller converging — see Iteration log). Iterate `pyrmts-engine`'s parallel window executor on this box (m6g.4xlarge: 16× Graviton2, 61 GB, aarch64 — same arch family as the Fargate target) until the full-range ctbk avail build completes with bounded memory and a wall/effective-cores number worth reporting. Batch is parked until this converges; the final proof run goes back there (image rebuild → `bootstrap -i` → Spot + `-u` resume).
 
 ## Context
 
@@ -36,6 +36,18 @@ Status: **open** (2026-07-22, written by the ctbk laptop session). Iterate `pyrm
 3. Wall + effective cores (CPU-time/wall) reported; target: meaningfully above 2.7 cores — ideally wall < 1h.
 4. Byte-identity: `workers=N` output ≡ `workers=1` (the existing regression test), and the ctbk session will content-compare scratch vs the fan-out reference after a full run — don't delete scratch outputs.
 5. Findings 8-9 landed (passthrough + banner); finding 10 landed at least as a documented default (`K` scaled by `window/shard_dur`) if byte-aware admission is deferred.
+
+## Iteration log (e session, 2026-07-22)
+
+Measured ground truth (probe on one 12h window / one 2d source shard, pre-fix): source shard parses to a **3.6 GB** long frame (104.7M rows); a 12h window frame is **823 MB**; the tier cascade retained **~2 GB more** (all 15 tier frames held for the task's life); peak RSS for one window incl. parse transients ~14 GB. 8 in-flight × that ≈ the observed 61 GB OOM — fully explained.
+
+Landed (each with its own commit):
+
+- **Findings 8, 9, 11** (`53b37c7`): `batch submit` `--workers`/`-K`/`-b` passthrough; always-on stderr startup banner + ≤1/30s progress line (windows, shards, in-flight vs cap, RSS, cache); `_warmup_arrow()` main-thread pyarrow init + `pq.read_table(use_threads=False)` in `WideShardSource` (worker-level parallelism already saturates cores).
+- **Finding 10, round 1** (`53b37c7`): estimate-based byte-aware admission — **insufficient**: claim-time-only accounting; 2nd OOM @62 GB. Round 2 (`e6e5aed`): RSS-feedback gate `rss + (inflight+1)×H×est ≤ budget` + base-tier rebin passthrough (the 1m→1m group_by was an identity copy: 823 MB + transients + ~4s CPU per 12h window) — **still insufficient** at `-w 3h`: 16 claims admitted in one cold-start pass at rss 7.7 GB; true per-task delta ≈ 5× retained-frame est; memcg-killed at 43.9 GB (the new `systemd-run MemoryMax=42G` wrapper confined it — no more box-wide OOM/thrash, which was also what kept killing the CC session). Round 3 (`e5a3dd4`): slow-start (≤2 claims/pass) + no-claims ceiling at 85% of budget (close-transient reserve) + headroom ×4.
+- **`metric` Utf8 → Enum** (`21305a4`): −15% on every long frame (shard 3.6→3.05 GB, 12h window 823→703 MB).
+
+Key structural insight: `-w` is the real per-task-memory dial (the spec's "stream/chunk the rebin cascade" ≡ smaller windows, since everything is monoid and spill-close combines partial bins). 12h windows → ~6.5 GB true per-task footprint → even correct admission can only run ~4-5 workers in 24 GB; 1h windows → ~0.5-0.7 GB/task → all 16 workers fit.
 
 ## Notes
 

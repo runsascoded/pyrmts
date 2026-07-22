@@ -130,6 +130,31 @@ def test_batch_submit_tuning_passthrough():
     ]
 
 
+def test_chunked_close_byte_identical(monkeypatch):
+    """Close-path memory bound: a tiny chunk target forces every close
+    through the multi-chunk path (combine+widen per bin-range, concat,
+    one global sort at write) — outputs must be byte-identical to
+    whole-shard closes."""
+    import pyrmts_engine.engine as engine_mod
+
+    p_ref = make_pyramid()
+    write_base_shards(p_ref)
+    r_ref = build_local(
+        p_ref, (FROM, TO), WideShardSource(p_ref), pyramid_name='test',
+    )
+
+    monkeypatch.setattr(engine_mod, '_CLOSE_CHUNK_BYTES', 1)
+    monkeypatch.setattr(engine_mod, '_CLOSE_MAX_CHUNKS', 3)
+    p_chunked = make_pyramid()
+    write_base_shards(p_chunked)
+    r_chunked = build_local(
+        p_chunked, (FROM, TO), WideShardSource(p_chunked), pyramid_name='test',
+    )
+    assert sorted(w.key for w in r_chunked.written) == sorted(w.key for w in r_ref.written)
+    for w in r_ref.written:
+        assert p_chunked.storage.get(w.key) == p_ref.storage.get(w.key), w.key
+
+
 def test_row_group_size_int_and_per_tier():
     pyramid = make_pyramid()
     write_base_shards(pyramid)

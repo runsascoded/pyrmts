@@ -57,23 +57,35 @@ class SpillBuffer:
         with self._lock:
             self._runs.setdefault(shard_key, []).append(path)
 
-    def close_shard(self, shard_key: str) -> pl.DataFrame:
-        """Finalize a shard's spill: combine its runs (monoid
-        group_by-sum, streaming) and delete them."""
+    def take_shard(self, shard_key: str) -> tuple[list[Path], int]:
+        """Detach a shard's run files (and their total on-disk bytes) for
+        closing. The caller owns deletion once combined."""
         with self._lock:
             paths = sorted(self._runs.pop(shard_key, []))
             self._counts.pop(shard_key, None)
+        return paths, sum(p.stat().st_size for p in paths)
+
+    def combine_runs(
+        self,
+        paths: list[Path],
+        bin_range: tuple[int, int] | None = None,
+    ) -> pl.DataFrame:
+        """Monoid-combine run files (group_by-sum, streaming), optionally
+        restricted to bins in `[lo, hi)` — the chunked-close seam: bins
+        are disjoint across chunks, so chunk-wise combines ≡ one global
+        combine."""
         if not paths:
             return empty_long(self.pyramid)
-        combined = (
-            pl.scan_parquet(paths)
-            .group_by(group_cols(self.pyramid))
+        lf = pl.scan_parquet(paths)
+        if bin_range is not None:
+            lo, hi = bin_range
+            bin_col = self.pyramid.binCol
+            lf = lf.filter((pl.col(bin_col) >= lo) & (pl.col(bin_col) < hi))
+        return (
+            lf.group_by(group_cols(self.pyramid))
             .agg(pl.col(COUNT_COL).sum())
             .collect(engine='streaming')
         )
-        for path in paths:
-            path.unlink()
-        return combined
 
     def close(self) -> None:
         """Abort: delete any remaining run files."""

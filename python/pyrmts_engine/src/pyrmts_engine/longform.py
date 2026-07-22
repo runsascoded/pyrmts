@@ -32,6 +32,17 @@ STATE_COL = 'state'
 COUNT_COL = 'count'
 
 
+def metric_dtype(pyramid: Pyramid) -> pl.Enum:
+    """The long `metric` column's dtype: an Enum over the (deterministic)
+    hist metric names + scalar state-column names. ~15 distinct values
+    repeated across 10^8 rows — Enum's u32 physical rep cuts long-frame
+    bytes by ~a third vs Utf8 and makes every group_by key integer-hashed.
+    Category order is internal-only (never reaches output bytes)."""
+    return pl.Enum(
+        [m.name for m in hist_metrics(pyramid)] + scalar_state_cols(pyramid)
+    )
+
+
 def hist_metrics(pyramid: Pyramid) -> list[Metric]:
     return [m for m in pyramid.metrics if m.monoid == 'histogram']
 
@@ -66,7 +77,7 @@ def long_schema(pyramid: Pyramid) -> dict[str, pl.DataType]:
     for d in pyramid.dims:
         schema[d.name] = pl.Int64 if d.type == 'int' else pl.Utf8
     schema[pyramid.binCol] = pl.Int64
-    schema[METRIC_COL] = pl.Utf8
+    schema[METRIC_COL] = metric_dtype(pyramid)
     schema[STATE_COL] = pl.Int32
     schema[COUNT_COL] = pl.Float64
     return schema

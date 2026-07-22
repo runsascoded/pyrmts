@@ -27,11 +27,30 @@ output bytes (regression-tested: N-worker builds are byte-identical to
 `workers=1`).
 
 `max_inflight` bounds claims (window `i` claimable only while
-`i − watermark < max_inflight`), so peak memory ≈ `max_inflight` windows'
-frames + one closing shard's combined long form — NOT the sum of open
-max-rung WIP buffers (ctbk measured ~40 GB that way on a 4-day smoke;
-see the spill module docstring). Max-rung shards accumulate on scratch
-disk across the whole run: no scaffold shards, ever.
+`i − watermark < max_inflight`), so peak memory ≈ in-flight windows'
+frames + resident source-shard cache + one closing shard's combined long
+form — NOT the sum of open max-rung WIP buffers (ctbk measured ~40 GB
+that way on a 4-day smoke; see the spill module docstring). Max-rung
+shards accumulate on scratch disk across the whole run: no scaffold
+shards, ever.
+
+On top of the `max_inflight` count bound, claims are **byte-aware**
+(ctbk finding 10: `j=16` alone busted a 61 GB box regardless of `K`):
+window 0 — already serialized for cold-start safety — measures its own
+peak live bytes (window frame + cascade frames, freed eagerly as their
+consumers finish), and further claims are admitted only while
+`(inflight + 1) × 2 × est + source_cache_bytes ≤ mem_budget` (the ×2
+covers group-by/parse transients above retained frames; the estimate is
+the max observed across completed windows). The budget defaults to 70%
+of the detected memory limit (cgroup v2/v1, then MemTotal), so an
+oversized `workers` degrades to throttled parallelism instead of a
+silent OOM kill. At least one window is always admitted.
+
+Observability (ctbk finding 9 — two OOM'd Batch runs produced zero log
+lines): a startup banner (resolved workers/K/budget, window count,
+range, source rung, spill dir) prints to stderr before the first read,
+and a progress line (windows done, shards written, in-flight vs
+admitted cap, RSS) prints on watermark advance at most every 30 s.
 
 Zero-row expected shards are written (and registered) as EMPTY shards —
 cover-complete + zero rows is a legitimate state (outage windows), not a
@@ -139,6 +158,62 @@ def _ms(t: datetime) -> int:
     return int(t.timestamp() * 1000)
 
 
+_PAGE = os.sysconf('SC_PAGESIZE') if hasattr(os, 'sysconf') else 4096
+
+
+def _rss_bytes() -> int | None:
+    """Current RSS (Linux /proc; None elsewhere)."""
+    try:
+        with open('/proc/self/statm') as f:
+            return int(f.read().split()[1]) * _PAGE
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _detect_mem_bytes() -> int | None:
+    """Effective memory limit: cgroup v2 `memory.max`, then cgroup v1
+    `memory.limit_in_bytes` (Batch/Fargate set these on the container),
+    then host MemTotal. None when nothing is readable (non-Linux)."""
+    for path in (
+        '/sys/fs/cgroup/memory.max',
+        '/sys/fs/cgroup/memory/memory.limit_in_bytes',
+    ):
+        try:
+            v = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if v.isdigit() and int(v) < 1 << 60:  # v1 reports ~2^63 for "no limit"
+            return int(v)
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+def _warmup_arrow() -> None:
+    """One-time in-memory parquet round-trip on the calling (main) thread,
+    before any worker pool exists: forces pyarrow's lazy initialization so
+    N workers' first concurrent reads can't race it (ctbk finding 11:
+    intermittent cold-start SIGSEGV on aarch64, not fixed by serializing
+    only window 0's read — every thread's *first* read participated)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    buf = io.BytesIO()
+    pq.write_table(pa.table({'x': [0]}), buf)
+    buf.seek(0)
+    pq.read_table(buf)
+
+
+# Admission headroom over retained frame bytes: group-by/parse transients
+# roughly double a window task's peak footprint (measured on ctbk avail:
+# ~2.5 GB retained → ~4-5 GB task RSS delta).
+_ADMIT_HEADROOM = 2
+
+
 def build_local(
     pyramid: Pyramid,
     time_range: tuple[datetime, datetime],
@@ -154,6 +229,7 @@ def build_local(
     spill_dir: str | Path | None = None,
     workers: int | None = None,
     max_inflight: int | None = None,
+    mem_budget: int | None = None,
     resume: bool = False,
     allow_empty: bool = False,
     max_missing_source: float = 0.0,
@@ -186,8 +262,14 @@ def build_local(
             Fargate reports the job's vCPUs). `workers=1` is the
             sequential reference the byte-identity gate compares against.
         max_inflight: claim bound `K` — window `i` is claimable only
-            while `i − watermark < K`; bounds peak memory ≈ K windows'
-            frames (default `2 × workers`).
+            while `i − watermark < K` (default `2 × workers`). Bounds
+            watermark lag (and so source-cache span ≈
+            `⌈K·window/source_shard_dur⌉` resident shards); byte-level
+            memory is governed by `mem_budget`.
+        mem_budget: byte budget gating window admission (see module
+            docstring). Default: 70% of the detected memory limit
+            (cgroup, then MemTotal); pass 0 to disable byte-aware
+            admission entirely.
         resume: skip shards already recorded in `shard_index` (which must
             expose `existing_keys()` — the JSONL manifest impls do), and
             skip source windows that only feed skipped shards. Shards are
@@ -251,9 +333,12 @@ def build_local(
     spill_root = Path(tempfile.mkdtemp(prefix='pyrmts-engine-')) if own_spill else Path(spill_dir)
     spill = SpillBuffer(spill_root, pyramid)
 
+    def err(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
+
     def log(msg: str) -> None:
         if verbose:
-            print(msg, file=sys.stderr)
+            err(msg)
 
     def rg_size_for(tier_name: str) -> int | None:
         if row_group_size is None:
@@ -305,33 +390,58 @@ def build_local(
         if p.end > resume_from
     ]
     if resume and result.resumed_shards:
-        log(f"resume: {result.resumed_shards} manifested shards skipped, "
+        err(f"resume: {result.resumed_shards} manifested shards skipped, "
             f"restarting from {resume_from:%Y-%m-%dT%H:%M} ({len(periods)} windows)")
 
-    def window_task(i: int) -> int:
+    # Cascade consumer counts: a tier's window frame is freed as soon as
+    # its last consumer has re-binned from it (finding 10: retaining all
+    # tiers' frames for the task's whole life ~tripled per-window bytes).
+    _BASE = ''  # frames-dict key for the source window frame
+    n_succ: dict[str, int] = {_BASE: 0, **{t.name: 0 for t in tiers}}
+    for t in tiers:
+        n_succ[plan.preds[t.name] or _BASE] += 1
+
+    def window_task(i: int) -> tuple[int, int]:
+        """Returns (source rows, peak retained frame bytes) — the latter
+        feeds byte-aware admission."""
         p = periods[i]
         frame = source.read_window(max(p.start, from_), min(p.end, to))
+        rows = frame.height
         w_start_ms = _ms(max(p.start, from_))
         w_end_ms = _ms(min(p.end, to))
-        window_frames: dict[str, pl.DataFrame] = {}
+        frames: dict[str, pl.DataFrame] = {_BASE: frame}
+        sizes: dict[str, int] = {_BASE: frame.estimated_size()}
+        remaining = dict(n_succ)
+        del frame
+        live = peak = sizes[_BASE]
         for tier in tiers:
-            pred = plan.preds[tier.name]
-            src = frame if pred is None else window_frames[pred]
-            tf = rebin_long(src, pyramid, floor_exprs[tier.name])
-            window_frames[tier.name] = tf
-            if tf.height == 0:
-                continue
-            shards = route_shards[tier.name]
-            lo = max(bisect_right(route_starts[tier.name], w_start_ms) - 1, 0)
-            for s_ms, e_ms, key in shards[lo:]:
-                if s_ms >= w_end_ms:
-                    break
-                if e_ms <= w_start_ms:
-                    continue
-                spill.append(key, tf.filter(
-                    (pl.col(bin_col) >= s_ms) & (pl.col(bin_col) < e_ms)
-                ))
-        return frame.height
+            pred = plan.preds[tier.name] or _BASE
+            tf = rebin_long(frames[pred], pyramid, floor_exprs[tier.name])
+            sz = tf.estimated_size()
+            live += sz
+            peak = max(peak, live)
+            if tf.height:
+                shards = route_shards[tier.name]
+                lo = max(bisect_right(route_starts[tier.name], w_start_ms) - 1, 0)
+                for s_ms, e_ms, key in shards[lo:]:
+                    if s_ms >= w_end_ms:
+                        break
+                    if e_ms <= w_start_ms:
+                        continue
+                    spill.append(key, tf.filter(
+                        (pl.col(bin_col) >= s_ms) & (pl.col(bin_col) < e_ms)
+                    ))
+            remaining[pred] -= 1
+            if remaining[pred] == 0:
+                del frames[pred]
+                live -= sizes.pop(pred)
+            if remaining[tier.name]:
+                frames[tier.name] = tf
+                sizes[tier.name] = sz
+            else:
+                live -= sz
+            del tf
+        return rows, peak
 
     def close_task(shard: ExpectedShard) -> None:
         _write_shard(shard, spill.close_shard(shard.key))
@@ -340,10 +450,50 @@ def build_local(
     n = len(periods)
     n_workers = workers or os.cpu_count() or 4
     inflight_cap = max_inflight or 2 * n_workers
+    if mem_budget is None:
+        detected = _detect_mem_bytes()
+        mem_budget = int(detected * 0.7) if detected is not None else 0
     completed = [False] * n
     rows_of = [0] * n
     watermark = 0
     evict = getattr(source, 'evict_before', None)
+    cache_bytes = getattr(source, 'cache_bytes', None)
+    est_window = 0  # max observed per-window peak retained bytes
+    last_progress = 0.0
+
+    src_rung = getattr(source, 'provides', None)
+    err(
+        f"build_local: {n} windows × {window} over "
+        f"{from_:%Y-%m-%dT%H:%M}/{to:%Y-%m-%dT%H:%M}, "
+        f"{sum(len(q) for q in pending.values())} shards to write "
+        f"({len(plan.skipped_rungs)} rung-skipped"
+        + (f", {result.resumed_shards} resumed" if result.resumed_shards else '')
+        + f"), workers={n_workers}, max_inflight={inflight_cap}, "
+        f"mem_budget={mem_budget / 1e9:.1f}GB"
+        + (f", source rung={src_rung[0]}/{src_rung[1]}" if src_rung else '')
+        + f", spill={spill_root}"
+    )
+    _warmup_arrow()
+
+    def admitted_cap() -> int:
+        """Windows the byte budget currently admits (≥1 for progress)."""
+        if not (mem_budget and est_window):
+            return inflight_cap
+        cached = cache_bytes() if cache_bytes is not None else 0
+        return max(1, int((mem_budget - cached) // (_ADMIT_HEADROOM * est_window)))
+
+    def progress(inflight: int) -> None:
+        nonlocal last_progress
+        if time.time() - last_progress < 30:
+            return
+        last_progress = time.time()
+        rss = _rss_bytes()
+        err(
+            f"progress: {watermark}/{n} windows, {len(result.written)} shards "
+            f"written, {inflight} in-flight (cap {min(inflight_cap, admitted_cap())})"
+            + (f", rss {rss / 1e9:.1f}GB" if rss is not None else '')
+        )
+
     window_pool = ThreadPoolExecutor(max_workers=n_workers)
     # Dedicated close thread: closes never stall the walk, and the
     # ShardIndex / result bookkeeping stay single-threaded with
@@ -376,18 +526,21 @@ def build_local(
         next_i = 0
 
         def claim() -> None:
-            nonlocal next_i
+            nonlocal next_i, est_window
             while (
                 next_i < n
                 and len(inflight) < n_workers
                 and next_i - watermark < inflight_cap
+                and (not inflight or len(inflight) < admitted_cap())
             ):
                 fut = window_pool.submit(window_task, next_i)
                 if next_i == 0:
                     # Serialize the very first read: concurrent cold-start
                     # `pq.read_table` calls race pyarrow's lazy init
-                    # (intermittent SIGSEGV on aarch64 — ctbk finding 6).
-                    fut.result()
+                    # (intermittent SIGSEGV on aarch64 — ctbk finding 6);
+                    # window 0's result also seeds the admission estimate.
+                    _, est0 = fut.result()
+                    est_window = max(est_window, est0)
                 inflight[fut] = next_i
                 next_i += 1
 
@@ -396,10 +549,12 @@ def build_local(
             done, _ = wait(inflight, return_when=FIRST_COMPLETED)
             for fut in done:
                 i = inflight.pop(fut)
-                rows_of[i] = fut.result()
+                rows_of[i], est = fut.result()
+                est_window = max(est_window, est)
                 completed[i] = True
             advance_watermark()
             claim()
+            progress(len(inflight))
 
         for fut in close_futs:
             fut.result()
@@ -411,7 +566,7 @@ def build_local(
             n_periods, missing = cov()
             result.missing_source = len(missing)
             if missing:
-                log(f"missing source shards ({len(missing)}/{n_periods}): "
+                err(f"missing source shards ({len(missing)}/{n_periods}): "
                     + ', '.join(missing[:5]) + (', …' if len(missing) > 5 else ''))
             if len(missing) > max_missing_source * n_periods:
                 sample = ', '.join(missing[:5]) + (', …' if len(missing) > 5 else '')

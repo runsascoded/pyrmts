@@ -6,6 +6,9 @@
 2. `WideShardSource` parse cache — each source blob is fetched once even
    when `window < shard_dur`.
 3. `row_group_size` plumbs through to the output shards (per-tier).
+8. `batch submit` passes `--workers`/`-K`/`-b` through to `build`.
+10. Byte-aware admission: a starvation-level `mem_budget` degrades to
+    serial claims but still completes, byte-identically.
 """
 from __future__ import annotations
 
@@ -75,6 +78,56 @@ def test_spill_dir_used_and_emptied(tmp_path: Path):
     ]
     # ...and a clean run leaves the scratch dir empty.
     assert sorted(spill_dir.iterdir()) == []
+
+
+def test_mem_budget_throttles_but_completes_byte_identical():
+    """Finding 10: a 1-byte budget forces serial admission (the ≥1-window
+    progress guarantee) — the build still completes and outputs are
+    byte-identical to an unthrottled parallel run."""
+    p_ref = make_pyramid()
+    write_base_shards(p_ref)
+    r_ref = build_local(
+        p_ref, (FROM, TO), WideShardSource(p_ref),
+        pyramid_name='test', window='6h', workers=4, mem_budget=0,
+    )
+    p_tight = make_pyramid()
+    write_base_shards(p_tight)
+    r_tight = build_local(
+        p_tight, (FROM, TO), WideShardSource(p_tight),
+        pyramid_name='test', window='6h', workers=4, mem_budget=1,
+    )
+    assert sorted(w.key for w in r_tight.written) == sorted(w.key for w in r_ref.written)
+    for w in r_ref.written:
+        assert p_tight.storage.get(w.key) == p_ref.storage.get(w.key), w.key
+
+
+def test_source_cache_bytes_tracks_residency():
+    """`cache_bytes` (admission's cache term) grows with parsed shards and
+    returns to 0 once the watermark evicts them."""
+    pyramid = make_pyramid()
+    write_base_shards(pyramid)
+    src = WideShardSource(pyramid)
+    assert src.cache_bytes() == 0
+    src.read_window(FROM, TO)
+    assert src.cache_bytes() == sum(
+        e.frame.estimated_size() for e in src._cache.values()
+    ) > 0
+    src.evict_before(int(TO.timestamp() * 1000))
+    assert src.cache_bytes() == 0
+
+
+def test_batch_submit_tuning_passthrough():
+    """Finding 8: `batch submit` can forward `-j`(workers)/`-K`/`-b` to the
+    container's `build` (`-j` itself collides with `--job-name` there)."""
+    from pyrmts_engine.batch import build_command
+    cmd = build_command(
+        's3://b/config.yaml', pyramid_name='p', range_='2026-01-01T00:00/2026-01-02T00:00',
+        workers=16, max_inflight=8, mem_budget='24g',
+    )
+    assert cmd == [
+        'build', '-n', 'p', '-r', '2026-01-01T00:00/2026-01-02T00:00',
+        '-j', '16', '-K', '8', '-b', '24g', '-v', 's3://b/config.yaml',
+    ]
 
 
 def test_row_group_size_int_and_per_tier():

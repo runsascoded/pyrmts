@@ -138,6 +138,9 @@ def build_command(
     allow_empty: bool = False,
     max_missing: float | None = None,
     filters: tuple[str, ...] = (),
+    workers: int | None = None,
+    max_inflight: int | None = None,
+    mem_budget: str | None = None,
     verbose: bool = True,
 ) -> list[str]:
     """Container command for the base image (whose entrypoint is
@@ -165,6 +168,12 @@ def build_command(
         cmd += ['-M', str(max_missing)]
     for f in filters:
         cmd += ['-F', f]
+    if workers is not None:
+        cmd += ['-j', str(workers)]
+    if max_inflight is not None:
+        cmd += ['-K', str(max_inflight)]
+    if mem_budget is not None:
+        cmd += ['-b', mem_budget]
     if verbose:
         cmd += ['-v']
     cmd += [config]

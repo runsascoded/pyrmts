@@ -85,7 +85,11 @@ class WideShardSource:
             with self._lock:
                 self._missing.append(key)
             return empty_long(self.pyramid)
-        wide = pl.from_arrow(pq.read_table(io.BytesIO(blob)))
+        # use_threads=False: worker-level parallelism already saturates
+        # cores, and Arrow's internal pool is the suspected racer in the
+        # cold-start SIGSEGV (ctbk finding 11) — keep decode on the
+        # calling thread.
+        wide = pl.from_arrow(pq.read_table(io.BytesIO(blob), use_threads=False))
         return wide_to_long(wide, self.pyramid)
 
     def coverage(self) -> tuple[int, list[str]]:
@@ -122,6 +126,13 @@ class WideShardSource:
                 raise entry.exc
         assert entry.frame is not None
         return entry.frame
+
+    def cache_bytes(self) -> int:
+        """Estimated bytes of resident parsed shard frames — feeds the
+        engine's byte-aware admission."""
+        with self._lock:
+            frames = [e.frame for e in self._cache.values() if e.frame is not None]
+        return sum(f.estimated_size() for f in frames)
 
     def evict_before(self, start_ms: int) -> None:
         """Drop cached periods ending at/before `start_ms` (the earliest

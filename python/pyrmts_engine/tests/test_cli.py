@@ -92,13 +92,23 @@ def test_build_with_source_factory(tmp_path: Path):
 
     result = CliRunner().invoke(cli, [*args, '-e'])
     assert result.exit_code == 0, result.output
-    normalized = re.sub(r'\([\d,]+ bytes\)', '(<bytes>)', result.output)
+    normalized = re.sub(r'\([\d,]+ bytes\)', '(<bytes>)', result.stdout)
     normalized = re.sub(r'wall \d+\.\ds', 'wall <t>', normalized)
     assert normalized.split('\n') == [
         'build_local: 6 windows, 0 source rows → 11 shards (<bytes>), '
         '0 source-provided rungs skipped, wall <t>',
         '',
     ]
+    # Startup banner (finding 9) on stderr, before any read: resolved
+    # workers/K/budget + window/range/spill. Machine-dependent fields are
+    # normalized, shape asserted exactly.
+    banner = re.sub(r'workers=\d+, max_inflight=\d+, mem_budget=[\d.]+GB', 'workers=<j>, max_inflight=<K>, mem_budget=<b>', result.stderr.split('\n')[0])
+    banner = re.sub(r'spill=\S+', 'spill=<dir>', banner)
+    assert banner == (
+        'build_local: 6 windows × 1d over 2026-01-02T00:00/2026-01-08T00:00, '
+        '11 shards to write (0 rung-skipped), workers=<j>, max_inflight=<K>, '
+        'mem_budget=<b>, spill=<dir>'
+    )
     empty = pl.read_parquet(data / 'pyr/q/1d/2026-01-04.parquet')
     assert empty.height == 0
 
@@ -124,7 +134,7 @@ def test_build_source_rung_flags(tmp_path: Path):
 
     result = CliRunner().invoke(cli, [*args, '-R', str(seeded('data')), '-t', 'q', '-d', '1d'])
     assert result.exit_code == 0, result.output
-    normalized = re.sub(r'\([\d,]+ bytes\)', '(<bytes>)', result.output)
+    normalized = re.sub(r'\([\d,]+ bytes\)', '(<bytes>)', result.stdout)
     normalized = re.sub(r'wall \d+\.\ds', 'wall <t>', normalized)
     # 6,912 = 192 wide rows/day (96 15-min bins × 2 cells) × 6 long rows
     # each (2 hist states + 1 count + 3 sum cols) × 6 days; "6 rungs

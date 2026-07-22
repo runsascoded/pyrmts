@@ -60,6 +60,15 @@ def _load_pyramid(config_path: str, fs_root: str | None):
     return pyramid_from_config(cfg, storage)
 
 
+def _parse_bytes(s: str) -> int:
+    """`24g`/`512m`/`0` → bytes (binary units)."""
+    import re
+    m = re.fullmatch(r'(\d+(?:\.\d+)?)\s*([kmgt]?)i?b?', s.strip().lower())
+    if m is None:
+        raise SystemExit(f"invalid size {s!r} (want e.g. 24g, 512m, 0)")
+    return int(float(m.group(1)) * 1024 ** ('bkmgt'.index(m.group(2) or 'b')))
+
+
 def _parse_filters(filters: tuple[str, ...]) -> dict[str, str]:
     out: dict[str, str] = {}
     for f in filters:
@@ -98,6 +107,7 @@ def plan(filters: tuple[str, ...], dot_out: str | None, fs_root: str | None, ran
 
 
 @cli.command()
+@option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the detected memory limit; 0 disables)")
 @option('-d', '--source-shard', help="Source rung shard Duration for the default WideShardSource (default: the base tier's smallest; ctbk-style durable rungs are usually the LARGEST)")
 @option('-e', '--allow-empty', is_flag=True, help="Permit a 0-source-row (all-EMPTY) build; without it that exits nonzero (~always a mis-specified source rung)")
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
@@ -118,6 +128,7 @@ def plan(filters: tuple[str, ...], dot_out: str | None, fs_root: str | None, ran
 @option('-x', '--source', 'source_spec', help="Source factory `module:attr`, called as factory(pyramid, filter) → Source (default: WideShardSource on the base rung)")
 @argument('config')
 def build(
+    mem_budget: str | None,
     source_shard: str | None,
     allow_empty: bool,
     filters: tuple[str, ...],
@@ -175,6 +186,7 @@ def build(
             spill_dir=spill_dir,
             workers=workers,
             max_inflight=max_inflight,
+            mem_budget=_parse_bytes(mem_budget) if mem_budget is not None else None,
             resume=resume,
             allow_empty=allow_empty,
             max_missing_source=max_missing,
@@ -240,12 +252,14 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 
 
 @batch.command('submit')
+@option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the container's cgroup limit; 0 disables)")
 @option('-d', '--source-shard', help="Source rung shard Duration (WideShardSource; durable rungs are usually the LARGEST)")
 @option('-e', '--env', 'envs', multiple=True, help="Extra container env var, NAME=VALUE (repeatable)")
 @option('-E', '--allow-empty', is_flag=True, help="Permit a 0-source-row (all-EMPTY) build")
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
 @option('-g', '--rg-size', type=int, help="Output-shard parquet row-group size")
 @option('-j', '--job-name', help="Batch job name (default: derived from pyramid name)")
+@option('-K', '--max-inflight', type=int, help="build -K: max windows in flight past the watermark")
 @option('-m', '--manifest', help="Manifest destination (use s3:// — container disk is ephemeral)")
 @option('-M', '--memory', type=int, help="Override job memory MiB")
 @option('--max-missing', type=float, help="Tolerated fraction of absent source shards (build -M)")
@@ -258,15 +272,18 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 @option('-V', '--vcpus', type=int, help="Override job vCPUs")
 @option('-w', '--window', help="Streaming window Duration")
 @option('-W', '--watch', is_flag=True, help="Tail the job's log stream; exit with its status")
+@option('--workers', type=int, help="build -j: window-worker threads (default: the job's vCPUs; -j here is --job-name)")
 @option('-x', '--source', 'source_spec', help="Source factory module:attr (needs an app-derived image)")
 @argument('config')
 def batch_submit(
+    mem_budget: str | None,
     source_shard: str | None,
     envs: tuple[str, ...],
     allow_empty: bool,
     filters: tuple[str, ...],
     rg_size: int | None,
     job_name: str | None,
+    max_inflight: int | None,
     manifest: str | None,
     memory: int | None,
     max_missing: float | None,
@@ -279,6 +296,7 @@ def batch_submit(
     vcpus: int | None,
     window: str | None,
     watch: bool,
+    workers: int | None,
     source_spec: str | None,
     config: str,
 ) -> None:
@@ -301,6 +319,9 @@ def batch_submit(
             allow_empty=allow_empty,
             max_missing=max_missing,
             filters=filters,
+            workers=workers,
+            max_inflight=max_inflight,
+            mem_budget=mem_budget,
         ),
         job_name=job_name or f'{pyramid_name}-build',
         queue=f'{PREFIX}-od' if on_demand else PREFIX,

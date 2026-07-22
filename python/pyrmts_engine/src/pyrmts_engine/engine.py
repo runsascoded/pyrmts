@@ -1,28 +1,37 @@
-"""`local` executor: windowed streaming outer loop.
+"""`local` executor: parallel windowed walk (queue/watermark).
 
-One pass over the source, window by window. Per window:
+`workers` threads claim windows off a shared forward-marching cursor
+(`specs/parallel-window-executor.md`). Each claimed window is one task:
 
-1. Read the window's base long-form frame (`source.read_window`; prefetched
-   on a small thread pool so reads overlap compute).
+1. Read the window's base long-form frame (`source.read_window`).
 2. Walk tiers finest→coarsest; each tier re-bins its divisibility
    predecessor's window frame (`group_by.sum` — one cheap aggregation per
    tier per window; sibling tiers share the predecessor frame, so fused
    fan-outs like `/2m,/3m,/5m ← /1m` scan their input once).
-3. Route each tier's window rows to the open expected shards they fall in,
-   appending row-groups to per-shard spill files (`SpillBuffer`). Rows
-   belonging to no expected shard (residual tails) are dropped immediately.
-4. Flush every expected shard whose period has closed (cursor ≥
-   `effective_end`): streaming-combine its spill file (partial bins from
-   different windows merge here — exact, since long-form group_by-sum IS
-   the monoid combine), materialize wide (hist-JSON built exactly once),
-   write via `write_tier_parquet`, single `storage.put`, then
-   `shard_index.record_shard` — registration immediately after each PUT.
+3. Route each tier's window rows to the expected shards they fall in,
+   appending run files to per-shard spill (`SpillBuffer` — lock-free
+   across workers, one file per append). Rows belonging to no expected
+   shard (residual tails) are dropped immediately.
 
-Peak memory ≈ one window's frames + one closing shard's combined long
-form — NOT the sum of open max-rung WIP buffers (ctbk measured ~40 GB
-that way on a 4-day smoke; see the spill module docstring). Max-rung
-shards accumulate on scratch disk across the whole run: no scaffold
-shards, ever.
+A **completion watermark** (largest prefix of finished windows — not the
+claim cursor) gates shard closes: when it passes a shard's
+`effective_end`, the coordinator hands the close to a dedicated close
+thread — combine the shard's runs (group_by-sum IS the monoid combine),
+materialize wide (hist-JSON built exactly once), write via
+`write_tier_parquet`, single `storage.put`, then
+`shard_index.record_shard` — registration immediately after each PUT,
+in deterministic (sequential-equivalent) close order, so the ShardIndex
+needs no locking and closes never stall the walk. Out-of-order spill
+appends are safe: close combines + sorts, so append order can't reach
+output bytes (regression-tested: N-worker builds are byte-identical to
+`workers=1`).
+
+`max_inflight` bounds claims (window `i` claimable only while
+`i − watermark < max_inflight`), so peak memory ≈ `max_inflight` windows'
+frames + one closing shard's combined long form — NOT the sum of open
+max-rung WIP buffers (ctbk measured ~40 GB that way on a 4-day smoke;
+see the spill module docstring). Max-rung shards accumulate on scratch
+disk across the whole run: no scaffold shards, ever.
 
 Zero-row expected shards are written (and registered) as EMPTY shards —
 cover-complete + zero rows is a legitimate state (outage windows), not a
@@ -30,11 +39,13 @@ gap for fsck to re-chase."""
 from __future__ import annotations
 
 import io
+import os
 import sys
 import tempfile
 import time
+from bisect import bisect_right
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -131,7 +142,8 @@ def build_local(
     sort: Sequence[str] | None = None,
     row_group_size: int | Mapping[str, int] | None = None,
     spill_dir: str | Path | None = None,
-    prefetch: int = 2,
+    workers: int | None = None,
+    max_inflight: int | None = None,
     resume: bool = False,
     allow_empty: bool = False,
     verbose: bool = False,
@@ -159,7 +171,12 @@ def build_local(
             writer's row-count heuristic.
         spill_dir: scratch dir for WIP spill files (deleted as shards
             close). Default: a fresh temp dir, removed at the end.
-        prefetch: source windows to read ahead (thread pool).
+        workers: window-worker threads (default: `os.cpu_count()` —
+            Fargate reports the job's vCPUs). `workers=1` is the
+            sequential reference the byte-identity gate compares against.
+        max_inflight: claim bound `K` — window `i` is claimable only
+            while `i − watermark < K`; bounds peak memory ≈ K windows'
+            frames (default `2 × workers`).
         resume: skip shards already recorded in `shard_index` (which must
             expose `existing_keys()` — the JSONL manifest impls do), and
             skip source windows that only feed skipped shards. Shards are
@@ -227,28 +244,17 @@ def build_local(
             return row_group_size
         return row_group_size.get(tier_name)
 
-    def route(tier_name: str, tf: pl.DataFrame, w_end: datetime) -> None:
-        """Append `tf`'s rows to the spill files of the pending shards they
-        fall in. Shard periods are tier-bin-aligned and disjoint, so each
-        (floored) bin lands in exactly one shard; rows past the last
-        pending shard (residual tail) are dropped."""
-        if tf.height == 0:
-            return
-        for shard in pending[tier_name]:
-            if shard.period_start >= w_end:
-                break
-            s_ms, e_ms = _ms(shard.period_start), _ms(shard.period_end)
-            rows = tf.filter((pl.col(bin_col) >= s_ms) & (pl.col(bin_col) < e_ms))
-            spill.append(shard.key, rows)
-
-    def flush_ready(tier_name: str, cursor: datetime) -> int:
-        q = pending[tier_name]
-        n = 0
-        while q and q[0].effective_end <= cursor:
-            shard = q.popleft()
-            _write_shard(shard, spill.close_shard(shard.key))
-            n += 1
-        return n
+    # Immutable routing snapshot (post-resume), per tier, sorted by
+    # period_start: window tasks route against this — never against the
+    # coordinator-mutated `pending` deques. Shard periods within a tier
+    # are disjoint (min-cover), so bisect finds the overlap run. A window
+    # can never overlap an already-closed shard: closes require
+    # `effective_end <= cursor ≤` every in-flight window's start.
+    route_shards = {
+        name: [(_ms(e.period_start), _ms(e.period_end), e.key) for e in q]
+        for name, q in pending.items()
+    }
+    route_starts = {name: [s for s, _, _ in lst] for name, lst in route_shards.items()}
 
     def _write_shard(shard: ExpectedShard, rows: pl.DataFrame) -> None:
         t_flush = time.time()
@@ -276,23 +282,6 @@ def build_local(
         log(f"  flush {shard.tier:6s} {shard.key}: {wide.height:,} rows, "
             f"{n_bytes/1024:.0f} KiB, {time.time() - t_flush:.1f}s")
 
-    def process_window(frame: pl.DataFrame, w_end: datetime) -> None:
-        result.source_rows += frame.height
-        window_frames: dict[str, pl.DataFrame] = {}
-        for tier in tiers:
-            pred = plan.preds[tier.name]
-            src = frame if pred is None else window_frames[pred]
-            tf = rebin_long(src, pyramid, floor_exprs[tier.name])
-            window_frames[tier.name] = tf
-            route(tier.name, tf, w_end)
-        cursor = min(w_end, to)
-        flushed = 0
-        for tier in tiers:
-            flushed += flush_ready(tier.name, cursor)
-        if flushed:
-            _trim_allocator()
-        result.windows += 1
-
     periods = [
         p for p in shard_periods_covering(from_, to, window)
         if p.end > resume_from
@@ -301,34 +290,101 @@ def build_local(
         log(f"resume: {result.resumed_shards} manifested shards skipped, "
             f"restarting from {resume_from:%Y-%m-%dT%H:%M} ({len(periods)} windows)")
 
-    def read(p) -> pl.DataFrame:
-        return source.read_window(max(p.start, from_), min(p.end, to))
+    def window_task(i: int) -> int:
+        p = periods[i]
+        frame = source.read_window(max(p.start, from_), min(p.end, to))
+        w_start_ms = _ms(max(p.start, from_))
+        w_end_ms = _ms(min(p.end, to))
+        window_frames: dict[str, pl.DataFrame] = {}
+        for tier in tiers:
+            pred = plan.preds[tier.name]
+            src = frame if pred is None else window_frames[pred]
+            tf = rebin_long(src, pyramid, floor_exprs[tier.name])
+            window_frames[tier.name] = tf
+            if tf.height == 0:
+                continue
+            shards = route_shards[tier.name]
+            lo = max(bisect_right(route_starts[tier.name], w_start_ms) - 1, 0)
+            for s_ms, e_ms, key in shards[lo:]:
+                if s_ms >= w_end_ms:
+                    break
+                if e_ms <= w_start_ms:
+                    continue
+                spill.append(key, tf.filter(
+                    (pl.col(bin_col) >= s_ms) & (pl.col(bin_col) < e_ms)
+                ))
+        return frame.height
+
+    def close_task(shard: ExpectedShard) -> None:
+        _write_shard(shard, spill.close_shard(shard.key))
+        _trim_allocator()
+
+    n = len(periods)
+    n_workers = workers or os.cpu_count() or 4
+    inflight_cap = max_inflight or 2 * n_workers
+    completed = [False] * n
+    rows_of = [0] * n
+    watermark = 0
+    evict = getattr(source, 'evict_before', None)
+    window_pool = ThreadPoolExecutor(max_workers=n_workers)
+    # Dedicated close thread: closes never stall the walk, and the
+    # ShardIndex / result bookkeeping stay single-threaded with
+    # deterministic (sequential-equivalent) close order.
+    close_pool = ThreadPoolExecutor(max_workers=1)
+    close_futs: list[Future] = []
+
+    def advance_watermark() -> None:
+        """Count newly-completed prefix windows, evict dead source cache,
+        submit ready closes."""
+        nonlocal watermark
+        moved = False
+        while watermark < n and completed[watermark]:
+            result.source_rows += rows_of[watermark]
+            result.windows += 1
+            watermark += 1
+            moved = True
+        if not moved:
+            return
+        if evict is not None and watermark < n:
+            evict(_ms(max(periods[watermark].start, from_)))
+        cursor = min(periods[watermark - 1].end, to)
+        for tier in tiers:
+            q = pending[tier.name]
+            while q and q[0].effective_end <= cursor:
+                close_futs.append(close_pool.submit(close_task, q.popleft()))
 
     try:
-        if prefetch > 1:
-            with ThreadPoolExecutor(max_workers=prefetch) as pool:
-                futs = deque()
-                it = iter(periods)
-                for p in it:
-                    fut = pool.submit(read, p)
-                    if not futs:
-                        # Serialize the very first read: concurrent cold-start
-                        # `pq.read_table` calls race pyarrow's lazy init
-                        # (intermittent SIGSEGV on aarch64 — ctbk finding 6).
-                        fut.result()
-                    futs.append((fut, p))
-                    if len(futs) >= prefetch:
-                        break
-                while futs:
-                    fut, p = futs.popleft()
-                    process_window(fut.result(), p.end)
-                    nxt = next(it, None)
-                    if nxt is not None:
-                        futs.append((pool.submit(read, nxt), nxt))
-        else:
-            for p in periods:
-                process_window(read(p), p.end)
+        inflight: dict[Future, int] = {}
+        next_i = 0
 
+        def claim() -> None:
+            nonlocal next_i
+            while (
+                next_i < n
+                and len(inflight) < n_workers
+                and next_i - watermark < inflight_cap
+            ):
+                fut = window_pool.submit(window_task, next_i)
+                if next_i == 0:
+                    # Serialize the very first read: concurrent cold-start
+                    # `pq.read_table` calls race pyarrow's lazy init
+                    # (intermittent SIGSEGV on aarch64 — ctbk finding 6).
+                    fut.result()
+                inflight[fut] = next_i
+                next_i += 1
+
+        claim()
+        while inflight:
+            done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+            for fut in done:
+                i = inflight.pop(fut)
+                rows_of[i] = fut.result()
+                completed[i] = True
+            advance_watermark()
+            claim()
+
+        for fut in close_futs:
+            fut.result()
         leftover = [(t, len(q)) for t, q in pending.items() if q]
         if leftover:
             raise AssertionError(f"build_local: unflushed shards after final window: {leftover}")
@@ -340,6 +396,8 @@ def build_local(
                 f"pass allow_empty=True / --allow-empty if intentional"
             )
     finally:
+        window_pool.shutdown(wait=True, cancel_futures=True)
+        close_pool.shutdown(wait=True, cancel_futures=True)
         close_index = getattr(shard_index, 'close', None)
         if close_index is not None:
             close_index()

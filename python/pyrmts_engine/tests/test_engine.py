@@ -44,7 +44,7 @@ def _parse_shard(blob: bytes) -> list[dict]:
     return sorted(rows, key=lambda r: (r['cell'], r['dt']))
 
 
-def _run_engine(window: str = '1d') -> tuple:
+def _run_engine(window: str = '1d', workers: int | None = None) -> tuple:
     pyramid = make_pyramid()
     write_base_shards(pyramid)
     index = MemShardIndex()
@@ -55,6 +55,7 @@ def _run_engine(window: str = '1d') -> tuple:
         pyramid_name='test',
         shard_index=index,
         window=window,
+        workers=workers,
     )
     return pyramid, result, index
 
@@ -133,6 +134,18 @@ def test_window_size_invariance_byte_identical():
     assert sorted(w.key for w in r1.written) == sorted(w.key for w in r2.written)
     for key in (w.key for w in r1.written):
         assert p1.storage.get(key) == p2.storage.get(key), key
+
+
+def test_parallel_workers_byte_identical():
+    """The acceptance gate of `specs/parallel-window-executor.md`: an
+    N-worker build is byte-identical to the sequential (workers=1)
+    reference — out-of-order window completion and spill-append order
+    can't reach output bytes. 6h windows → 24 windows to interleave."""
+    p1, r1, _ = _run_engine(window='6h', workers=1)
+    p4, r4, _ = _run_engine(window='6h', workers=4)
+    assert sorted(w.key for w in r1.written) == sorted(w.key for w in r4.written)
+    for key in (w.key for w in r1.written):
+        assert p1.storage.get(key) == p4.storage.get(key), key
 
 
 def test_registration_records():

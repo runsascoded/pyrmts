@@ -41,7 +41,7 @@ def test_source_cache_fetches_each_blob_once():
 
     build_local(
         pyramid, (FROM, TO), WideShardSource(pyramid),
-        pyramid_name='test', window='1h', prefetch=1,
+        pyramid_name='test', window='1h', workers=1,
     )
     assert {k: n for k, n in storage.get_counts.items() if k in set(base_keys)} == {
         k: 1 for k in base_keys
@@ -57,7 +57,7 @@ def test_spill_dir_used_and_emptied(tmp_path: Path):
     orig_put = pyramid.storage.put
 
     def spying_put(key: str, data: bytes) -> None:
-        seen_spill_files.update(p.name for p in spill_dir.glob('*.spill.parquet'))
+        seen_spill_files.update(p.name for p in spill_dir.glob('*.run.parquet'))
         orig_put(key, data)
 
     pyramid.storage.put = spying_put  # type: ignore[method-assign]
@@ -67,9 +67,12 @@ def test_spill_dir_used_and_emptied(tmp_path: Path):
         pyramid_name='test', spill_dir=spill_dir,
     )
     assert len(result.written) == 11
-    # Spill files existed during the run (max-rung shards accumulate on
-    # disk, not in memory)...
-    assert 'pyr_h_4d_2026-01-03.parquet.spill.parquet' in seen_spill_files
+    # Spill run files existed during the run (max-rung shards accumulate
+    # on disk, not in memory): h/4d/2026-01-03 covers [Jan 3, Jan 7) → 4
+    # runs (one per contributing window, whatever order they completed).
+    assert sorted(f for f in seen_spill_files if f.startswith('pyr_h_4d_2026-01-03')) == [
+        f'pyr_h_4d_2026-01-03.parquet.{i:04d}.run.parquet' for i in range(4)
+    ]
     # ...and a clean run leaves the scratch dir empty.
     assert sorted(spill_dir.iterdir()) == []
 

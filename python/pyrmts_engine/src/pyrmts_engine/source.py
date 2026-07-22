@@ -24,6 +24,18 @@ class Source(Protocol):
     def read_window(self, start: datetime, end: datetime) -> pl.DataFrame: ...
 
 
+class _CacheEntry:
+    """A period's parsed frame, or a marker that another thread is loading
+    it (waiters block on `event`)."""
+    __slots__ = ('end_ms', 'event', 'frame', 'exc')
+
+    def __init__(self, end_ms: int) -> None:
+        self.end_ms = end_ms
+        self.event = threading.Event()
+        self.frame: pl.DataFrame | None = None
+        self.exc: BaseException | None = None
+
+
 class WideShardSource:
     """Reads a materialized (tier, shard_dur) rung's wide shards from
     `pyramid.storage` and converts to long form. Missing shards are treated
@@ -32,9 +44,13 @@ class WideShardSource:
 
     Parsed shards are cached across calls, so a window smaller than
     `shard_dur` doesn't re-fetch/re-parse the same blob ⌈shard/window⌉
-    times; entries are evicted once the window cursor passes their period
-    (windows advance monotonically). Thread-safe for the engine's prefetch
-    pool.
+    times. Concurrent readers of the same period block on one load
+    instead of duplicating it (the parallel executor runs many window
+    tasks at once). Eviction is engine-driven: the executor calls
+    `evict_before(watermark_start_ms)` as its completion watermark
+    advances — a period can't self-evict on "this window's start" because
+    windows complete out of order. Standalone callers can call it
+    themselves, or let the cache grow (bounded by the range).
 
     `provides` names the rung so the engine can skip re-writing it."""
 
@@ -50,8 +66,7 @@ class WideShardSource:
         self.tier = tier
         self.shard_dur = shard_dur or tier.shards[0]
         self.filter = filter or {}
-        # period label → (period_end_ms, parsed long frame)
-        self._cache: dict[str, tuple[int, pl.DataFrame]] = {}
+        self._cache: dict[str, _CacheEntry] = {}
         self._lock = threading.Lock()
 
     @property
@@ -69,30 +84,49 @@ class WideShardSource:
         wide = pl.from_arrow(pq.read_table(io.BytesIO(blob)))
         return wide_to_long(wide, self.pyramid)
 
+    def _period_frame(self, label: str, end_ms: int) -> pl.DataFrame:
+        with self._lock:
+            entry = self._cache.get(label)
+            mine = entry is None
+            if mine:
+                entry = self._cache[label] = _CacheEntry(end_ms)
+        if mine:
+            try:
+                entry.frame = self._load(label, end_ms)
+            except BaseException as e:
+                entry.exc = e
+                with self._lock:
+                    self._cache.pop(label, None)
+                entry.event.set()
+                raise
+            entry.event.set()
+        else:
+            entry.event.wait()
+            if entry.exc is not None:
+                raise entry.exc
+        assert entry.frame is not None
+        return entry.frame
+
+    def evict_before(self, start_ms: int) -> None:
+        """Drop cached periods ending at/before `start_ms` (the earliest
+        possibly-active window start — i.e. the executor's watermark)."""
+        with self._lock:
+            dead = [
+                label for label, e in self._cache.items()
+                if e.end_ms <= start_ms and e.event.is_set()
+            ]
+            for label in dead:
+                del self._cache[label]
+
     def read_window(self, start: datetime, end: datetime) -> pl.DataFrame:
         pyramid = self.pyramid
         bin_col = pyramid.binCol
         start_ms = int(start.timestamp() * 1000)
         end_ms = int(end.timestamp() * 1000)
-        frames: list[pl.DataFrame] = []
-        for period in shard_periods_covering(start, end, self.shard_dur):
-            p_end_ms = int(period.end.timestamp() * 1000)
-            with self._lock:
-                cached = self._cache.get(period.label)
-                if cached is None:
-                    frame = self._load(period.label, p_end_ms)
-                    self._cache[period.label] = (p_end_ms, frame)
-                else:
-                    frame = cached[1]
-                # Evict periods the window cursor has passed. Prefetch can
-                # have a couple of windows in flight; anything ending at or
-                # before the EARLIEST possibly-active start is safely dead —
-                # conservatively, evict only what ends at/before this
-                # window's start.
-                dead = [l for l, (e, _) in self._cache.items() if e <= start_ms]
-                for l in dead:
-                    del self._cache[l]
-            frames.append(frame)
+        frames = [
+            self._period_frame(period.label, int(period.end.timestamp() * 1000))
+            for period in shard_periods_covering(start, end, self.shard_dur)
+        ]
         if not frames:
             return empty_long(pyramid)
         out = pl.concat(frames).filter(

@@ -170,6 +170,7 @@ def test_build_command_source_rung_resume_allow_empty():
         source_shard='2d',
         resume=True,
         allow_empty=True,
+        max_missing=0.5,
     ) == [
         'build',
         '-n', 'avail-v4',
@@ -178,6 +179,7 @@ def test_build_command_source_rung_resume_allow_empty():
         '-d', '2d',
         '-u',
         '-e',
+        '-M', '0.5',
         '-v',
         'cfg.yaml',
     ]

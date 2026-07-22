@@ -106,9 +106,10 @@ def test_build_with_source_factory(tmp_path: Path):
 def test_build_source_rung_flags(tmp_path: Path):
     """ctbk footgun repro: the durable base rung is the LARGEST shard dur
     (q@1d), the default (smallest, q@6h) doesn't exist. Without -t/-d the
-    build is all-empty → exit 3; with them it reads q@1d and writes the 5
-    remaining cover shards. (Separate data dirs: the mis-sourced run
-    overwrites the seeded q@1d rung with empties — the finding-2 clobber.)"""
+    coverage guard trips (all q@6h keys absent → exit 4, keys named);
+    with them it reads q@1d and writes the 5 remaining cover shards.
+    (Separate data dirs: the mis-sourced run overwrites the seeded q@1d
+    rung with empties — the finding-2 clobber.)"""
     config = tmp_path / 'pyr.yaml'
     config.write_text(CONFIG_YAML)
 
@@ -119,7 +120,7 @@ def test_build_source_rung_flags(tmp_path: Path):
 
     args = ['build', '-n', 'rung', '-r', RANGE, str(config)]
     result = CliRunner().invoke(cli, [*args, '-R', str(seeded('missourced'))])
-    assert result.exit_code == 3
+    assert result.exit_code == 4
 
     result = CliRunner().invoke(cli, [*args, '-R', str(seeded('data')), '-t', 'q', '-d', '1d'])
     assert result.exit_code == 0, result.output

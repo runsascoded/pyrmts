@@ -54,5 +54,14 @@ The `EmptySourceError` guard only catches the 100%-missing catastrophe; **partia
 
 ## Open questions
 
-- Default N (`os.cpu_count()`? Fargate reports the vCPU count) and default K (2×N?).
-- Whether `prefetch` survives as a knob or is subsumed by N/K.
+- ~~Default N (`os.cpu_count()`? Fargate reports the vCPU count) and default K (2×N?).~~ Resolved: N = `os.cpu_count()`, K = 2×N.
+- ~~Whether `prefetch` survives as a knob or is subsumed by N/K.~~ Resolved: subsumed; `-j/--workers` + `-K/--max-inflight` replace `-P/--prefetch`.
+
+## Status (pyrmts session, 2026-07-22)
+
+- **§1 parallel walk — landed** (`b67c727`): window tasks on an N-worker pool claimed off a shared cursor with the `K` bound; completion watermark gates closes; closes run on a **dedicated close thread** (never stall the walk; ShardIndex stays single-threaded with deterministic sequential-equivalent close order; first read serialized for the pyarrow cold-start segv). Spill switched to one run file per (shard, append) — lock-free worker writes, and the phase-2 seam. `WideShardSource` cache made concurrency-correct (pending entries — concurrent readers of one period share a single load; eviction is engine-driven `evict_before` at watermark advance, since out-of-order windows can't self-evict on "this window's start").
+- **§5 gate — passing**: `workers=4` byte-identical to `workers=1` on the fixture (24-window interleave) and on an 11M-long-row synthetic (135 keys byte-equal). Synthetic effective cores 4.2 → 5.2 (workers=1 already multi-core via polars' internal pool on large frames) — the real re-baseline is ctbk's Batch run, where per-op parallelism was the weak spot (2.6 cores).
+- **§4 coverage — landed**: `WideShardSource.coverage()` (periods read, absent keys); engine policy `max_missing_source` (default **strict 0.0**; CLI `-M/--max-missing`, `batch submit --max-missing`) raises `SourceCoverageError` (CLI exit 4) listing the absent keys. Reads are range-clamped, so every miss is post-genesis; present-but-EMPTY shards (outages) don't count as missing. Nice side effect: the finding-1 footgun now fails as a coverage error naming the absent rung's keys — more diagnostic than the zero-rows exit 3, which remains as the fallback for coverage-less sources. Opt-in for sources whose outages genuinely have no objects: `max_missing_source=1.0`.
+- **§2 sorted-run merge closes + §3 streaming fast path — deferred**, deliberately: with closes on their own thread the 113 s stall is already off the critical path, and concurrent-close memory is bounded (one close at a time), so the remaining benefit is only the close-time RAM spike (~worst 12.7M-row combine ≈ well under the 32 GiB job def). It's also the riskiest piece for byte-identity (incremental wide writes must reproduce `write_tier_parquet` bytes exactly). Revisit when a Batch run shows close memory as the binding constraint.
+
+Spec stays in `specs/` until the ctbk Batch re-baseline confirms the effective-cores target (and settles whether §2 is needed).

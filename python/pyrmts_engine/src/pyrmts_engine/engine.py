@@ -74,6 +74,15 @@ class EmptySourceError(RuntimeError):
     outputs were still written/registered before this raised.)"""
 
 
+class SourceCoverageError(RuntimeError):
+    """Post-genesis source shards were absent beyond `max_missing_source`.
+    The scarier sibling of `EmptySourceError`: partial missing (filter
+    typo, GC'd keys, wrong metric name) builds a plausible-looking
+    pyramid with quietly wrong numbers. Affirmatively-EMPTY source shards
+    (outage windows) are present objects and don't count. (Outputs were
+    still written/registered before this raised.)"""
+
+
 @dataclass(frozen=True)
 class WrittenShard:
     key: str
@@ -89,6 +98,7 @@ class BuildResult:
     skipped_rungs: int = 0
     resumed_shards: int = 0
     source_rows: int = 0
+    missing_source: int = 0
     windows: int = 0
     wall_seconds: float = 0.0
 
@@ -146,6 +156,7 @@ def build_local(
     max_inflight: int | None = None,
     resume: bool = False,
     allow_empty: bool = False,
+    max_missing_source: float = 0.0,
     verbose: bool = False,
 ) -> BuildResult:
     """Build every expected shard of `pyramid` over `time_range` from
@@ -187,6 +198,13 @@ def build_local(
             full-range build is ~always a mis-specified source rung, and
             silently `SUCCEEDED` empty runs clobber real data —
             `EmptySourceError` is raised at end-of-run instead.
+        max_missing_source: tolerated fraction of absent source shards
+            (when the source exposes `coverage()` — `WideShardSource`
+            does). Strict (0.0) by default: reads are range-clamped so
+            every miss is post-genesis, and affirmatively-EMPTY shards
+            don't count — a miss means a real hole. Raise the threshold
+            (up to 1.0) for sources whose outages legitimately have no
+            objects at all.
         verbose: per-flush progress lines on stderr.
     """
     t0 = time.time()
@@ -388,6 +406,23 @@ def build_local(
         leftover = [(t, len(q)) for t, q in pending.items() if q]
         if leftover:
             raise AssertionError(f"build_local: unflushed shards after final window: {leftover}")
+        cov = getattr(source, 'coverage', None)
+        if cov is not None:
+            n_periods, missing = cov()
+            result.missing_source = len(missing)
+            if missing:
+                log(f"missing source shards ({len(missing)}/{n_periods}): "
+                    + ', '.join(missing[:5]) + (', …' if len(missing) > 5 else ''))
+            if len(missing) > max_missing_source * n_periods:
+                sample = ', '.join(missing[:5]) + (', …' if len(missing) > 5 else '')
+                raise SourceCoverageError(
+                    f"build_local: {len(missing)}/{n_periods} source shards absent "
+                    f"(> max_missing_source={max_missing_source}): {sample} — "
+                    f"a real hole (GC'd rung, filter typo, wrong rung), not an "
+                    f"outage (outage shards are present-but-EMPTY); raise "
+                    f"max_missing_source / --max-missing if such holes are "
+                    f"expected here (outputs WERE written/registered)"
+                )
         if result.windows and not result.source_rows and not allow_empty:
             raise EmptySourceError(
                 f"build_local: 0 source rows across {result.windows} windows — "

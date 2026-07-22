@@ -3,7 +3,13 @@
 See `specs/pyramid-build-engine.md` (repo root)."""
 from __future__ import annotations
 
-from .engine import BuildResult, EmptySourceError, WrittenShard, build_local
+from .engine import (
+    BuildResult,
+    EmptySourceError,
+    SourceCoverageError,
+    WrittenShard,
+    build_local,
+)
 from .longform import (
     COUNT_COL,
     METRIC_COL,
@@ -30,7 +36,7 @@ from .source import Source, WideShardSource
 __version__ = "0.0.0"
 
 __all__ = [
-    'BuildPlan', 'BuildResult', 'EmptySourceError', 'WrittenShard',
+    'BuildPlan', 'BuildResult', 'EmptySourceError', 'SourceCoverageError', 'WrittenShard',
     'build_local', 'compile_plan', 'bin_floor_expr',
     'COUNT_COL', 'METRIC_COL', 'STATE_COL',
     'combine_long', 'empty_long', 'long_schema', 'long_to_wide',

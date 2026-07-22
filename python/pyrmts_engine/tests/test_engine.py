@@ -17,7 +17,13 @@ import pyarrow.parquet as pq
 import pytest
 
 from pyrmts import MemStorage, cascade_tiers, list_expected_shards
-from pyrmts_engine import EmptySourceError, MemShardIndex, WideShardSource, build_local
+from pyrmts_engine import (
+    EmptySourceError,
+    MemShardIndex,
+    SourceCoverageError,
+    WideShardSource,
+    build_local,
+)
 
 from conftest import (
     CELLS,
@@ -215,7 +221,7 @@ def test_zero_source_rows_raises_unless_allowed():
     with pytest.raises(EmptySourceError) as exc:
         build_local(
             pyramid, (FROM, TO), WideShardSource(pyramid),
-            pyramid_name='test', shard_index=index,
+            pyramid_name='test', shard_index=index, max_missing_source=1.0,
         )
     assert str(exc.value) == (
         'build_local: 0 source rows across 6 windows — almost always a '
@@ -227,14 +233,40 @@ def test_zero_source_rows_raises_unless_allowed():
     pyramid2 = make_pyramid()
     result = build_local(
         pyramid2, (FROM, TO), WideShardSource(pyramid2),
-        pyramid_name='test', allow_empty=True,
+        pyramid_name='test', allow_empty=True, max_missing_source=1.0,
     )
     assert sorted(w.key for w in result.written) == EXPECTED_KEYS
 
 
+def test_source_coverage_strict_by_default():
+    """Partial source holes — the quietly-wrong-numbers shape (GC'd keys,
+    filter typo) — fail loudly under the default strict policy, listing
+    the absent keys."""
+    pyramid = make_pyramid()
+    write_base_shards(pyramid)
+    missing = sorted(pyramid.storage.list('pyr/q/6h/2026-01-04'))
+    assert len(missing) == 4
+    for k in missing:
+        pyramid.storage._data.pop(k)
+
+    with pytest.raises(SourceCoverageError) as exc:
+        build_local(
+            pyramid, (FROM, TO), WideShardSource(pyramid), pyramid_name='test',
+        )
+    assert str(exc.value) == (
+        f"build_local: 4/24 source shards absent (> max_missing_source=0.0): "
+        f"{', '.join(missing)} — a real hole (GC'd rung, filter typo, wrong "
+        f"rung), not an outage (outage shards are present-but-EMPTY); raise "
+        f"max_missing_source / --max-missing if such holes are expected here "
+        f"(outputs WERE written/registered)"
+    )
+
+
 def test_zero_row_period_writes_empty_shard():
     """A day with no source shards still yields its (q, 1d) cover tile —
-    EMPTY (zero rows), written and registered."""
+    EMPTY (zero rows), written and registered. (`max_missing_source=1.0`
+    opts into absent-as-outage; the strict default raises — see
+    `test_source_coverage_strict_by_default`.)"""
     pyramid = make_pyramid()
     write_base_shards(pyramid)
     # Remove all four 6h base shards of 2026-01-04.
@@ -246,7 +278,7 @@ def test_zero_row_period_writes_empty_shard():
     index = MemShardIndex()
     result = build_local(
         pyramid, (FROM, TO), WideShardSource(pyramid),
-        pyramid_name='test', shard_index=index,
+        pyramid_name='test', shard_index=index, max_missing_source=1.0,
     )
     assert sorted(w.key for w in result.written) == EXPECTED_KEYS
 

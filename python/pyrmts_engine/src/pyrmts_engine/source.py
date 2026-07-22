@@ -67,6 +67,8 @@ class WideShardSource:
         self.shard_dur = shard_dur or tier.shards[0]
         self.filter = filter or {}
         self._cache: dict[str, _CacheEntry] = {}
+        self._n_periods = 0
+        self._missing: list[str] = []
         self._lock = threading.Lock()
 
     @property
@@ -80,9 +82,22 @@ class WideShardSource:
         )
         blob = self.pyramid.storage.get(key)
         if blob is None:
+            with self._lock:
+                self._missing.append(key)
             return empty_long(self.pyramid)
         wide = pl.from_arrow(pq.read_table(io.BytesIO(blob)))
         return wide_to_long(wide, self.pyramid)
+
+    def coverage(self) -> tuple[int, list[str]]:
+        """(periods read, keys that were absent). The engine's
+        `max_missing_source` policy consumes this: reads are clamped to
+        the build range, so every requested period is post-genesis —
+        an absent key is a real hole (a GC'd rung, filter typo, wrong
+        metric prefix, …), not a pre-genesis miss. Affirmatively-EMPTY
+        shards (outage windows) are present zero-row objects and do NOT
+        count as missing."""
+        with self._lock:
+            return self._n_periods, sorted(self._missing)
 
     def _period_frame(self, label: str, end_ms: int) -> pl.DataFrame:
         with self._lock:
@@ -90,6 +105,7 @@ class WideShardSource:
             mine = entry is None
             if mine:
                 entry = self._cache[label] = _CacheEntry(end_ms)
+                self._n_periods += 1
         if mine:
             try:
                 entry.frame = self._load(label, end_ms)

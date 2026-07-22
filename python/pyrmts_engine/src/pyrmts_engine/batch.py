@@ -136,6 +136,7 @@ def build_command(
     manifest: str | None = None,
     resume: bool = False,
     allow_empty: bool = False,
+    max_missing: float | None = None,
     filters: tuple[str, ...] = (),
     verbose: bool = True,
 ) -> list[str]:
@@ -160,6 +161,8 @@ def build_command(
         cmd += ['-u']
     if allow_empty:
         cmd += ['-e']
+    if max_missing is not None:
+        cmd += ['-M', str(max_missing)]
     for f in filters:
         cmd += ['-F', f]
     if verbose:

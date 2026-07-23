@@ -75,6 +75,7 @@ cover-complete + zero rows is a legitimate state (outage windows), not a
 gap for fsck to re-chase."""
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import sys
@@ -427,7 +428,8 @@ def build_local(
         if rgs is not None:
             kwargs['row_group_size'] = rgs
         n_bytes = write_tier_parquet(wide.to_arrow(), pyramid, out=buf, **kwargs)
-        pyramid.storage.put(shard.key, buf.getvalue())
+        payload = buf.getvalue()
+        pyramid.storage.put(shard.key, payload)
         with reg_cond:
             while next_reg != seq:
                 reg_cond.wait()
@@ -439,6 +441,8 @@ def build_local(
                 period_end_ms=_ms(shard.period_end),
                 key=shard.key,
                 written_at_ms=now_ms(),
+                md5=hashlib.md5(payload).hexdigest(),
+                n_bytes=len(payload),
             ))
             result.written.append(WrittenShard(
                 key=shard.key, tier=shard.tier, shard_dur=shard.shard_dur,

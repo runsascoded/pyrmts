@@ -172,6 +172,13 @@ def test_registration_records():
     )
     assert got == expected
     assert all(t0_ms <= r.written_at_ms <= t1_ms for r in index.records)
+    # Records carry content identity: md5/bytes of exactly the stored
+    # object (the cross-run RGIP seam).
+    import hashlib
+    assert [(r.md5, r.n_bytes) for r in index.records] == [
+        (hashlib.md5(pyramid.storage.get(r.key)).hexdigest(), len(pyramid.storage.get(r.key)))
+        for r in index.records
+    ]
 
 
 def test_parallel_close_registration_order_deterministic():

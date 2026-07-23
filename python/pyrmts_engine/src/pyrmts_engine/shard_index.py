@@ -31,6 +31,13 @@ class ShardRecord:
     period_end_ms: int
     key: str
     written_at_ms: int
+    # Content MD5 (hex) + byte length of the written object: makes
+    # cross-run RGIP checks a manifest diff (runs on e overwrote each
+    # other's objects, so byte equality was otherwise unprovable
+    # after the fact). Optional: absent in pre-2026-07 manifests; D1
+    # rows don't carry them.
+    md5: str | None = None
+    n_bytes: int | None = None
 
 
 class ShardIndex(Protocol):
@@ -43,7 +50,7 @@ class NoopShardIndex:
 
 
 def _row(record: ShardRecord) -> dict:
-    return {
+    row = {
         'pyramid': record.pyramid,
         'tier': record.tier,
         'shard_dur': record.shard_dur,
@@ -52,6 +59,11 @@ def _row(record: ShardRecord) -> dict:
         'key': record.key,
         'written_at': record.written_at_ms,
     }
+    if record.md5 is not None:
+        row['md5'] = record.md5
+    if record.n_bytes is not None:
+        row['bytes'] = record.n_bytes
+    return row
 
 
 @dataclass

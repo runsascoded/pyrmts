@@ -1,6 +1,6 @@
 # Engine executor iteration on `e` (ctbk avail workload)
 
-Status: **in progress** (2026-07-22, e session iterating; findings 8-11 landed, memory controller converging — see Iteration log). Iterate `pyrmts-engine`'s parallel window executor on this box (m6g.4xlarge: 16× Graviton2, 61 GB, aarch64 — same arch family as the Fargate target) until the full-range ctbk avail build completes with bounded memory and a wall/effective-cores number worth reporting. Batch is parked until this converges; the final proof run goes back there (image rebuild → `bootstrap -i` → Spot + `-u` resume).
+Status: **converged on e** (2026-07-23) — all five acceptance criteria met on this box (see Acceptance status); remaining work is ctbk-side (content-compare + Batch proof run). Design directions for incremental/Lambda builds captured below for follow-up specs. Iterate `pyrmts-engine`'s parallel window executor on this box (m6g.4xlarge: 16× Graviton2, 61 GB, aarch64 — same arch family as the Fargate target) until the full-range ctbk avail build completes with bounded memory and a wall/effective-cores number worth reporting. Batch is parked until this converges; the final proof run goes back there (image rebuild → `bootstrap -i` → Spot + `-u` resume).
 
 ## Context
 
@@ -65,8 +65,21 @@ Full-range run 3 (`j16-full3-1h`, `-b 20g -C 2 -c 1g`, fresh `manifest-full3.jso
 |---|---|---|---|---|
 | par-leaning | `-w 1h -b 24g -C 3 -c 2g` | 56.4 min | 8.86 | 37.0 GB |
 | mem-tight | `-w 1h -b 20g -C 2 -c 1g` | 65.3 min | 7.36 | 24.0 GB |
+| par-max (this box) | `-w 3h -b 36g -C 4` | **47.9 min** | **10.03** | 37.7 GB |
 
-Run 4 (`j16-full4-3h`, `-w 3h -b 36g -C 4`, fresh `manifest-full4.jsonl`, in progress) probes whether bigger windows (fewer, larger polars ops → less GIL share) push effective cores meaningfully past ~9 — the empirical answer to "resize to 8xl?" (if yes: 8xl + 6-12h windows is promising; if no: GIL binds, prefer range-partitioned processes over bigger hardware).
+Run 4 (`j16-full4-3h`, fresh `manifest-full4.jsonl`) answers the 8xl-resize question in favor of the resize: effective cores rose 8.86 → 10.03 with 3h windows **even though the budget throttled admission to 4-11 workers** (vs 16) — per-worker efficiency jumped with op size, so the walk is memory-limited here, not GIL-limited. On an 8xl (32 vCPU, 128 GB): `-w 6h -b ~90g -j 24-32 -C 4-6` plausibly lands mid-teens effective cores / ~25-35 min wall. GIL would presumably bind eventually; range-partitioned processes remain the next rung after that. CPU total is ~constant (~8h) across all three configs — the engine is work-conserving; only overlap quality moves.
+
+All four full-range manifests/outputs produced identical total output bytes (17,563,471,257 across 99 shards, runs 2/3/4 under three different concurrency configs) — a strong cross-config RGIP signal ahead of the ctbk content-compare.
+
+## Acceptance status (2026-07-23)
+
+1. ✓ Full-range completes, peak RSS 24.0 GB (mem-tight profile, run 3) — comfortably < 32.
+2. ✓ 7 consecutive clean cold starts, zero segv (caveat stands: venv pip pyarrow, not the Docker image's — Batch proof run still the real test).
+3. ✓ Wall 47.9 min / 10.03 effective cores (best), 56-65 min on 1h-window profiles; all ≥2.7× ✓, best <1h ✓.
+4. ✓ `workers=N ≡ workers=1` regression green throughout; scratch outputs + all manifests retained for the ctbk content-compare. Nothing deleted.
+5. ✓ Findings 8-9 landed; 10 landed as full RSS-feedback byte-aware admission (stronger than the documented-default minimum); 11 landed as warmup + single-threaded reads.
+
+Remaining (ctbk side): content-compare scratch vs fan-out reference; Batch proof run (image rebuild → `bootstrap -i` → Spot + `-u` resume).
 
 ## Incremental (cron/Lambda) builds: consolidation, not re-walk
 
@@ -75,7 +88,13 @@ Today the engine builds every output shard from the source cascade, and resume r
 - **Same-tier consolidation** (to build): a new large-dur shard = its tier's finer materialized shards covering the same period, in rev-chron geometric pieces (e.g. `2m@2d` ⇐ `{…, 6h, 12h, 1d}`). Shard boundaries are bin-aligned, so no (cell, bin) key spans inputs → **no group_by at all**; it's a pure k-way merge of already-(s2,dt)-sorted parquet. Memory = one decompressed RG per input = O(R) RGs (R = ladder pieces ≤ ~10) — megabytes, Lambda-shaped. Build as composable stream ops (RG sources → merge/combine nodes → sinks), not bespoke loops — the same pieces should serve phase-2 sorted-run merge closes.
 - **Zero-decode concat** (design card, not scheduled): for dt-first-sorted pyramids, consolidation inputs cover disjoint key ranges → output = literal concatenation of input RGs; compressed-RG stitching (thrift metadata surgery; pyarrow doesn't expose raw RG copy — needs low-level or arrow-rs) holds 1 *compressed* RG resident. Caveat: inherits input RG boundaries (tail RGs < rg_size) → not RGIP vs a from-source build; canonical bytes would be the consolidated form.
 - **Lambda envelope for the daily top-up walk**: dominated by the source-shard parse (~3 GB steady post-Enum; ~8-10 GB transient, shrinkable via streaming `wide_to_long`). The whole-shard parse cache exists because the (s2_cell, dt) sort defeats dt-based RG pruning — every RG is a cell-range spanning the full shard period. A dt-major base rung (or engine-private dt-major mirror) would make `read_window` RG-streamable and delete the 3 GB floor.
-- **Tests**: Lambda-style workloads need first-class tests — single-additional-tick cascades (extend a built range by one base bin, resume, assert minimal windows + byte-identity), then profiling on those shapes.
+- **Tests**: Lambda-style workloads need first-class tests — single-additional-tick cascades (extend a built range by one base bin, resume, assert minimal windows + byte-identity), then profiling on those shapes. (First one landed: `test_single_tick_incremental_resume`, which also made no-op resumes exactly free, `96b1659`.)
+
+Sizing correction (2026-07-23 discussion): same-tier consolidation under (s2,dt) does **not** hold R full shards uncompressed — it's a k-way heap merge of streams sharing the sort key: resident = each input's frontier RG + one output RG ≈ single-digit MBs. The genuinely whole-shard-sized pieces are (1) source window-slicing (dt-pruning impossible under (s2,dt) → the ~3 GB parse cache) and (2) the close-time (s2,dt) sort of a fresh shard. Design directions, independently adoptable, by value-per-complexity:
+
+1. **dt-major base rung** (or engine-private mirror): makes `read_window` RG-streamable, deletes the parse-cache floor. (The rest of a dual-sorted pyramid buys little: cross-tier rebins need decode+group_by regardless, and same-tier consolidation is already merge-cheap.)
+2. **s2-range shadow buckets** (5-10 buckets, boundaries alignable to the ragged station-leaf s2 frontier) on *live/non-max* shards only: Lambda sorts 5-10× smaller pieces, and — since buckets are disjoint s2 ranges each internally (s2,dt)-sorted — the unsharded serving shard is a **zero-decode concat** of bucket shards in bucket order. Serving/CFW reads stay on the stitched unsharded form (live min-cover included); buckets are build-side artifacts, dropped once a max-rung shard stitches.
+3. **k-way merge consolidation** (needed regardless; see above) — build as composable stream ops (RG source → merge/combine → sink) shared with phase-2 merge closes.
 
 ## Notes
 

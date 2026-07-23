@@ -87,12 +87,26 @@ class WideShardSource:
             with self._lock:
                 self._missing.append(key)
             return empty_long(self.pyramid)
-        # use_threads=False: worker-level parallelism already saturates
-        # cores, and Arrow's internal pool is the suspected racer in the
-        # cold-start SIGSEGV (ctbk finding 11) — keep decode on the
-        # calling thread.
-        wide = pl.from_arrow(pq.read_table(io.BytesIO(blob), use_threads=False))
-        return wide_to_long(wide, self.pyramid)
+        # Stream the parse per record batch: whole-shard wide→long
+        # transients peaked ~8-10 GB on ctbk avail and alone bust a
+        # Lambda-sized (10 GB) container; per-batch conversion bounds the
+        # transient at one batch's explode intermediates. `wide_to_long`
+        # is row-local, and downstream paths all pass through unordered
+        # group_bys + the writer's total sort, so batch boundaries and
+        # row order can't reach output bytes. use_threads=False:
+        # worker-level parallelism already saturates cores, and Arrow's
+        # internal pool is the suspected racer in the cold-start SIGSEGV
+        # (ctbk finding 11) — keep decode on the calling thread.
+        import pyarrow as pa
+        pf = pq.ParquetFile(io.BytesIO(blob))
+        parts = [
+            wide_to_long(pl.from_arrow(pa.Table.from_batches([batch])), self.pyramid)
+            for batch in pf.iter_batches(batch_size=131_072, use_threads=False)
+        ]
+        parts = [p for p in parts if p.height]
+        if not parts:
+            return empty_long(self.pyramid)
+        return pl.concat(parts, rechunk=False)
 
     def coverage(self) -> tuple[int, list[str]]:
         """(periods read, keys that were absent). The engine's

@@ -81,6 +81,16 @@ All four full-range manifests/outputs produced identical total output bytes (17,
 
 Remaining (ctbk side): content-compare scratch vs fan-out reference; Batch proof run (image rebuild → `bootstrap -i` → Spot + `-u` resume).
 
+## Lambda-envelope validation (2026-07-23)
+
+Simulated a daily cron top-up: `manifest-full4` truncated at 07-17 (drops 13 tail shards; the open `3d/12d` tile forces a resume from 07-06 — the amplification in action: 1-day extension ⇒ 12-day walk), run under a 10 GB cgroup with `-j 2 -b 7g -C 1 -c 512m -w 1h`:
+
+- **v1 memcg-killed at 10.4 GB ~30 s in — inside the first source-shard parse.** The whole-shard wide→long transient alone busts a 10 GB container. Fixed by streaming the parse per 128k-row record batch (`b265673`): transient bounded at one batch's explode intermediates; row-locality + downstream unordered group_bys + total writer sort keep bytes unreachable.
+- **v2 completed: wall 525.5 s (8.8 min < 15), peak RSS 9.7 GB < 10** — but with only 3% headroom, caused by readahead pinning a second parsed shard. Readahead is now budget-gated (`5020a3c`: prefetch only when `budget − rss > 1.5 × cache`), which should put the profile near ~6.5 GB peak at the cost of boundary-stall wall (~+4-5 min at `-j 2`; still < 15 for this shape). Rebuilt shards matched run 4's (rows, KiB) exactly, 13/13.
+- Verdict: the *daily top-up* shape fits Lambda post-streaming-parse. The unresolved risk is worst-case amplification (a 30m@64d / 2h@256d boundary day re-walks weeks — won't fit 15 min): needs same-tier consolidation (above) or a Batch fallback for boundary days. A cron `batch submit` (EventBridge → Fargate Spot, no 10 GB/15 min caps, same hardened code path, ~cents/day) remains the simpler default unless Lambda is specifically required.
+
+Lambda profile datum: `-w 1h -j 2 -b 7g -C 1 -c 512m` → 8.8 min / 9.7 GB peak (pre-gating; expect ~6.5 GB with gated readahead).
+
 ## Incremental (cron/Lambda) builds: consolidation, not re-walk
 
 Today the engine builds every output shard from the source cascade, and resume re-walks all windows feeding any unfinished shard — so the day a large rung period completes (e.g. `30m@64d`, `2h@256d`; max-rung N is ~constant 3-4k bins across tiers by ladder design), the top-up run re-walks that whole span from source. That's an artifact of the current implementation, not a necessity:

@@ -667,6 +667,18 @@ def build_local(
         inflight: dict[Future, int] = {}
         next_i = 0
 
+        def _readahead_ok() -> bool:
+            """Readahead is a wall optimization that pins an extra parsed
+            shard (~one cache entry) — skip it unless the budget has room
+            (Lambda-envelope sim peaked 9.7 GB against a 10 GB cap purely
+            from the readahead-doubled cache)."""
+            if not mem_budget or cache_bytes is None:
+                return True
+            rss = _rss_bytes()
+            if rss is None:
+                return True
+            return mem_budget - rss > 1.5 * cache_bytes()
+
         def admit_ok() -> bool:
             if not inflight:
                 return True  # progress guarantee
@@ -697,7 +709,7 @@ def build_local(
                 inflight[fut] = next_i
                 next_i += 1
                 burst += 1
-                if prefetch is not None and next_i + inflight_cap < n:
+                if prefetch is not None and next_i + inflight_cap < n and _readahead_ok():
                     # Warm the shard the claim frontier will reach next
                     # (in-range by construction, so a miss is a real
                     # coverage miss like any foreground read's).

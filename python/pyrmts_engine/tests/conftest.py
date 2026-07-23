@@ -90,10 +90,14 @@ def base_wide_frame(start_ms: int, end_ms: int) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
-def write_base_shards(pyramid: Pyramid, shard_dur: str = '6h') -> list[str]:
-    """Materialize a base rung (q@`shard_dur`) as wide shards for [FROM, TO)."""
+def write_base_shards(
+    pyramid: Pyramid,
+    shard_dur: str = '6h',
+    to: datetime = TO,
+) -> list[str]:
+    """Materialize a base rung (q@`shard_dur`) as wide shards for [FROM, `to`)."""
     keys = []
-    for period in shard_periods_covering(FROM, TO, shard_dur):
+    for period in shard_periods_covering(FROM, to, shard_dur):
         s_ms = int(period.start.timestamp() * 1000)
         e_ms = int(period.end.timestamp() * 1000)
         frame = base_wide_frame(s_ms, e_ms)

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pyarrow.parquet as pq
 import pytest
@@ -220,6 +220,61 @@ def test_resume_from_manifest():
         assert pyramid.storage.get(w.key) == full_pyramid.storage.get(w.key), w.key
     # Manifest ends complete: prior records + the resumed run's.
     assert sorted(r.key for r in index.records) == EXPECTED_KEYS
+
+
+def test_single_tick_incremental_resume():
+    """Lambda-style cron shapes. (1) Extending a completed build by one
+    base bin (15 min) is provably zero work: the min-cover leaves
+    residuals smaller than the finest rung (q@6h) uncovered, so the
+    expected-shard set — and therefore the resume — is unchanged.
+    (A +6h tick is also zero work here: the new q@6h tile is the
+    source-provided rung, hence skipped.) (2) Extending by a day
+    completes q@1d and h@1d tiles; the resumed run processes exactly
+    that day's window and writes bytes identical to a from-scratch
+    build of the extended range."""
+    tick = TO + timedelta(minutes=15)
+    to1d = TO + timedelta(days=1)
+
+    pyramid = make_pyramid()
+    write_base_shards(pyramid, to=to1d)
+    index = MemShardIndex()
+    build_local(
+        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid_name='test', shard_index=index,
+    )
+
+    # (1) +one base bin: no new cover tiles → nothing to do.
+    assert [e.key for e in list_expected_shards(pyramid, (FROM, tick))] == [
+        e.key for e in list_expected_shards(pyramid, (FROM, TO))
+    ]
+    r_tick = build_local(
+        pyramid, (FROM, tick), WideShardSource(pyramid),
+        pyramid_name='test', shard_index=index, resume=True,
+    )
+    assert (r_tick.windows, r_tick.written) == (0, [])
+
+    # (2) +1d completes q@1d and h@1d tiles: exactly those shards, from
+    # exactly one (1d) window.
+    r_1d = build_local(
+        pyramid, (FROM, to1d), WideShardSource(pyramid),
+        pyramid_name='test', shard_index=index, resume=True,
+    )
+    new_keys = ['pyr/h/1d/2026-01-08.parquet', 'pyr/q/1d/2026-01-08.parquet']
+    assert sorted(w.key for w in r_1d.written) == new_keys
+    assert r_1d.windows == 1
+
+    ref_pyramid = make_pyramid()
+    write_base_shards(ref_pyramid, to=to1d)
+    build_local(
+        ref_pyramid, (FROM, to1d), WideShardSource(ref_pyramid), pyramid_name='test',
+    )
+    for key in new_keys:
+        assert pyramid.storage.get(key) == ref_pyramid.storage.get(key), key
+    # Manifest ends covering the extended range exactly.
+    assert sorted(r.key for r in index.records) == sorted(
+        e.key for e in list_expected_shards(pyramid, (FROM, to1d))
+        if (e.tier, e.shard_dur) != ('q', '6h')
+    )
 
 
 def test_zero_source_rows_raises_unless_allowed():

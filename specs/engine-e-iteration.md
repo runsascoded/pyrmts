@@ -59,6 +59,15 @@ Full-range run 1 (`j16-full-1h`, pre-readahead/parallel-close code, fresh `manif
 
 Full-range run 2 (`j16-full2-1h`, readahead + parallel closes, fresh `manifest-full2.jsonl`): **wall 3382.5 s (56.4 min) — under the 1 h stretch — CPU 8h19m34s → 8.86 effective cores** (3.3× the 2.6-2.7 sequential reference), 2447 windows, 5.59B source rows, 99 shards (17.6 GB), zero errors. Peak sampled RSS **37.0 GB** though — over the "comfortably < 32" acceptance line; 3 concurrent close transients stacked on the walk (the close pool had slack: 92/99 closed before walk-end). Tuned `_CLOSE_WORKERS` 3→2 + close chunks 2→1 GiB (`e800312`); run 3 (`j16-full3-1h`, `-b 20g`, fresh `manifest-full3.jsonl`) is the acceptance datum for peak RSS.
 
+## Incremental (cron/Lambda) builds: consolidation, not re-walk
+
+Today the engine builds every output shard from the source cascade, and resume re-walks all windows feeding any unfinished shard — so the day a large rung period completes (e.g. `30m@64d`, `2h@256d`; max-rung N is ~constant 3-4k bins across tiers by ladder design), the top-up run re-walks that whole span from source. That's an artifact of the current implementation, not a necessity:
+
+- **Same-tier consolidation** (to build): a new large-dur shard = its tier's finer materialized shards covering the same period, in rev-chron geometric pieces (e.g. `2m@2d` ⇐ `{…, 6h, 12h, 1d}`). Shard boundaries are bin-aligned, so no (cell, bin) key spans inputs → **no group_by at all**; it's a pure k-way merge of already-(s2,dt)-sorted parquet. Memory = one decompressed RG per input = O(R) RGs (R = ladder pieces ≤ ~10) — megabytes, Lambda-shaped. Build as composable stream ops (RG sources → merge/combine nodes → sinks), not bespoke loops — the same pieces should serve phase-2 sorted-run merge closes.
+- **Zero-decode concat** (design card, not scheduled): for dt-first-sorted pyramids, consolidation inputs cover disjoint key ranges → output = literal concatenation of input RGs; compressed-RG stitching (thrift metadata surgery; pyarrow doesn't expose raw RG copy — needs low-level or arrow-rs) holds 1 *compressed* RG resident. Caveat: inherits input RG boundaries (tail RGs < rg_size) → not RGIP vs a from-source build; canonical bytes would be the consolidated form.
+- **Lambda envelope for the daily top-up walk**: dominated by the source-shard parse (~3 GB steady post-Enum; ~8-10 GB transient, shrinkable via streaming `wide_to_long`). The whole-shard parse cache exists because the (s2_cell, dt) sort defeats dt-based RG pruning — every RG is a cell-range spanning the full shard period. A dt-major base rung (or engine-private dt-major mirror) would make `read_window` RG-streamable and delete the 3 GB floor.
+- **Tests**: Lambda-style workloads need first-class tests — single-additional-tick cascades (extend a built range by one base bin, resume, assert minimal windows + byte-identity), then profiling on those shapes.
+
 ## Notes
 
 - Iterate code here directly (this clone), commit on `main` as usual; the laptop sessions will `git fetch` from `e` / get pushed-back commits — coordinate via this spec's status line.

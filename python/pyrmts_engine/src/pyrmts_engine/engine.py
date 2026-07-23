@@ -381,7 +381,13 @@ def build_local(
             result.resumed_shards += len(q) - len(kept)
             pending[name] = kept
         remaining_starts = [e.effective_start for q in pending.values() for e in q]
-        resume_from = min(remaining_starts, default=to)
+        # No unfinished shards → nothing to walk at all (`resume_from =
+        # to` alone would still admit a final window straddling `to`) —
+        # a no-op cron top-up must be exactly free, not one-window-ish.
+        if not remaining_starts:
+            resume_from = None
+        else:
+            resume_from = min(remaining_starts)
 
     own_spill = spill_dir is None
     spill_root = Path(tempfile.mkdtemp(prefix='pyrmts-engine-')) if own_spill else Path(spill_dir)
@@ -443,13 +449,17 @@ def build_local(
         log(f"  flush {shard.tier:6s} {shard.key}: {wide.height:,} rows, "
             f"{n_bytes/1024:.0f} KiB, {time.time() - t_flush:.1f}s")
 
-    periods = [
+    periods = [] if resume_from is None else [
         p for p in shard_periods_covering(from_, to, window)
         if p.end > resume_from
     ]
     if resume and result.resumed_shards:
+        restart = (
+            'nothing left to build' if resume_from is None
+            else f"restarting from {resume_from:%Y-%m-%dT%H:%M}"
+        )
         err(f"resume: {result.resumed_shards} manifested shards skipped, "
-            f"restarting from {resume_from:%Y-%m-%dT%H:%M} ({len(periods)} windows)")
+            f"{restart} ({len(periods)} windows)")
 
     # Cascade consumer counts: a tier's window frame is freed as soon as
     # its last consumer has re-binned from it (finding 10: retaining all

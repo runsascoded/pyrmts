@@ -57,7 +57,16 @@ Key structural insight: `-w` is the real per-task-memory dial (the spec's "strea
 
 Full-range run 1 (`j16-full-1h`, pre-readahead/parallel-close code, fresh `manifest-full.jsonl`): walk finished 2447 windows in ~43 min, RSS 11-18 GB, admission cap never pinched below worker count for long — but the **single close thread saturated from ~minute 10**; at walk-end 72 of 99 closes were still queued at ~80-110 s each (2m/4d ≈ 85 s: combine 98M-row long, widen, PUT 180 MB). Killed rather than ride out a 1-2 h serial tail the already-committed close pool eliminates; its partial outputs/manifest remain (deterministic, so later runs' shards are byte-identical). Also: spill peaked ~22 GB on disk — plan ~25 GB scratch headroom for full-range runs.
 
-Full-range run 2 (`j16-full2-1h`, readahead + parallel closes, fresh `manifest-full2.jsonl`): **wall 3382.5 s (56.4 min) — under the 1 h stretch — CPU 8h19m34s → 8.86 effective cores** (3.3× the 2.6-2.7 sequential reference), 2447 windows, 5.59B source rows, 99 shards (17.6 GB), zero errors. Peak sampled RSS **37.0 GB** though — over the "comfortably < 32" acceptance line; 3 concurrent close transients stacked on the walk (the close pool had slack: 92/99 closed before walk-end). Tuned `_CLOSE_WORKERS` 3→2 + close chunks 2→1 GiB (`e800312`); run 3 (`j16-full3-1h`, `-b 20g`, fresh `manifest-full3.jsonl`) is the acceptance datum for peak RSS.
+Full-range run 2 (`j16-full2-1h`, readahead + parallel closes, fresh `manifest-full2.jsonl`): **wall 3382.5 s (56.4 min) — under the 1 h stretch — CPU 8h19m34s → 8.86 effective cores** (3.3× the 2.6-2.7 sequential reference), 2447 windows, 5.59B source rows, 99 shards (17.6 GB), zero errors. Peak sampled RSS **37.0 GB** though — over the "comfortably < 32" acceptance line; 3 concurrent close transients stacked on the walk (the close pool had slack: 92/99 closed before walk-end). Tuned `_CLOSE_WORKERS` 3→2 + close chunks 2→1 GiB (`e800312`), then promoted both to CLI dials `-C`/`-c` (`e18ebbe`).
+
+Full-range run 3 (`j16-full3-1h`, `-b 20g -C 2 -c 1g`, fresh `manifest-full3.jsonl`): **wall 3917.3 s (65.3 min), CPU 8h00m → 7.36 effective cores, peak RSS 24.0 GB** — acceptance #1 met comfortably. Identical outputs (99 shards, byte counts match run 2). The par-vs-mem trade is now a clean two-profile story:
+
+| profile | dials | wall | eff cores | peak RSS |
+|---|---|---|---|---|
+| par-leaning | `-w 1h -b 24g -C 3 -c 2g` | 56.4 min | 8.86 | 37.0 GB |
+| mem-tight | `-w 1h -b 20g -C 2 -c 1g` | 65.3 min | 7.36 | 24.0 GB |
+
+Run 4 (`j16-full4-3h`, `-w 3h -b 36g -C 4`, fresh `manifest-full4.jsonl`, in progress) probes whether bigger windows (fewer, larger polars ops → less GIL share) push effective cores meaningfully past ~9 — the empirical answer to "resize to 8xl?" (if yes: 8xl + 6-12h windows is promising; if no: GIL binds, prefer range-partitioned processes over bigger hardware).
 
 ## Incremental (cron/Lambda) builds: consolidation, not re-walk
 

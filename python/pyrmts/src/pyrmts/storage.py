@@ -20,6 +20,9 @@ class MemStorage:
     def put(self, key: str, data: bytes) -> None:
         self._data[key] = data
 
+    def delete(self, key: str) -> None:
+        self._data.pop(key, None)
+
     def list(self, prefix: str) -> Iterable[str]:
         for k in sorted(self._data):
             if k.startswith(prefix):
@@ -47,6 +50,11 @@ class FsStorage:
         p = self._path(key)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
+
+    def delete(self, key: str) -> None:
+        p = self._path(key)
+        if p.exists():
+            p.unlink()
 
     def list(self, prefix: str) -> Iterable[str]:
         prefix_path = self.root / prefix
@@ -115,6 +123,9 @@ class S3Storage:
 
     def put(self, key: str, data: bytes) -> None:
         self._client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data)
+
+    def delete(self, key: str) -> None:
+        self._client.delete_object(Bucket=self.bucket, Key=self._key(key))
 
     def list(self, prefix: str):
         paginator = self._client.get_paginator('list_objects_v2')

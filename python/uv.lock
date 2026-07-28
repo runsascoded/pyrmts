@@ -7,6 +7,7 @@ members = [
     "pyrmts",
     "pyrmts-engine",
     "pyrmts-geo",
+    "pyrmts-ops",
 ]
 
 [[package]]
@@ -317,6 +318,32 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
 ]
 provides-extras = ["test"]
+
+[[package]]
+name = "pyrmts-ops"
+version = "0.0.0"
+source = { editable = "pyrmts_ops" }
+dependencies = [
+    { name = "pyrmts" },
+    { name = "pyrmts-engine" },
+]
+
+[package.optional-dependencies]
+aws = [
+    { name = "boto3" },
+]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.34" },
+    { name = "pyrmts", editable = "pyrmts" },
+    { name = "pyrmts-engine", editable = "pyrmts_engine" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
+]
+provides-extras = ["aws", "test"]
 
 [[package]]
 name = "pytest"

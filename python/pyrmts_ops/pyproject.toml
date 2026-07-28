@@ -1,0 +1,27 @@
+[project]
+name = "pyrmts-ops"
+version = "0.0.0"
+description = "Ops layer for pyrmts pyramids — Lambda fan-out rebuild driver, GC, deployer, handler entry."
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ryan Williams", email = "ryan@runsascoded.com" }]
+dependencies = [
+    "pyrmts",
+    "pyrmts-engine",
+]
+
+[project.optional-dependencies]
+aws = ["boto3>=1.34"]
+test = ["pytest>=8"]
+
+[tool.uv.sources]
+pyrmts = { workspace = true }
+pyrmts-engine = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyrmts_ops"]

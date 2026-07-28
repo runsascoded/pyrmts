@@ -63,6 +63,13 @@ from .shard_index import (
     StorageJsonlShardIndex,
 )
 from .source import Source, WideShardSource
+from .validate import (
+    aligned_range,
+    canonical_long,
+    compare_manifest,
+    compare_streaming,
+    covering_shard,
+)
 
 __version__ = "0.0.0"
 
@@ -85,4 +92,6 @@ __all__ = [
     'materialize_extension_shard', 'overlap_cover',
     'reconcile_registrations', 'run_extension_fill', 'run_single_gap',
     'tile_from_existing',
+    'aligned_range', 'canonical_long', 'compare_manifest',
+    'compare_streaming', 'covering_shard',
 ]

@@ -1,9 +1,20 @@
-"""Lambda bundle + deploy skeleton (`specs/pyrmts-ops-adoption.md` phase 3
-— absorbed from ctbk `gbfs/lambda/deploy.py`). Plain boto3, no CDK:
-build a zip from vendored pure-python site-packages + consumer files,
-then upsert the IAM role, function, and EventBridge schedule. Idempotent
-— re-run to redeploy code or config. Consumer deploy scripts shrink to
-config invocations of `deploy_pyramid_lambda`."""
+"""Lambda deploy skeleton (`specs/pyrmts-ops-adoption.md` phase 3 —
+absorbed from ctbk `gbfs/lambda/deploy.py`). Plain boto3, no CDK: upsert
+the IAM role, function, and EventBridge schedule. Idempotent — re-run to
+redeploy code or config. Consumer deploy scripts shrink to config
+invocations of `deploy_pyramid_lambda`.
+
+Two packaging paths:
+- **Container image** (`image_uri=`) — the default recommendation for
+  pyramid Lambdas: any consumer of `pyrmts_ops.lambda_entry`
+  transitively needs polars (a `pyrmts-engine` dependency), and
+  C-extension wheels can't ship in a zip bundle. Build/push the image
+  with `pyrmts_engine.batch.push_image` (its `dockerfile=` param points
+  at the Lambda Dockerfile). Note: AWS can't convert a function between
+  package types — a zip↔image flip deletes + recreates it.
+- **Zip + layers** (`zip_blob=` via `build_zip`) — for genuinely
+  pure-python handlers only.
+"""
 from __future__ import annotations
 
 import io
@@ -37,9 +48,13 @@ def build_zip(
     """Deterministic-shape Lambda bundle: `entries` maps archive names to
     source paths (or literal bytes — e.g. an empty `__init__.py`);
     `vendor` names pure-python site-packages to include wholesale.
-    C-extension `.so` files and `__pycache__` are excluded — packages
-    with optional C accelerators (e.g. pyyaml) must fall back to their
-    pure-python paths."""
+
+    **C-extension boundary**: `.so` files and `__pycache__` are excluded
+    — packages with optional C accelerators (e.g. pyyaml) must fall back
+    to their pure-python paths, and packages that REQUIRE C extensions
+    (polars, pyarrow beyond what a layer provides — i.e. anything
+    importing `pyrmts_engine`) cannot ship this way at all: deploy those
+    as container images (`deploy_pyramid_lambda(image_uri=…)`)."""
     if vendor and site_packages is None:
         raise ValueError('build_zip: vendor packages need site_packages')
     buf = io.BytesIO()
@@ -88,13 +103,24 @@ def upsert_lambda_role(role_name: str, *, description: str = '', session=None) -
     return arn
 
 
+def _wait_gone(lam, name: str, tries: int = 30, delay_s: float = 2.0) -> None:
+    for _ in range(tries):
+        try:
+            lam.get_function(FunctionName=name)
+        except lam.exceptions.ResourceNotFoundException:
+            return
+        time.sleep(delay_s)
+    raise TimeoutError(f'{name} still exists after delete_function')
+
+
 def upsert_lambda_function(
     name: str,
     *,
     role_arn: str,
-    zip_blob: bytes,
     memory_mb: int,
     env: Mapping[str, str],
+    zip_blob: bytes | None = None,
+    image_uri: str | None = None,
     description: str = '',
     handler: str = 'handler.lambda_handler',
     runtime: str = 'python3.12',
@@ -102,24 +128,52 @@ def upsert_lambda_function(
     layers: Sequence[str] = (),
     reserved: int | None = None,
     session=None,
+    client=None,
 ) -> str:
     """Create-or-update one function (code, then config, then reserved
-    concurrency — `None` clears it)."""
-    import boto3
-    lam = (session or boto3.Session()).client('lambda')
+    concurrency — `None` clears it). Exactly one of `zip_blob` /
+    `image_uri` selects the package type; `handler`/`runtime`/`layers`
+    apply to zip functions only (an image's are baked into it). A
+    package-type flip (zip↔image) **deletes and recreates** the function
+    — AWS cannot update across package types."""
+    if (zip_blob is None) == (image_uri is None):
+        raise ValueError('upsert_lambda_function: exactly one of zip_blob / image_uri')
+    if client is None:
+        import boto3
+        client = (session or boto3.Session()).client('lambda')
+    lam = client
+    desired_type = 'Image' if image_uri is not None else 'Zip'
     cfg = dict(
-        Runtime=runtime, Role=role_arn, Handler=handler,
-        Timeout=timeout_s, MemorySize=memory_mb, Layers=list(layers),
+        Role=role_arn, Timeout=timeout_s, MemorySize=memory_mb,
         Environment={'Variables': dict(env)}, Description=description,
     )
+    if desired_type == 'Zip':
+        cfg |= dict(Runtime=runtime, Handler=handler, Layers=list(layers))
+    code = {'ImageUri': image_uri} if image_uri is not None else {'ZipFile': zip_blob}
+    code_update = dict(code) if image_uri is not None else {'ZipFile': zip_blob}
+
+    exists = True
     try:
-        lam.get_function(FunctionName=name)
-        lam.update_function_code(FunctionName=name, ZipFile=zip_blob)
+        existing = lam.get_function(FunctionName=name)['Configuration']
+        if existing.get('PackageType', 'Zip') != desired_type:
+            err(f'{name}: package type {existing.get("PackageType", "Zip")} → '
+                f'{desired_type} requires recreation; deleting')
+            lam.delete_function(FunctionName=name)
+            _wait_gone(lam, name)
+            exists = False
+    except lam.exceptions.ResourceNotFoundException:
+        exists = False
+
+    if exists:
+        lam.update_function_code(FunctionName=name, **code_update)
         lam.get_waiter('function_updated').wait(FunctionName=name)
         lam.update_function_configuration(FunctionName=name, **cfg)
         err(f'updated {name}')
-    except lam.exceptions.ResourceNotFoundException:
-        lam.create_function(FunctionName=name, Code={'ZipFile': zip_blob}, **cfg)
+    else:
+        create = dict(FunctionName=name, Code=code, **cfg)
+        if desired_type == 'Image':
+            create['PackageType'] = 'Image'
+        lam.create_function(**create)
         err(f'created {name}')
     lam.get_waiter('function_updated').wait(FunctionName=name)
     if reserved is not None:
@@ -165,10 +219,11 @@ def upsert_schedule(
 def deploy_pyramid_lambda(
     name: str,
     *,
-    zip_blob: bytes,
     role_name: str,
     memory_mb: int,
     env: Mapping[str, str],
+    zip_blob: bytes | None = None,
+    image_uri: str | None = None,
     description: str = '',
     handler: str = 'handler.lambda_handler',
     runtime: str = 'python3.12',
@@ -179,15 +234,19 @@ def deploy_pyramid_lambda(
     schedule_rule: str | None = None,
     schedule_input: str | None = None,
     session=None,
+    client=None,
 ) -> str:
     """Role + function (+ optional schedule) in one idempotent call.
-    Returns the function ARN."""
+    Package via `image_uri` (recommended — see module docstring) or
+    `zip_blob`. Returns the function ARN."""
     role_arn = upsert_lambda_role(role_name, description=description, session=session)
     arn = upsert_lambda_function(
         name,
-        role_arn=role_arn, zip_blob=zip_blob, memory_mb=memory_mb, env=env,
+        role_arn=role_arn, zip_blob=zip_blob, image_uri=image_uri,
+        memory_mb=memory_mb, env=env,
         description=description, handler=handler, runtime=runtime,
-        timeout_s=timeout_s, layers=layers, reserved=reserved, session=session,
+        timeout_s=timeout_s, layers=layers, reserved=reserved,
+        session=session, client=client,
     )
     if schedule is not None:
         upsert_schedule(

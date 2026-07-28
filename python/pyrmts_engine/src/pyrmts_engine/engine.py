@@ -421,8 +421,9 @@ def build_local(
     resume_from = from_
     fill_spans: list[tuple[datetime, datetime]] | None = None
     if fill:
+        from .discovery import list_existing_keys
         expected = plan.outputs + plan.skipped_rungs
-        listed = set(pyramid.storage.list(commonprefix([e.key for e in expected])))
+        listed = list_existing_keys(pyramid, commonprefix([e.key for e in expected]))
         done = set(listed)
         existing_keys = getattr(shard_index, 'existing_keys', None)
         if existing_keys is not None:

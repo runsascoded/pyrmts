@@ -138,11 +138,31 @@ class D1ShardIndex:
     """Registers into the `pyramid_shards` D1 table via `pyrmts.d1` (the
     REST client). Env: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`,
     and `D1_DATABASE_ID` (unless passed explicitly). Registration is
-    must-succeed: any HTTP or D1-level error raises."""
+    must-succeed: any HTTP or D1-level error raises.
 
-    def __init__(self, database_id: str | None = None, table: str = 'pyramid_shards') -> None:
+    `pyramid` scopes `existing_keys()` (the reconcile/resume read path);
+    registration alone doesn't need it (each record carries its own)."""
+
+    def __init__(
+        self,
+        database_id: str | None = None,
+        table: str = 'pyramid_shards',
+        pyramid: str | None = None,
+    ) -> None:
         self.database_id = database_id or os.environ['D1_DATABASE_ID']
         self.table = table
+        self.pyramid = pyramid
+
+    def existing_keys(self) -> set[str]:
+        if self.pyramid is None:
+            raise ValueError("D1ShardIndex.existing_keys() needs `pyramid` (row scope)")
+        from pyrmts.d1 import d1_query
+        rows = d1_query(
+            f'SELECT key FROM {self.table} WHERE pyramid = ?',
+            [self.pyramid],
+            database_id=self.database_id,
+        )
+        return {r['key'] for r in rows}
 
     def record_shard(self, record: ShardRecord) -> None:
         from pyrmts.d1 import register_shard

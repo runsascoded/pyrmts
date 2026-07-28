@@ -161,13 +161,14 @@ def test_build_command():
     ]
 
 
-def test_build_command_source_rung_resume_allow_empty():
+def test_build_command_source_rung_fill_resume_allow_empty():
     assert build_command(
         'cfg.yaml',
         pyramid_name='avail-v4',
         range_='2026-04-01T00:00/2026-07-18T00:00',
         source_tier='1m',
         source_shard='2d',
+        fill=True,
         resume=True,
         allow_empty=True,
         max_missing=0.5,
@@ -177,6 +178,7 @@ def test_build_command_source_rung_resume_allow_empty():
         '-r', '2026-04-01T00:00/2026-07-18T00:00',
         '-t', '1m',
         '-d', '2d',
+        '-f',
         '-u',
         '-e',
         '-M', '0.5',

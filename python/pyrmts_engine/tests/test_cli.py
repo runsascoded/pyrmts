@@ -113,6 +113,30 @@ def test_build_with_source_factory(tmp_path: Path):
     assert empty.height == 0
 
 
+def test_build_fill(tmp_path: Path):
+    """-f/--fill: delete one shard from a fully-built pyramid; fill
+    rebuilds exactly it, walking only its window."""
+    config, data = _setup(tmp_path)
+    args = ['build', '-n', 'fill', '-r', RANGE, '-R', str(data), str(config)]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+
+    (data / 'pyr/q/1d/2026-01-04.parquet').unlink()
+    result = CliRunner().invoke(cli, [*args, '-f'])
+    assert result.exit_code == 0, result.output
+    assert result.stderr.split('\n')[0] == (
+        'fill: 11 expected shards, 10 present, 1 missing, 1 fillable'
+    )
+    normalized = re.sub(r'\([\d,]+ bytes\)', '(<bytes>)', result.stdout)
+    normalized = re.sub(r'wall \d+\.\ds', 'wall <t>', normalized)
+    # 1,152 = one day's long rows (192 wide × 6).
+    assert normalized.split('\n') == [
+        'build_local: 1 windows, 1,152 source rows → 1 shards (<bytes>), '
+        '0 source-provided rungs skipped, 10 present shards skipped, wall <t>',
+        '',
+    ]
+
+
 def test_build_source_rung_flags(tmp_path: Path):
     """ctbk footgun repro: the durable base rung is the LARGEST shard dur
     (q@1d), the default (smallest, q@6h) doesn't exist. Without -t/-d the

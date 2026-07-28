@@ -1,6 +1,6 @@
 # Engine `--fill` mode: declarative gap-fill (the Lambda contract, at Batch speed)
 
-Status: **open** (2026-07-28, written by the ctbk session). Give `pyrmts-engine build` an optional mode with the same contract as ctbk's cascade Lambda — *inspect actual state, identify missing expected shards, build exactly those* — executed by the existing parallel window executor (maximally parallel, one node).
+Status: **implemented** (pyrmts session, 2026-07-28 — see Status section at bottom; flag is `-f/--fill`, since `-F` was taken by `--filter`). Written by the ctbk session (2026-07-28). Give `pyrmts-engine build` an optional mode with the same contract as ctbk's cascade Lambda — *inspect actual state, identify missing expected shards, build exactly those* — executed by the existing parallel window executor (maximally parallel, one node).
 
 ## Motivation (today's incident, ctbk avail-v5 burn-in)
 
@@ -31,3 +31,17 @@ Result: "backfill", "resume", "extend", "catch-up" collapse into one operation �
 - Listing is one paginated LIST per prefix (cheap); key→(tier, shard_dur, period) parse must tolerate foreign keys under the prefix (configs, manifests) by ignoring them.
 - Tests (TFFP style): (a) full build → delete N random shards from storage → `--fill` rebuilds exactly those, byte-identical, walks only their windows; (b) extend: build [t0,t1), advance now to t2, `--fill` builds only the tail; (c) unfillable: expected shards past source coverage reported+skipped, exit 0; (d) `--fill` on a complete pyramid is a fast no-op (LIST + no walk).
 - ctbk will wire `ctbk gbfs engine submit --fill` passthrough once the CLI flag exists; assume flag name `-F/--fill` unless something collides.
+
+## Status (pyrmts session, 2026-07-28)
+
+Implemented as `build_local(fill=True)` / `build -f/--fill` (`-F` collides with `-F/--filter`, on both `build` and `batch submit`); `batch submit -f` and `build_command(fill=True)` pass through. Notes against the contract:
+
+1. **Expected**: `compile_plan` (which already wraps `list_expected_shards`) unchanged; fill diffs against `plan.outputs + plan.skipped_rungs` (the skipped source rung is part of the min-cover and reports separately, see 4).
+2. **Actual**: one LIST of `commonprefix(expected keys)`; done-set = listing ∪ manifest `existing_keys()` (when the ShardIndex has them — so `-u` is subsumed; `-f` needs no `-m`). No key→(tier, shard, period) parsing at all: the diff is set-membership of *expected* keys against the listing, so foreign keys (configs, manifests, stale cover tiles from a narrower range) are ignored by construction.
+3. **Diff → plan**: missing shards' `[effective_start, effective_end)` spans are merged; the window walk (grid unchanged) is restricted to windows overlapping a span — scattered gaps walk a sparse, non-contiguous window list. Byte-identity vs full rebuild is regression-tested (scattered multi-tier deletions, extend-the-range, truncated source).
+4. **Clamp to source**: coverage end = max present source-tile end (source-rung keys come out of the same LIST). Unfillable = missing shards with `effective_end` > coverage end, plus shards on tiers finer than the source rung's bin, plus absent tiles of the source rung itself (raw-ingest territory) — all reported (stderr + `BuildResult.unfillable`/summary) and skipped, exit 0. Deliberate nuance: **mid-range** source holes are *not* clamped away — their windows walk, and the `max_missing_source` guard still fires (exit 4) unless `--max-missing` opts in; the clamp is for the tip, the guard for real holes.
+5. **Write + record**: unchanged (md5/n_bytes in manifest records; registration app-side).
+
+Also: the range stays `-r` (required) — "genesis → now" defaulting is driver-side (ctbk knows genesis; the engine doesn't). A complete pyramid is a no-op: LIST + 0 windows, no source reads (tested). Tests: `tests/test_fill.py` (6), CLI + `build_command` coverage in `test_cli.py`/`test_batch.py`.
+
+Spec stays in `specs/` until ctbk wires the submit passthrough and burns it in on the avail-v5 hole (est. ~10 fillable-gap windows vs the Lambda fan-out's 87 min / $5.35).

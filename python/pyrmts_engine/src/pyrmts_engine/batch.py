@@ -134,6 +134,7 @@ def build_command(
     source_tier: str | None = None,
     source_shard: str | None = None,
     manifest: str | None = None,
+    fill: bool = False,
     resume: bool = False,
     allow_empty: bool = False,
     max_missing: float | None = None,
@@ -162,6 +163,8 @@ def build_command(
         cmd += ['-d', source_shard]
     if manifest is not None:
         cmd += ['-m', manifest]
+    if fill:
+        cmd += ['-f']
     if resume:
         cmd += ['-u']
     if allow_empty:

@@ -84,6 +84,7 @@ import threading
 import time
 from bisect import bisect_right
 from collections import deque
+from os.path import commonprefix
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -97,11 +98,12 @@ from pyrmts import (
     Pyramid,
     parse_duration,
     shard_periods_covering,
+    substitute_key,
     write_tier_parquet,
 )
 
 from .longform import long_to_wide, rebin_long
-from .plan import UNIT_MS, bin_floor_expr, compile_plan
+from .plan import UNIT_MS, _divides, bin_floor_expr, compile_plan
 from .shard_index import NoopShardIndex, ShardIndex, ShardRecord, now_ms
 from .source import Source
 from .spill import SpillBuffer
@@ -136,6 +138,10 @@ class BuildResult:
     written: list[WrittenShard] = field(default_factory=list)
     skipped_rungs: int = 0
     resumed_shards: int = 0
+    # Fill mode: expected shards already present (listing ∪ manifest), and
+    # missing shards the source can't cover (reported + skipped, not built).
+    present_shards: int = 0
+    unfillable: int = 0
     source_rows: int = 0
     missing_source: int = 0
     windows: int = 0
@@ -144,10 +150,12 @@ class BuildResult:
     def summary(self) -> str:
         total_bytes = sum(w.bytes for w in self.written)
         resumed = f"{self.resumed_shards} manifested shards skipped, " if self.resumed_shards else ""
+        present = f"{self.present_shards} present shards skipped, " if self.present_shards else ""
+        unfillable = f"{self.unfillable} unfillable shards skipped, " if self.unfillable else ""
         return (
             f"build_local: {self.windows} windows, {self.source_rows:,} source rows → "
             f"{len(self.written)} shards ({total_bytes:,} bytes), "
-            f"{self.skipped_rungs} source-provided rungs skipped, {resumed}"
+            f"{self.skipped_rungs} source-provided rungs skipped, {resumed}{present}{unfillable}"
             f"wall {self.wall_seconds:.1f}s"
         )
 
@@ -176,6 +184,20 @@ def _trim_allocator() -> None:
 
 def _ms(t: datetime) -> int:
     return int(t.timestamp() * 1000)
+
+
+def _merge_spans(
+    spans: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    """Sort + coalesce overlapping/adjacent half-open spans."""
+    merged: list[tuple[datetime, datetime]] = []
+    for s, e in sorted(spans):
+        if merged and s <= merged[-1][1]:
+            if e > merged[-1][1]:
+                merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    return merged
 
 
 _PAGE = os.sysconf('SC_PAGESIZE') if hasattr(os, 'sysconf') else 4096
@@ -278,6 +300,7 @@ def build_local(
     mem_budget: int | None = None,
     close_workers: int | None = None,
     close_chunk_bytes: int | None = None,
+    fill: bool = False,
     resume: bool = False,
     allow_empty: bool = False,
     max_missing_source: float = 0.0,
@@ -325,6 +348,17 @@ def build_local(
         close_chunk_bytes: target combined-long bytes per close chunk
             (default `_CLOSE_CHUNK_BYTES`); smaller bounds each close's
             transient tighter.
+        fill: declarative gap-fill (`specs/engine-fill-mode.md`): LIST the
+            target prefix on storage, diff against the expected min-cover
+            (done-set = listing ∪ manifest records, so `resume` is
+            subsumed), and build exactly the missing shards — the window
+            walk is restricted to windows feeding them. Missing shards
+            the source can't cover — needing data past its coverage end,
+            or on a tier finer than the source rung's — are reported and
+            skipped (`unfillable`), not an error; likewise absent tiles
+            of the source rung itself (raw-ingest territory). Mid-range
+            source holes are NOT clamped away: their windows are walked
+            and the `max_missing_source` guard still applies.
         resume: skip shards already recorded in `shard_index` (which must
             expose `existing_keys()` — the JSONL manifest impls do), and
             skip source windows that only feed skipped shards. Shards are
@@ -368,8 +402,66 @@ def build_local(
         for t in tiers
     }
 
+    def err(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
+
+    def log(msg: str) -> None:
+        if verbose:
+            err(msg)
+
     resume_from = from_
-    if resume:
+    fill_spans: list[tuple[datetime, datetime]] | None = None
+    if fill:
+        expected = plan.outputs + plan.skipped_rungs
+        listed = set(pyramid.storage.list(commonprefix([e.key for e in expected])))
+        done = set(listed)
+        existing_keys = getattr(shard_index, 'existing_keys', None)
+        if existing_keys is not None:
+            done |= existing_keys()
+        missing_src = [e for e in plan.skipped_rungs if e.key not in done]
+        missing = [e for e in plan.outputs if e.key not in done]
+        result.present_shards = len(plan.outputs) - len(missing)
+        unfillable: set[str] = set()
+        coverage_end = to
+        rung = getattr(source, 'provides', None)
+        if rung is not None:
+            src_tier, src_dur = rung
+            src_bin = pyramid.tier(src_tier).bin
+            # Tiers finer than the source rung's bin can't be derived
+            # from it (e.g. the base tier under a coarser source).
+            sub_source = {t.name for t in tiers if not _divides(src_bin, t.bin)}
+            coverage_end = max(
+                (
+                    min(p.end, to)
+                    for p in shard_periods_covering(from_, to, src_dur)
+                    if substitute_key(
+                        pyramid.keyTemplate,
+                        {**(filter or {}), 'tier': src_tier, 'shard': src_dur, 'period': p.label},
+                    ) in listed
+                ),
+                default=from_,
+            )
+            unfillable = {
+                e.key for e in missing
+                if e.tier in sub_source or e.effective_end > coverage_end
+            }
+        result.unfillable = len(unfillable) + len(missing_src)
+        fillable = [e for e in missing if e.key not in unfillable]
+        keep = {e.key for e in fillable}
+        for name, q in pending.items():
+            pending[name] = deque(e for e in q if e.key in keep)
+        err(f"fill: {len(plan.outputs)} expected shards, {result.present_shards} "
+            f"present, {len(missing)} missing, {len(fillable)} fillable")
+        if unfillable:
+            sample = ', '.join(sorted(unfillable)[:5]) + (', …' if len(unfillable) > 5 else '')
+            err(f"fill: {len(unfillable)} unfillable (source coverage ends "
+                f"{coverage_end:%Y-%m-%dT%H:%M}): {sample}")
+        if missing_src:
+            sample = ', '.join(e.key for e in missing_src[:5]) + (', …' if len(missing_src) > 5 else '')
+            err(f"fill: {len(missing_src)} source-rung tiles absent (the rung the "
+                f"engine reads — raw-ingest fills those): {sample}")
+        fill_spans = _merge_spans([(e.effective_start, e.effective_end) for e in fillable])
+    elif resume:
         existing_keys = getattr(shard_index, 'existing_keys', None)
         if existing_keys is None:
             raise ValueError(
@@ -393,13 +485,6 @@ def build_local(
     own_spill = spill_dir is None
     spill_root = Path(tempfile.mkdtemp(prefix='pyrmts-engine-')) if own_spill else Path(spill_dir)
     spill = SpillBuffer(spill_root, pyramid)
-
-    def err(msg: str) -> None:
-        print(msg, file=sys.stderr, flush=True)
-
-    def log(msg: str) -> None:
-        if verbose:
-            err(msg)
 
     def rg_size_for(tier_name: str) -> int | None:
         if row_group_size is None:
@@ -453,10 +538,25 @@ def build_local(
         log(f"  flush {shard.tier:6s} {shard.key}: {wide.height:,} rows, "
             f"{n_bytes/1024:.0f} KiB, {time.time() - t_flush:.1f}s")
 
-    periods = [] if resume_from is None else [
-        p for p in shard_periods_covering(from_, to, window)
-        if p.end > resume_from
-    ]
+    if fill_spans is not None:
+        # Walk only windows feeding a fillable-missing shard (spans are
+        # sorted + disjoint; the grid itself is unchanged, so spill/close
+        # bytes match a full rebuild's). Scattered gaps → a sparse,
+        # possibly non-contiguous window list.
+        periods = []
+        j = 0
+        for p in shard_periods_covering(from_, to, window):
+            while j < len(fill_spans) and fill_spans[j][1] <= p.start:
+                j += 1
+            if j < len(fill_spans) and fill_spans[j][0] < p.end:
+                periods.append(p)
+    elif resume_from is None:
+        periods = []
+    else:
+        periods = [
+            p for p in shard_periods_covering(from_, to, window)
+            if p.end > resume_from
+        ]
     if resume and result.resumed_shards:
         restart = (
             'nothing left to build' if resume_from is None
@@ -602,6 +702,8 @@ def build_local(
         f"{sum(len(q) for q in pending.values())} shards to write "
         f"({len(plan.skipped_rungs)} rung-skipped"
         + (f", {result.resumed_shards} resumed" if result.resumed_shards else '')
+        + (f", {result.present_shards} present" if result.present_shards else '')
+        + (f", {result.unfillable} unfillable" if result.unfillable else '')
         + f"), workers={n_workers}, max_inflight={inflight_cap}, "
         f"mem_budget={mem_budget / 1e9:.1f}GB"
         + (f", source rung={src_rung[0]}/{src_rung[1]}" if src_rung else '')

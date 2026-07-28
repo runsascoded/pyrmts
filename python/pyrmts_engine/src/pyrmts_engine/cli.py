@@ -113,6 +113,7 @@ def plan(filters: tuple[str, ...], dot_out: str | None, fs_root: str | None, ran
 @option('-d', '--source-shard', help="Source rung shard Duration for the default WideShardSource (default: the base tier's smallest; ctbk-style durable rungs are usually the LARGEST)")
 @option('-e', '--allow-empty', is_flag=True, help="Permit a 0-source-row (all-EMPTY) build; without it that exits nonzero (~always a mis-specified source rung)")
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
+@option('-f', '--fill', is_flag=True, help="Gap-fill: LIST the target prefix, build exactly the expected-but-missing shards (walking only their windows); missing shards the source can't cover are reported + skipped")
 @option('-g', '--rg-size', type=int, help="Output-shard parquet row-group size (all tiers; per-tier via the library)")
 @option('-j', '--workers', type=int, help="Window-worker threads (default: cpu count)")
 @option('-K', '--max-inflight', type=int, help="Max windows in flight past the watermark (memory bound; default 2×workers)")
@@ -136,6 +137,7 @@ def build(
     source_shard: str | None,
     allow_empty: bool,
     filters: tuple[str, ...],
+    fill: bool,
     rg_size: int | None,
     workers: int | None,
     max_inflight: int | None,
@@ -193,6 +195,7 @@ def build(
             mem_budget=_parse_bytes(mem_budget) if mem_budget is not None else None,
             close_workers=close_workers,
             close_chunk_bytes=_parse_bytes(close_chunk) if close_chunk is not None else None,
+            fill=fill,
             resume=resume,
             allow_empty=allow_empty,
             max_missing_source=max_missing,
@@ -265,6 +268,7 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 @option('-e', '--env', 'envs', multiple=True, help="Extra container env var, NAME=VALUE (repeatable)")
 @option('-E', '--allow-empty', is_flag=True, help="Permit a 0-source-row (all-EMPTY) build")
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
+@option('-f', '--fill', is_flag=True, help="build -f: gap-fill exactly the expected-but-missing shards")
 @option('-g', '--rg-size', type=int, help="Output-shard parquet row-group size")
 @option('-j', '--job-name', help="Batch job name (default: derived from pyramid name)")
 @option('-K', '--max-inflight', type=int, help="build -K: max windows in flight past the watermark")
@@ -291,6 +295,7 @@ def batch_submit(
     envs: tuple[str, ...],
     allow_empty: bool,
     filters: tuple[str, ...],
+    fill: bool,
     rg_size: int | None,
     job_name: str | None,
     max_inflight: int | None,
@@ -325,6 +330,7 @@ def batch_submit(
             source_tier=source_tier,
             source_shard=source_shard,
             manifest=manifest,
+            fill=fill,
             resume=resume,
             allow_empty=allow_empty,
             max_missing=max_missing,

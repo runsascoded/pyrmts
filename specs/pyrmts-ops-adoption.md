@@ -6,6 +6,14 @@ Ordering below is dependency-driven; each phase ends with ctbk deleting the move
 
 ## Phase 1 — foundations (S, ~½ day): `storage_from_cfg` + Python D1 client + per-tier YAML extras
 
+**Status: done pyrmts-side (2026-07-28)** — ctbk can now delete its copies and flip imports:
+
+- `pyrmts.storage.storage_from_cfg(storage_cfg, *, profile=None)` (exported from `pyrmts`): R2 env chain (`R2_*`, `CLOUDFLARE_ACCOUNT_ID`-derived endpoint) → named-profile creds (never `AWS_*` env on the profile path — the 20-vs-32-char key trap) → plain `S3Storage` (generic-AWS fallthrough; ctbk's version raised here, so pass `profile='cf'` to keep must-have-R2-creds behavior). Also honors `storage.prefix` (ctbk's copy didn't).
+- `pyrmts.d1`: `d1_query` + `register_shard` — same request/row shape as ctbk's `d1_http` and `pyrmts-cfw/src/d1.ts` (request shape locked by tests). Differences from ctbk's copy: no `ctbk-gbfs` database-id default (`D1_DATABASE_ID` env or param — keep the default ctbk-side if wanted), `table` param on `register_shard`, `account_id`/`api_token` overridable per call, and no stderr log line (library stays silent; wrap ctbk-side if the log matters). `pyrmts_engine.D1ShardIndex` now delegates to it (dupe deleted) and grew a `table` param.
+- Per-tier YAML extras first-class: `Tier.rg_size` (tier `rg_size:` > `defaults.rg_size` > None = writer heuristic — the built-in 2048 was ctbk policy, keep it consumer-side) and `Tier.lambda_shards` (chain-validated at parse as one combined ladder with `shards`). `pyrmts.merge_lambda_shards(cfg) -> PyramidConfig` replaces the YAML-text-in/YAML-text-out version — it's config-level now; re-dump ctbk-side if a YAML string is still needed. Note: ctbk's `parse_rg_sizes` also read a `base:` block — pyrmts has no such concept (tiers only), so keep that shim ctbk-side if any config still uses it.
+- Cross-cutting item landed early: `DimType` gained `'s2'` (python + JS twins, validation + messages).
+- Not moved (ctbk-side deletions per spec): `lite.py:dur_min`, `_hist.py`.
+
 - `ctbk/pyramid_cascade/storage.py:storage_from_cfg` → `pyrmts.storage` (S3/R2 factory honoring `R2_*` env + a named AWS profile param, default `profile=None`). Its own docstring argues it belongs here (bare `S3Storage` picks the wrong creds).
 - `ctbk/pyramid_cascade/d1_http.py` → `pyrmts` (new module, e.g. `pyrmts.d1`): `d1_query` + `register_shard` over CF's REST API — the missing Python peer of `pyrmts-cfw/src/d1.ts`, already writing the identical `pyramid_shards` schema. Database id / table name become params (no `ctbk-gbfs` default).
 - `ctbk/pyramid_cascade/config.py:parse_rg_sizes` → `pyrmts.yaml`: preserve per-tier extras (`rg_size`) first-class in `parse_pyramid_yaml` instead of a consumer-side re-parse. Also fold `merge_lambda_shards`/`parse_lambda_shards` (from `lambda_exec.py`) here: `lambda_shards` is a generic ladder-extension concept, and both the engine harness and the Lambda planner need the merged view.

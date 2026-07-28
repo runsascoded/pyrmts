@@ -4,7 +4,7 @@
 constructs a `Pyramid` via `pyramid_from_config`."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import yaml as _yaml
@@ -24,7 +24,7 @@ from .types import (
 
 
 _VALID_AXES: set[str] = {'time', 'step'}
-_VALID_DIM_TYPES: set[str] = {'int', 'string', 'h3', 'geohash'}
+_VALID_DIM_TYPES: set[str] = {'int', 'string', 'h3', 'geohash', 's2'}
 _VALID_MONOIDS: set[str] = {
     'sum', 'count', 'histogram', 'topk', 'botk', 'hll', 'tdigest',
 }
@@ -57,6 +57,10 @@ def parse_pyramid_yaml(text: str) -> PyramidConfig:
     if not isinstance(bin_col, str):
         raise ValueError("parse_pyramid_yaml: binCol must be a string")
 
+    defaults = raw.get('defaults') or {}
+    if not isinstance(defaults, dict):
+        raise ValueError("parse_pyramid_yaml: `defaults` must be a mapping")
+
     cfg = PyramidConfig(
         storage=storage_meta,
         keyTemplate=key_template,
@@ -64,7 +68,7 @@ def parse_pyramid_yaml(text: str) -> PyramidConfig:
         binCol=bin_col,
         dims=_parse_dims(raw.get('dims')),
         metrics=_parse_metrics(raw.get('metrics')),
-        tiers=_parse_tiers(raw.get('tiers')),
+        tiers=_parse_tiers(raw.get('tiers'), defaults),
     )
     if 'geo' in raw and raw['geo'] is not None:
         cfg.geo = _parse_geo(raw['geo'])
@@ -110,7 +114,7 @@ def _parse_dims(raw: Any) -> list[Dim]:
         if type_ not in _VALID_DIM_TYPES:
             raise ValueError(
                 f"parse_pyramid_yaml: dims[{i}].type {type_!r} invalid "
-                f"(want one of int/string/h3/geohash)"
+                f"(want one of int/string/h3/geohash/s2)"
             )
         out.append(Dim(name=name, type=type_))
     return out
@@ -136,9 +140,13 @@ def _parse_metrics(raw: Any) -> list[Metric]:
     return out
 
 
-def _parse_tiers(raw: Any) -> list[Tier]:
+def _parse_tiers(raw: Any, defaults: dict[str, Any] | None = None) -> list[Tier]:
     if not isinstance(raw, list) or not raw:
         raise ValueError("parse_pyramid_yaml: `tiers` must be a non-empty list")
+    defaults = defaults or {}
+    default_rg = defaults.get('rg_size')
+    if default_rg is not None and not isinstance(default_rg, int):
+        raise ValueError("parse_pyramid_yaml: defaults.rg_size must be an int")
     out: list[Tier] = []
     for i, t in enumerate(raw):
         if not isinstance(t, dict):
@@ -154,21 +162,50 @@ def _parse_tiers(raw: Any) -> list[Tier]:
                 f"parse_pyramid_yaml: tiers[{i}] uses the old singular `shard:` form; "
                 f"use `shards: [...]` (a divisibility-chained ladder)."
             )
-        shards_raw = t.get('shards')
-        if not isinstance(shards_raw, list) or not shards_raw:
-            raise ValueError(
-                f"parse_pyramid_yaml: tiers[{i}].shards must be a non-empty list of Duration strings"
-            )
-        shards: list[str] = []
-        for j, s in enumerate(shards_raw):
-            if not isinstance(s, str):
-                raise ValueError(
-                    f"parse_pyramid_yaml: tiers[{i}].shards[{j}] must be a string (got {s!r})"
-                )
-            shards.append(s)
-        _validate_shard_ladder(i, name, bin_, shards)
-        out.append(Tier(name=name, bin=bin_, shards=tuple(shards)))
+        shards = _parse_durs(t.get('shards'), f"tiers[{i}].shards", require=True)
+        # Ladder-extension rungs (`lambda_shards`) must continue the
+        # tier's divisibility chain — validated as one combined ladder.
+        lambda_shards = _parse_durs(t.get('lambda_shards'), f"tiers[{i}].lambda_shards")
+        _validate_shard_ladder(i, name, bin_, shards + lambda_shards)
+        rg_size = t.get('rg_size', default_rg)
+        if rg_size is not None and not isinstance(rg_size, int):
+            raise ValueError(f"parse_pyramid_yaml: tiers[{i}].rg_size must be an int")
+        out.append(Tier(
+            name=name,
+            bin=bin_,
+            shards=tuple(shards),
+            rg_size=rg_size,
+            lambda_shards=tuple(lambda_shards),
+        ))
     return out
+
+
+def _parse_durs(raw: Any, what: str, require: bool = False) -> list[str]:
+    if raw is None and not require:
+        return []
+    if not isinstance(raw, list) or (require and not raw):
+        raise ValueError(
+            f"parse_pyramid_yaml: {what} must be a non-empty list of Duration strings"
+        )
+    out: list[str] = []
+    for j, s in enumerate(raw):
+        if not isinstance(s, str):
+            raise ValueError(f"parse_pyramid_yaml: {what}[{j}] must be a string (got {s!r})")
+        out.append(s)
+    return out
+
+
+def merge_lambda_shards(cfg: PyramidConfig) -> PyramidConfig:
+    """The extended-ladder view: each tier's `shards` folded together with
+    its `lambda_shards` (already chain-validated at parse time), which are
+    then cleared. Executors that materialize extension rungs (the engine
+    harness, the Lambda planner) consume this; the un-merged config is the
+    bulk-build view."""
+    return replace(cfg, tiers=[
+        replace(t, shards=t.shards + t.lambda_shards, lambda_shards=())
+        if t.lambda_shards else t
+        for t in cfg.tiers
+    ])
 
 
 def _validate_shard_ladder(

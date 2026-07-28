@@ -5,7 +5,7 @@ from textwrap import dedent
 
 import pytest
 
-from pyrmts import Tier, parse_pyramid_yaml
+from pyrmts import Tier, merge_lambda_shards, parse_pyramid_yaml
 
 
 def test_parses_shards_ladder():
@@ -158,3 +158,54 @@ def test_allows_single_rung_ladder():
     cfg = parse_pyramid_yaml(text)
     assert cfg.tiers[0].shards == ('1h',)
     assert cfg.tiers[1].shards == ('1d',)
+
+
+EXTRAS_YAML = dedent("""
+    storage:
+      type: s3
+      bucket: b
+      key: 'a/{tier}/{shard}/{period}.parquet'
+    binCol: ts
+    defaults:
+      rg_size: 2048
+    dims:
+      - { name: cell, type: s2 }
+    metrics:
+      - { name: n, monoid: count }
+    tiers:
+      - { name: raw, bin: 1min, shards: [1h, 1d], rg_size: 4096, lambda_shards: [2d, 4d] }
+      - { name: h1,  bin: 1h,   shards: [1d] }
+""").strip()
+
+
+def test_tier_extras_rg_size_and_lambda_shards():
+    """Per-tier extras (`specs/pyrmts-ops-adoption.md` phase 1) survive the
+    parse first-class: `rg_size` (tier override > defaults.rg_size) and
+    `lambda_shards`; `s2` is a valid dim type."""
+    cfg = parse_pyramid_yaml(EXTRAS_YAML)
+    assert cfg.tiers == [
+        Tier(name='raw', bin='1min', shards=('1h', '1d'), rg_size=4096, lambda_shards=('2d', '4d')),
+        Tier(name='h1', bin='1h', shards=('1d',), rg_size=2048),
+    ]
+    assert [(d.name, d.type) for d in cfg.dims] == [('cell', 's2')]
+
+
+def test_merge_lambda_shards():
+    """The extended-ladder view folds `lambda_shards` into `shards` (and
+    clears them); the input config is untouched."""
+    cfg = parse_pyramid_yaml(EXTRAS_YAML)
+    merged = merge_lambda_shards(cfg)
+    assert merged.tiers == [
+        Tier(name='raw', bin='1min', shards=('1h', '1d', '2d', '4d'), rg_size=4096),
+        Tier(name='h1', bin='1h', shards=('1d',), rg_size=2048),
+    ]
+    assert cfg.tiers[0].shards == ('1h', '1d')
+    assert cfg.tiers[0].lambda_shards == ('2d', '4d')
+
+
+def test_lambda_shards_must_continue_chain():
+    """`lambda_shards` are chain-validated as one combined ladder with
+    `shards` — a rung that breaks divisibility fails the parse."""
+    text = EXTRAS_YAML.replace('lambda_shards: [2d, 4d]', 'lambda_shards: [36h]')
+    with pytest.raises(ValueError, match=r"shards\[1\] '1d' does not divide shards\[2\] '36h'"):
+        parse_pyramid_yaml(text)

@@ -31,7 +31,7 @@ export interface Tier {
 
 export interface Dim {
   name: string
-  type: 'int' | 'string' | 'h3' | 'geohash'
+  type: 'int' | 'string' | 'h3' | 'geohash' | 's2'
 }
 
 export type MonoidName =

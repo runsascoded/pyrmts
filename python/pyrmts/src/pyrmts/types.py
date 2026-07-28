@@ -18,7 +18,7 @@ MonoidName = Literal[
     'tdigest',
 ]
 
-DimType = Literal['int', 'string', 'h3', 'geohash']
+DimType = Literal['int', 'string', 'h3', 'geohash', 's2']
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,15 @@ class Tier:
     name: str
     bin: str
     shards: tuple[str, ...]
+    # Per-tier extras (`specs/pyrmts-ops-adoption.md` phase 1) — preserved
+    # first-class from the YAML instead of consumer-side re-parses.
+    # Output-shard parquet row-group size; None = the writer's heuristic.
+    rg_size: int | None = None
+    # Ladder-extension rungs materialized incrementally (e.g. by a cron
+    # Lambda) rather than by bulk builds; must continue the tier's
+    # divisibility chain. `merge_lambda_shards` folds them into `shards`
+    # for executors that want the extended view.
+    lambda_shards: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

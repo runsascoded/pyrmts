@@ -47,7 +47,7 @@ export interface PyramidConfig {
 }
 
 const VALID_AXES = new Set<Axis>(['time', 'step'])
-const VALID_DIM_TYPES = new Set<Dim['type']>(['int', 'string', 'h3', 'geohash'])
+const VALID_DIM_TYPES = new Set<Dim['type']>(['int', 'string', 'h3', 'geohash', 's2'])
 const VALID_MONOIDS = new Set<MonoidName>([
   'sum', 'count', 'histogram', 'topk', 'botk', 'hll', 'tdigest',
 ])
@@ -157,7 +157,7 @@ function parseDims(raw: unknown): Dim[] {
     }
     if (typeof dd.type !== 'string' || !VALID_DIM_TYPES.has(dd.type as Dim['type'])) {
       throw new Error(
-        `parsePyramidYaml: dims[${i}].type '${String(dd.type)}' invalid (want one of int/string/h3/geohash)`,
+        `parsePyramidYaml: dims[${i}].type '${String(dd.type)}' invalid (want one of int/string/h3/geohash/s2)`,
       )
     }
     return { name: dd.name, type: dd.type as Dim['type'] }

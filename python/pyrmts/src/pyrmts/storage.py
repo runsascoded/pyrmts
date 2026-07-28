@@ -125,3 +125,59 @@ class S3Storage:
                     yield full[len(self.prefix):]
                 else:
                     yield full
+
+
+def storage_from_cfg(storage_cfg: dict, *, profile: str | None = None) -> S3Storage:
+    """`S3Storage` from a config `storage:` block, honoring R2 conventions
+    (`specs/pyrmts-ops-adoption.md` phase 1). Credential chain:
+
+    1. `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` env (endpoint from
+       `R2_ENDPOINT_URL`, or derived from `CLOUDFLARE_ACCOUNT_ID`).
+    2. `profile`, when given: creds resolved via `boto3.Session` from that
+       named AWS profile (e.g. an R2-dedicated `[cf]` profile). AWS_* env
+       vars are deliberately NOT consulted on this path — on hosts with
+       both AWS and R2 creds installed, the default chain picks the
+       20-char AWS key and R2 rejects it (`InvalidArgument: Credential
+       access key has length 20, should be 32`).
+    3. Neither → plain `S3Storage` (env/default AWS chain — the
+       non-R2 case).
+
+    Only `storage.type: s3` is supported."""
+    typ = storage_cfg.get('type')
+    if typ != 's3':
+        raise ValueError(f"storage_from_cfg: unsupported storage.type {typ!r}; only 's3' implemented")
+    bucket = storage_cfg['bucket']
+    prefix = storage_cfg.get('prefix', '')
+
+    endpoint_url = (
+        os.environ.get('R2_ENDPOINT_URL')
+        or (
+            f"https://{os.environ['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com"
+            if 'CLOUDFLARE_ACCOUNT_ID' in os.environ
+            else None
+        )
+    )
+    access_key = os.environ.get('R2_ACCESS_KEY_ID')
+    secret_key = os.environ.get('R2_SECRET_ACCESS_KEY')
+    if not (access_key and secret_key) and profile is not None:
+        import boto3  # type: ignore[import-untyped]
+        creds = boto3.Session(profile_name=profile).get_credentials()
+        if creds is None:
+            raise RuntimeError(
+                f"storage_from_cfg: no R2 credentials: set R2_ACCESS_KEY_ID/"
+                f"R2_SECRET_ACCESS_KEY in env, or configure the [{profile}] "
+                f"profile in ~/.aws/credentials"
+            )
+        frozen = creds.get_frozen_credentials()
+        access_key = frozen.access_key
+        secret_key = frozen.secret_key
+    if not (access_key and secret_key):
+        return S3Storage(bucket=bucket, prefix=prefix, endpoint_url=endpoint_url)
+    return S3Storage(
+        bucket=bucket,
+        prefix=prefix,
+        endpoint_url=endpoint_url,
+        region_name='auto' if endpoint_url else None,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+    )

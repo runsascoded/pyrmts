@@ -146,7 +146,7 @@ storage: { type: r2, key: 'x' }
 dims: [{ name: foo, type: float }]
 metrics: []
 tiers: [{ name: raw, bin: 1d, shards: [1y] }]
-`)).toThrow("parsePyramidYaml: dims[0].type 'float' invalid (want one of int/string/h3/geohash)")
+`)).toThrow("parsePyramidYaml: dims[0].type 'float' invalid (want one of int/string/h3/geohash/s2)")
   })
 
   test('throws on empty tiers', () => {

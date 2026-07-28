@@ -1,6 +1,6 @@
 # Vocab-restricted ± covers: region queries over a finite stored vocabulary
 
-Status: **open** (2026-07-28, ctbk session). Last serving gap for ctbk's avail-v5 (drop-LUC) cutover: **region/bbox queries**. v5 stores rows only at a *frozen vocabulary* — a ragged set of S2 cells (L10–L16, descend-while->T ancestry) plus one `s:<short_name>` identity row per station — so a cover produced by today's `s2Index.minimalCover` (arbitrary cells at the pyramid's `resolutions`) silently undercounts: cover cells not in the vocabulary match no rows. Station-point queries are already fine (identity keys pass through the planner opaquely — verified in prod 2026-07-28, exact value parity + latency parity vs v3); only *set/region* selection needs this.
+Status: **implemented** (pyrmts session, 2026-07-28 — see Status section at bottom). Written by the ctbk session (2026-07-28). Last serving gap for ctbk's avail-v5 (drop-LUC) cutover: **region/bbox queries**. v5 stores rows only at a *frozen vocabulary* — a ragged set of S2 cells (L10–L16, descend-while->T ancestry) plus one `s:<short_name>` identity row per station — so a cover produced by today's `s2Index.minimalCover` (arbitrary cells at the pyramid's `resolutions`) silently undercounts: cover cells not in the vocabulary match no rows. Station-point queries are already fine (identity keys pass through the planner opaquely — verified in prod 2026-07-28, exact value parity + latency parity vs v3); only *set/region* selection needs this.
 
 ## Contract
 
@@ -39,3 +39,15 @@ ctbk's avail worker currently refuses sign-flip arithmetic for histogram metrics
 - DP optimality on the drop-LUC spec's counter-example (4-partial-children L12) and on a random-forest fuzz vs brute-force term enumeration (small N).
 - Positive-only mode = exact union (row-set equality vs a per-leaf query union on a fixture pyramid).
 - End-to-end: fixture vocab pyramid; bbox → station set → cover → query rows ≡ union of the stations' identity-row queries.
+
+## Status (pyrmts session, 2026-07-28)
+
+Implemented in `pyrmts-geo` (`js/packages/pyrmts-geo/src/vocab-cover.ts`): `buildVocabGraph(index, cells, leaves)` + `vocabCover(graph, wanted, {positiveOnly})`, both exported from the package index. Notes against the contract:
+
+1. **API shape**: `vocabCover` takes the wanted *station-key* set (`Iterable<string>` of leaf identity keys) and returns the existing `SpatialSet` (`{include, exclude}`) so it drops into `cells`/`cells.exclude` unchanged. It throws on wanted keys absent from the graph — a silently-dropped station is exactly the undercount this spec exists to kill.
+2. **`VocabGraph`**: `buildVocabGraph` takes each leaf as `{key, cell}` where `cell` is *any* cell containing the station (typically its finest-level cell) and classifies it under the nearest containing vocab member via the backend's parent walk — so the ragged vocab (skipped levels) needs no consumer-side classification. Cells/stations contained by no vocab member become forest roots (a root station stays selectable by its identity key). `VocabNode` is a plain exported interface, so consumers can also build graphs directly.
+3. **DP**: the two-function ± recurrence, memoized per node (each node's pos/neg can be demanded from both parent branches), reconstruction by argmin walk, ties → explicit (matching `minimalCover`'s convention). Geometry- and index-free as specced — `SpatialIndex` is used only by `buildVocabGraph`.
+4. **positive-only**: the complement branch is dropped from `pos` (`neg` is then unreachable); output is the exact union of fully-wanted vocab cells + wanted identity keys, `exclude` always `[]`.
+5. **Tests** (13, `vocab-cover.test.ts`): the counter-example asserts the exact 5-term `P − 4 outsiders` form (vs 8 per-child); seeded random-forest fuzz proves the DP hits the brute-force minimum over all ± (and, in positive-only mode, all +-only) term assignments under nearest-signed-ancestor semantics, 30 trials each; value-arithmetic test (station values = distinct powers of two, cell rows = Σ under) asserts `Σ include − Σ exclude ≡ Σ wanted` in both modes — the monoid form of "cover rows ≡ union of identity-row queries". The full-pyramid e2e (bbox → registry station set → cover → served rows) lives naturally in ctbk's parity harness, where the real registry/vocab/worker are; the value-arithmetic test covers the pyrmts-side exactness claim.
+
+Not pushed to GitHub yet (standing hold): ctbk consumes this via `pds l pyrmts-geo` against the local checkout for the region-cells regeneration + parity runs; the TS-pin bump / dist-branch push happens when ctbk is ready to take it to CI/prod.

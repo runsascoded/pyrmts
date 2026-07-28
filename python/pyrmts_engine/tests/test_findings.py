@@ -43,7 +43,7 @@ def test_source_cache_fetches_each_blob_once():
     base_keys = write_base_shards(pyramid)
 
     build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', window='1h', workers=1,
     )
     assert {k: n for k, n in storage.get_counts.items() if k in set(base_keys)} == {
@@ -69,7 +69,7 @@ def test_spill_dir_used_and_emptied(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(SpillBuffer, 'take_shard', spying_take)
 
     result = build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', spill_dir=spill_dir,
     )
     assert len(result.written) == 11
@@ -90,13 +90,13 @@ def test_mem_budget_throttles_but_completes_byte_identical():
     p_ref = make_pyramid()
     write_base_shards(p_ref)
     r_ref = build_local(
-        p_ref, (FROM, TO), WideShardSource(p_ref),
+        p_ref, (FROM, TO), WideShardSource(p_ref, shard_dur='6h'),
         pyramid_name='test', window='6h', workers=4, mem_budget=0,
     )
     p_tight = make_pyramid()
     write_base_shards(p_tight)
     r_tight = build_local(
-        p_tight, (FROM, TO), WideShardSource(p_tight),
+        p_tight, (FROM, TO), WideShardSource(p_tight, shard_dur='6h'),
         pyramid_name='test', window='6h', workers=4, mem_budget=1,
     )
     assert sorted(w.key for w in r_tight.written) == sorted(w.key for w in r_ref.written)
@@ -109,7 +109,7 @@ def test_source_cache_bytes_tracks_residency():
     shards and returns to 0 once the watermark evicts them."""
     pyramid = make_pyramid()
     write_base_shards(pyramid)
-    src = WideShardSource(pyramid)
+    src = WideShardSource(pyramid, shard_dur='6h')
     assert src.cache_bytes() == 0
     src.read_window(FROM, TO)
     assert src.cache_bytes() == sum(
@@ -144,14 +144,14 @@ def test_chunked_close_byte_identical(monkeypatch):
     p_ref = make_pyramid()
     write_base_shards(p_ref)
     r_ref = build_local(
-        p_ref, (FROM, TO), WideShardSource(p_ref), pyramid_name='test',
+        p_ref, (FROM, TO), WideShardSource(p_ref, shard_dur='6h'), pyramid_name='test',
     )
 
     monkeypatch.setattr(engine_mod, '_CLOSE_MAX_CHUNKS', 3)
     p_chunked = make_pyramid()
     write_base_shards(p_chunked)
     r_chunked = build_local(
-        p_chunked, (FROM, TO), WideShardSource(p_chunked), pyramid_name='test',
+        p_chunked, (FROM, TO), WideShardSource(p_chunked, shard_dur='6h'), pyramid_name='test',
         close_chunk_bytes=1,
     )
     assert sorted(w.key for w in r_chunked.written) == sorted(w.key for w in r_ref.written)
@@ -163,7 +163,7 @@ def test_row_group_size_int_and_per_tier():
     pyramid = make_pyramid()
     write_base_shards(pyramid)
     build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', row_group_size={'q': 64, 'h': 48},
     )
 

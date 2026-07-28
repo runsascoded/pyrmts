@@ -117,7 +117,7 @@ def test_build_fill(tmp_path: Path):
     """-f/--fill: delete one shard from a fully-built pyramid; fill
     rebuilds exactly it, walking only its window."""
     config, data = _setup(tmp_path)
-    args = ['build', '-n', 'fill', '-r', RANGE, '-R', str(data), str(config)]
+    args = ['build', '-n', 'fill', '-r', RANGE, '-R', str(data), '-d', '6h', str(config)]
     result = CliRunner().invoke(cli, args)
     assert result.exit_code == 0, result.output
 
@@ -138,12 +138,11 @@ def test_build_fill(tmp_path: Path):
 
 
 def test_build_source_rung_flags(tmp_path: Path):
-    """ctbk footgun repro: the durable base rung is the LARGEST shard dur
-    (q@1d), the default (smallest, q@6h) doesn't exist. Without -t/-d the
-    coverage guard trips (all q@6h keys absent → exit 4, keys named);
-    with them it reads q@1d and writes the 5 remaining cover shards.
-    (Separate data dirs: the mis-sourced run overwrites the seeded q@1d
-    rung with empties — the finding-2 clobber.)"""
+    """The ctbk footgun — durable base rung is the LARGEST shard dur
+    (q@1d) — is gone by default: min-cover discovery reads whatever rung
+    is present, so the no-flags build just works (and skips the whole
+    source tier: 6 rungs = the q@1d cover tiles). Pinning the absent
+    rung (-d 6h) still trips the coverage guard (exit 4, keys named)."""
     config = tmp_path / 'pyr.yaml'
     config.write_text(CONFIG_YAML)
 
@@ -153,16 +152,16 @@ def test_build_source_rung_flags(tmp_path: Path):
         return data
 
     args = ['build', '-n', 'rung', '-r', RANGE, str(config)]
-    result = CliRunner().invoke(cli, [*args, '-R', str(seeded('missourced'))])
+    result = CliRunner().invoke(cli, [*args, '-R', str(seeded('pinned-wrong')), '-d', '6h'])
     assert result.exit_code == 4
 
-    result = CliRunner().invoke(cli, [*args, '-R', str(seeded('data')), '-t', 'q', '-d', '1d'])
+    result = CliRunner().invoke(cli, [*args, '-R', str(seeded('data'))])
     assert result.exit_code == 0, result.output
     normalized = re.sub(r'\([\d,]+ bytes\)', '(<bytes>)', result.stdout)
     normalized = re.sub(r'wall \d+\.\ds', 'wall <t>', normalized)
     # 6,912 = 192 wide rows/day (96 15-min bins × 2 cells) × 6 long rows
     # each (2 hist states + 1 count + 3 sum cols) × 6 days; "6 rungs
-    # skipped" counts the provided rung's 6 q@1d cover tiles.
+    # skipped" counts the source tier's 6 q@1d cover tiles.
     assert normalized.split('\n') == [
         'build_local: 6 windows, 6,912 source rows → 5 shards (<bytes>), '
         '6 source-provided rungs skipped, wall <t>',

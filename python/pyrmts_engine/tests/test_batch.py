@@ -221,7 +221,7 @@ def test_storage_jsonl_shard_index_flushes_and_closes():
     pyramid = make_pyramid()
     write_base_shards(pyramid)
     result = build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test',
         shard_index=StorageJsonlShardIndex(manifest_store, 'manifests/run.jsonl', flush_every=4),
     )

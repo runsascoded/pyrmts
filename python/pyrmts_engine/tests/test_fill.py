@@ -27,7 +27,7 @@ def test_fill_rebuilds_exactly_the_deleted_shards():
         pyramid.storage._data.pop(k)
 
     result = build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', fill=True,
     )
     assert sorted(w.key for w in result.written) == deleted
@@ -45,10 +45,10 @@ def test_fill_extends_the_range():
     t1 = datetime(2026, 1, 7, tzinfo=timezone.utc)
     pyramid = make_pyramid()
     write_base_shards(pyramid)  # base rung covers [FROM, TO)
-    build_local(pyramid, (FROM, t1), WideShardSource(pyramid), pyramid_name='test')
+    build_local(pyramid, (FROM, t1), WideShardSource(pyramid, shard_dur='6h'), pyramid_name='test')
 
     result = build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', fill=True,
     )
     new = ['pyr/h/1d/2026-01-07.parquet', 'pyr/q/1d/2026-01-07.parquet']
@@ -71,7 +71,7 @@ def test_fill_unfillable_beyond_source_coverage():
     write_base_shards(pyramid, to=cov_end)
 
     result = build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', fill=True,
     )
     assert sorted(w.key for w in result.written) == [
@@ -95,7 +95,7 @@ def test_fill_noop_on_complete_pyramid():
     source reads (and no EmptySourceError despite 0 rows)."""
     pyramid, _, _ = _run_engine()
     result = build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', fill=True,
     )
     assert (result.windows, result.written, result.present_shards, result.source_rows) == (0, [], 11, 0)
@@ -112,7 +112,7 @@ def test_fill_unions_manifest_into_done_set():
     prior = MemShardIndex(records=[r for r in index.records if r.key == manifested])
 
     result = build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', shard_index=prior, fill=True,
     )
     assert [w.key for w in result.written] == [unmanifested]

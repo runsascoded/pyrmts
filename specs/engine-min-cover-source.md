@@ -1,6 +1,6 @@
 # Engine min-cover source: read the source tier as it's actually stored
 
-Status: **open** (2026-07-28, ctbk session). `WideShardSource` reads exactly one rung (`-t 1m -d 2d`); a maintained pyramid stores its source tier as a **min-cover mix** (large consolidated tiles for history + progressively finer tiles toward the live tip). Single-rung reading caps the engine's source coverage at the last complete large tile — on ctbk avail that's up to ~2 days behind now, which is exactly the freshest, most-queried span. This is the standing blocker for the engine owning tip-adjacent fills (`-f` currently marks that span unfillable and leaves it to the Lambda tick).
+Status: **implemented** (pyrmts session, 2026-07-28 — see Status section at bottom). Written by the ctbk session (2026-07-28). `WideShardSource` reads exactly one rung (`-t 1m -d 2d`); a maintained pyramid stores its source tier as a **min-cover mix** (large consolidated tiles for history + progressively finer tiles toward the live tip). Single-rung reading caps the engine's source coverage at the last complete large tile — on ctbk avail that's up to ~2 days behind now, which is exactly the freshest, most-queried span. This is the standing blocker for the engine owning tip-adjacent fills (`-f` currently marks that span unfillable and leaves it to the Lambda tick).
 
 ## Contract
 
@@ -27,3 +27,18 @@ Today's avail-v5 catch-up used engine `-f` for tiers above 1m, but its source cl
 
 - Raw-ingest source (separate spec; after this, it's the only remaining Lambda-exclusive capability).
 - Cross-prefix source selection via D1 registry (CoW world) — LIST-based is fine until discovery generally goes registry-driven.
+
+## Status (pyrmts session, 2026-07-28)
+
+Implemented: `WideShardSource(pyramid, tier_name)` defaults to min-cover; `shard_dur=` pins a single rung (back-compat / seeded-scratch — no LIST happens in pinned mode). Notes against the contract:
+
+1. **Discovery**: one lazy LIST of the tier prefix (keyTemplate substituted through `{tier}` + filter, cut at the first unresolved placeholder), taken once per source instance (single-flight). No key *parsing*: candidate tiles are enumerated from the ladder's declared rungs via `shard_periods_covering` and checked for membership in the LIST set — foreign keys are ignored by construction. (The "reuse one LIST with `-f`" optimization was skipped: two prefix LISTs per run are noise; noted here in case it ever matters.)
+2. **Selection** is pointwise and pure: at instant `t`, the largest rung whose grid-aligned tile is listed wins (ties impossible — one tile per rung covers `t`), which is exactly the greedy walk since the preference depends only on `t`. Redundant finer tiles under a present larger tile are never read (tested via `coverage()` period counts). Instants covered by **no** rung fall back to finest-rung reads whose misses feed the existing `max_missing_source` accounting — so mid-range holes trip the exit-4 guard exactly as in pinned mode (tested), and coverage-fraction semantics are unchanged.
+3. **Coverage end** (fill clamp): computed engine-side as the max present tile end across **all** rungs (matching selection), from fill's own LIST. Deliberately max-end, not contiguous-from-start: a mid-range hole must reach the guard, not silently clamp fillability (consistent with `specs/engine-fill-mode.md` semantics).
+4. **Cache/prefetch/eviction**: cache keys are `(dur, label)` tiles (labels alone collide across rungs — e.g. `2026-01-03` names both a 1d and a 4d tile); watermark eviction and readahead are otherwise unchanged. The byte-aware admission estimate was already max-observed-per-window (not uniform-shard-keyed), so small tip tiles need no change.
+5. **CLI**: `-d` absent → min-cover (note: the *previous* default was the tier's smallest rung, so this is a behavior change for `-d`-less invocations, not just a new option); `batch submit -d` help updated. The finding-1/2 footgun is structurally gone: the no-flags build discovers whatever rung is seeded (CLI test updated to assert exactly that, keeping a pinned-wrong-rung leg for the guard).
+6. **`provides` = `(tier, None)`** in min-cover mode, and the engine skips **every** rung of the source tier (the tier is externally owned; the engine writing a coarser source-tier tile from finer siblings would be same-tier consolidation — explicitly a separate spec — and would byte-diverge from Lambda-written tiles). Consequence for fill: absent source-tier cover tiles are reported as unfillable source-rung tiles, per the fill spec.
+
+Tests: `tests/test_min_cover.py` — mixed-rung build byte-identical to a single-rung build's h/d outputs; redundant-tile ignoring (21 vs 24 tiles read, bytes unchanged); tip fill (coverage end = end of the finest tip tile, only later-data shards + absent source-tier tiles unfillable, no uncovered window read); mid-range hole → exact `SourceCoverageError`. Existing suite pins `shard_dur='6h'` (the seeded-scratch case) to keep exercising pinned semantics.
+
+Spec stays in `specs/` until ctbk drops `-d` from its wrapper and burns min-cover in on avail-v5 (tip-adjacent `-f` fills).

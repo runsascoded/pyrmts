@@ -38,22 +38,40 @@ class _CacheEntry:
 
 
 class WideShardSource:
-    """Reads a materialized (tier, shard_dur) rung's wide shards from
+    """Reads a materialized source tier's wide shards from
     `pyramid.storage` and converts to long form. Missing shards are treated
     as empty (pre-genesis / outage windows); rows outside `[start, end)`
     are filtered (shard periods straddle window edges).
 
-    Parsed shards are cached across calls, so a window smaller than
-    `shard_dur` doesn't re-fetch/re-parse the same blob ⌈shard/window⌉
-    times. Concurrent readers of the same period block on one load
-    instead of duplicating it (the parallel executor runs many window
-    tasks at once). Eviction is engine-driven: the executor calls
+    **Tile selection** (`specs/engine-min-cover-source.md`): by default
+    (`shard_dur=None`) the source reads the tier *as it's actually
+    stored* — one LIST of the tier prefix (lazy, once), then at each
+    instant the largest rung whose grid-aligned tile is present wins, so
+    a maintained min-cover mix (large consolidated history tiles +
+    progressively finer tiles toward the live tip) is read exactly as
+    laid out, and redundant not-yet-GC'd finer tiles under a present
+    larger tile are deterministically ignored. Selection is a pure
+    function of the LIST snapshot — build byte-determinism depends on
+    that. Instants covered by *no* rung's tile fall back to the finest
+    rung, whose read records the miss (so coverage accounting — and the
+    engine's `max_missing_source` guard — behave exactly as in pinned
+    mode). Passing `shard_dur` pins a single rung as before (the
+    seeded-scratch / back-compat case; no LIST happens).
+
+    Parsed tiles are cached across calls, so a window smaller than a
+    tile doesn't re-fetch/re-parse the same blob once per window.
+    Concurrent readers of the same tile block on one load instead of
+    duplicating it (the parallel executor runs many window tasks at
+    once). Eviction is engine-driven: the executor calls
     `evict_before(watermark_start_ms)` as its completion watermark
-    advances — a period can't self-evict on "this window's start" because
+    advances — a tile can't self-evict on "this window's start" because
     windows complete out of order. Standalone callers can call it
     themselves, or let the cache grow (bounded by the range).
 
-    `provides` names the rung so the engine can skip re-writing it."""
+    `provides` names the rung so the engine can skip re-writing it; in
+    min-cover mode the dur is None, meaning the *whole tier* is
+    externally owned (the engine skips every rung of it — same-tier
+    consolidation is a separate spec)."""
 
     def __init__(
         self,
@@ -65,23 +83,54 @@ class WideShardSource:
         self.pyramid = pyramid
         tier = pyramid.tier(tier_name) if tier_name else pyramid.tiers[0]
         self.tier = tier
-        self.shard_dur = shard_dur or tier.shards[0]
+        self.shard_dur = shard_dur  # None → min-cover selection across the tier's rungs
         self.filter = filter or {}
-        self._cache: dict[str, _CacheEntry] = {}
+        self._cache: dict[tuple[str, str], _CacheEntry] = {}
         self._n_periods = 0
         self._missing: list[str] = []
+        self._listing: set[str] | None = None
         self._lock = threading.Lock()
         self._ra_pool: ThreadPoolExecutor | None = None
 
     @property
-    def provides(self) -> tuple[str, str]:
+    def provides(self) -> tuple[str, str | None]:
         return (self.tier.name, self.shard_dur)
 
-    def _load(self, label: str, end_ms: int) -> pl.DataFrame:
-        key = substitute_key(
+    def _key(self, dur: str, label: str) -> str:
+        return substitute_key(
             self.pyramid.keyTemplate,
-            {**self.filter, 'tier': self.tier.name, 'shard': self.shard_dur, 'period': label},
+            {**self.filter, 'tier': self.tier.name, 'shard': dur, 'period': label},
         )
+
+    def _listed(self) -> set[str]:
+        """The tier prefix's LIST result (lazy, once, single-flight)."""
+        with self._lock:
+            if self._listing is None:
+                partial = self.pyramid.keyTemplate
+                for k, v in {**self.filter, 'tier': self.tier.name}.items():
+                    partial = partial.replace('{' + k + '}', str(v))
+                self._listing = set(self.pyramid.storage.list(partial.split('{', 1)[0]))
+            return self._listing
+
+    def _tile_at(self, at: datetime):
+        """(dur, period) of the tile to read for instant `at`: the pinned
+        rung's grid tile, or — min-cover mode — the largest rung whose
+        tile is present, falling back to the finest rung (whose read
+        records the coverage miss) when nothing covers `at`."""
+        def covering(dur: str):
+            return shard_periods_covering(at, at + timedelta(milliseconds=1), dur)[0]
+
+        if self.shard_dur is not None:
+            return self.shard_dur, covering(self.shard_dur)
+        listed = self._listed()
+        for dur in reversed(self.tier.shards):
+            p = covering(dur)
+            if self._key(dur, p.label) in listed:
+                return dur, p
+        return self.tier.shards[0], covering(self.tier.shards[0])
+
+    def _load(self, dur: str, label: str) -> pl.DataFrame:
+        key = self._key(dur, label)
         blob = self.pyramid.storage.get(key)
         if blob is None:
             with self._lock:
@@ -119,20 +168,21 @@ class WideShardSource:
         with self._lock:
             return self._n_periods, sorted(self._missing)
 
-    def _period_frame(self, label: str, end_ms: int) -> pl.DataFrame:
+    def _period_frame(self, dur: str, label: str, end_ms: int) -> pl.DataFrame:
+        tile = (dur, label)
         with self._lock:
-            entry = self._cache.get(label)
+            entry = self._cache.get(tile)
             mine = entry is None
             if mine:
-                entry = self._cache[label] = _CacheEntry(end_ms)
+                entry = self._cache[tile] = _CacheEntry(end_ms)
                 self._n_periods += 1
         if mine:
             try:
-                entry.frame = self._load(label, end_ms)
+                entry.frame = self._load(dur, label)
             except BaseException as e:
                 entry.exc = e
                 with self._lock:
-                    self._cache.pop(label, None)
+                    self._cache.pop(tile, None)
                 entry.event.set()
                 raise
             entry.event.set()
@@ -159,46 +209,49 @@ class WideShardSource:
             pool.shutdown(wait=False, cancel_futures=True)
 
     def evict_before(self, start_ms: int) -> None:
-        """Drop cached periods ending at/before `start_ms` (the earliest
+        """Drop cached tiles ending at/before `start_ms` (the earliest
         possibly-active window start — i.e. the executor's watermark)."""
         with self._lock:
             dead = [
-                label for label, e in self._cache.items()
+                tile for tile, e in self._cache.items()
                 if e.end_ms <= start_ms and e.event.is_set()
             ]
-            for label in dead:
-                del self._cache[label]
+            for tile in dead:
+                del self._cache[tile]
 
     def prefetch(self, at: datetime) -> None:
-        """Background-load the shard period covering instant `at` (one
+        """Background-load the selected tile covering instant `at` (one
         readahead slot; single-flight with foreground loads via the
         cache). The engine calls this with upcoming *in-range* window
         starts, so a prefetch miss is a legitimate coverage miss exactly
-        like a foreground one. Without readahead every shard boundary
+        like a foreground one. Without readahead every tile boundary
         stalls all window workers for ~one parse (~30 s on ctbk avail —
         ~25 min serialized across a full-range walk)."""
-        span_end = shard_periods_covering(at, at + timedelta(milliseconds=1), self.shard_dur)
-        if not span_end:
-            return
-        period = span_end[0]
+        dur, period = self._tile_at(at)
         with self._lock:
-            if period.label in self._cache:
+            if (dur, period.label) in self._cache:
                 return
             if self._ra_pool is None:
                 self._ra_pool = ThreadPoolExecutor(
                     max_workers=1, thread_name_prefix='source-readahead',
                 )
             pool = self._ra_pool
-        pool.submit(self._period_frame, period.label, int(period.end.timestamp() * 1000))
+        pool.submit(self._period_frame, dur, period.label, int(period.end.timestamp() * 1000))
 
     def read_window(self, start: datetime, end: datetime) -> pl.DataFrame:
         pyramid = self.pyramid
         bin_col = pyramid.binCol
         start_ms = int(start.timestamp() * 1000)
         end_ms = int(end.timestamp() * 1000)
+        tiles = []
+        t = start
+        while t < end:
+            dur, period = self._tile_at(t)
+            tiles.append((dur, period))
+            t = period.end
         frames = [
-            self._period_frame(period.label, int(period.end.timestamp() * 1000))
-            for period in shard_periods_covering(start, end, self.shard_dur)
+            self._period_frame(dur, period.label, int(period.end.timestamp() * 1000))
+            for dur, period in tiles
         ]
         if not frames:
             return empty_long(pyramid)

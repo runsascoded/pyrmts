@@ -321,7 +321,8 @@ def build_local(
         filter: extra keyTemplate substitutions (e.g. awair `device_id`).
         skip_rungs: `(tier, shard_dur)` rungs not to write. Defaults to
             `source.provides` when the source declares one (don't re-write
-            the rung being read).
+            the rung being read); a min-cover source (`provides` dur of
+            None) skips every rung of its tier.
         sort: override `write_tier_parquet` sort cols (e.g. cell-first for
             ctbk avail).
         row_group_size: output-shard row-group size — an int for all tiers
@@ -384,7 +385,15 @@ def build_local(
 
     if skip_rungs is None:
         provides = getattr(source, 'provides', None)
-        skip_rungs = {provides} if provides is not None else set()
+        if provides is None:
+            skip_rungs = set()
+        elif provides[1] is None:
+            # Min-cover source: the whole tier is externally owned — the
+            # engine writes none of its rungs (same-tier consolidation is
+            # a separate spec).
+            skip_rungs = {(provides[0], d) for d in pyramid.tier(provides[0]).shards}
+        else:
+            skip_rungs = {provides}
 
     _validate_window(pyramid, window)
     plan = compile_plan(pyramid, time_range, filter=filter, skip_rungs=skip_rungs)
@@ -430,13 +439,17 @@ def build_local(
             # Tiers finer than the source rung's bin can't be derived
             # from it (e.g. the base tier under a coarser source).
             sub_source = {t.name for t in tiers if not _divides(src_bin, t.bin)}
+            # Min-cover source (dur None): any rung's present tile
+            # extends coverage — matching the source's tile selection.
+            durs = pyramid.tier(src_tier).shards if src_dur is None else [src_dur]
             coverage_end = max(
                 (
                     min(p.end, to)
-                    for p in shard_periods_covering(from_, to, src_dur)
+                    for d in durs
+                    for p in shard_periods_covering(from_, to, d)
                     if substitute_key(
                         pyramid.keyTemplate,
-                        {**(filter or {}), 'tier': src_tier, 'shard': src_dur, 'period': p.label},
+                        {**(filter or {}), 'tier': src_tier, 'shard': d, 'period': p.label},
                     ) in listed
                 ),
                 default=from_,
@@ -706,7 +719,11 @@ def build_local(
         + (f", {result.unfillable} unfillable" if result.unfillable else '')
         + f"), workers={n_workers}, max_inflight={inflight_cap}, "
         f"mem_budget={mem_budget / 1e9:.1f}GB"
-        + (f", source rung={src_rung[0]}/{src_rung[1]}" if src_rung else '')
+        + (
+            '' if src_rung is None
+            else f", source tier={src_rung[0]} (min-cover)" if src_rung[1] is None
+            else f", source rung={src_rung[0]}/{src_rung[1]}"
+        )
         + f", spill={spill_root}"
     )
     _warmup_arrow()

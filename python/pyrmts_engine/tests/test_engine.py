@@ -57,7 +57,7 @@ def _run_engine(window: str = '1d', workers: int | None = None) -> tuple:
     result = build_local(
         pyramid,
         (FROM, TO),
-        WideShardSource(pyramid),
+        WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test',
         shard_index=index,
         window=window,
@@ -213,7 +213,7 @@ def test_resume_from_manifest():
     write_base_shards(pyramid)
     index = MemShardIndex(records=list(done))
     result = build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', shard_index=index, resume=True,
     )
     assert result.resumed_shards == 5
@@ -246,7 +246,7 @@ def test_single_tick_incremental_resume():
     write_base_shards(pyramid, to=to1d)
     index = MemShardIndex()
     build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', shard_index=index,
     )
 
@@ -255,7 +255,7 @@ def test_single_tick_incremental_resume():
         e.key for e in list_expected_shards(pyramid, (FROM, TO))
     ]
     r_tick = build_local(
-        pyramid, (FROM, tick), WideShardSource(pyramid),
+        pyramid, (FROM, tick), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', shard_index=index, resume=True,
     )
     assert (r_tick.windows, r_tick.written) == (0, [])
@@ -263,7 +263,7 @@ def test_single_tick_incremental_resume():
     # (2) +1d completes q@1d and h@1d tiles: exactly those shards, from
     # exactly one (1d) window.
     r_1d = build_local(
-        pyramid, (FROM, to1d), WideShardSource(pyramid),
+        pyramid, (FROM, to1d), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', shard_index=index, resume=True,
     )
     new_keys = ['pyr/h/1d/2026-01-08.parquet', 'pyr/q/1d/2026-01-08.parquet']
@@ -273,7 +273,7 @@ def test_single_tick_incremental_resume():
     ref_pyramid = make_pyramid()
     write_base_shards(ref_pyramid, to=to1d)
     build_local(
-        ref_pyramid, (FROM, to1d), WideShardSource(ref_pyramid), pyramid_name='test',
+        ref_pyramid, (FROM, to1d), WideShardSource(ref_pyramid, shard_dur='6h'), pyramid_name='test',
     )
     for key in new_keys:
         assert pyramid.storage.get(key) == ref_pyramid.storage.get(key), key
@@ -292,7 +292,7 @@ def test_zero_source_rows_raises_unless_allowed():
     index = MemShardIndex()
     with pytest.raises(EmptySourceError) as exc:
         build_local(
-            pyramid, (FROM, TO), WideShardSource(pyramid),
+            pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
             pyramid_name='test', shard_index=index, max_missing_source=1.0,
         )
     assert str(exc.value) == (
@@ -304,7 +304,7 @@ def test_zero_source_rows_raises_unless_allowed():
 
     pyramid2 = make_pyramid()
     result = build_local(
-        pyramid2, (FROM, TO), WideShardSource(pyramid2),
+        pyramid2, (FROM, TO), WideShardSource(pyramid2, shard_dur='6h'),
         pyramid_name='test', allow_empty=True, max_missing_source=1.0,
     )
     assert sorted(w.key for w in result.written) == EXPECTED_KEYS
@@ -323,7 +323,7 @@ def test_source_coverage_strict_by_default():
 
     with pytest.raises(SourceCoverageError) as exc:
         build_local(
-            pyramid, (FROM, TO), WideShardSource(pyramid), pyramid_name='test',
+            pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'), pyramid_name='test',
         )
     assert str(exc.value) == (
         f"build_local: 4/24 source shards absent (> max_missing_source=0.0): "
@@ -349,7 +349,7 @@ def test_zero_row_period_writes_empty_shard():
 
     index = MemShardIndex()
     result = build_local(
-        pyramid, (FROM, TO), WideShardSource(pyramid),
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
         pyramid_name='test', shard_index=index, max_missing_source=1.0,
     )
     assert sorted(w.key for w in result.written) == EXPECTED_KEYS

@@ -94,10 +94,11 @@ def write_base_shards(
     pyramid: Pyramid,
     shard_dur: str = '6h',
     to: datetime = TO,
+    start: datetime = FROM,
 ) -> list[str]:
-    """Materialize a base rung (q@`shard_dur`) as wide shards for [FROM, `to`)."""
+    """Materialize a base rung (q@`shard_dur`) as wide shards for [`start`, `to`)."""
     keys = []
-    for period in shard_periods_covering(FROM, to, shard_dur):
+    for period in shard_periods_covering(start, to, shard_dur):
         s_ms = int(period.start.timestamp() * 1000)
         e_ms = int(period.end.timestamp() * 1000)
         frame = base_wide_frame(s_ms, e_ms)

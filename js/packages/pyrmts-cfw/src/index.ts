@@ -10,4 +10,23 @@ export type { ServeOptions } from './serve.js'
 export { D1ShardIndex } from './shard-index.js'
 export type { D1ShardIndexOptions } from './shard-index.js'
 
+export {
+  PENDING_GRACE_MS,
+  computeAndStoreSnapshot,
+  getBuildsHealth,
+  pyramidCover,
+  readCachedSnapshot,
+} from './health.js'
+export type {
+  BuildLayer,
+  BuildProgress,
+  BuildsHealthOptions,
+  PyramidCoverOptions,
+  PyramidCoverRung,
+  PyramidCoverSegment,
+  PyramidCoverStatus,
+  PyramidTierCoverStatus,
+  SnapshotLike,
+} from './health.js'
+
 export const VERSION = '0.0.0'

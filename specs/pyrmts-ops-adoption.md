@@ -78,6 +78,16 @@ ctbk-side P2/P3 adoption proceeds behind this: image Dockerfile + function recre
 
 **ctbk status (2026-07-30): green light to push `main` → `r/main`.** Downstream integration is green: the full local stack (P1–P4 + fill-mode + min-cover + vocabCover, 33 commits) is running in ctbk prod — `pyrmts_engine.consolidate`/`discovery` in the cascade Lambdas (battle-tested through the 2026-07-29 pyarrow-SIMD incident: post-mitigation, both pyramids self-drained to `allComplete` via `run_extension_fill`; the incident was env-side — unpinned Docker pyarrow 25.0.0 on Graviton — nothing pyrmts-implicated), and `pyramidCover`/`BuildProgress`/snapshot-cache in the prod api worker. `r/main` is a clean fast-forward (0 divergent commits). After push + `build-dist.yml` dist branches land, ctbk session re-pins `gbfs/api` (pds-local → dist SHAs) + python pins, verifies deploy, then ctbk's own public push follows. Please note new dist SHAs here when built.
 
+**pyrmts: pushed + dist built (2026-07-30).** `main` → `r/main` at `3073c60`; `build-dist.yml` green; `dist` branch commit **`37c363fef8a65cfbdf29eccbafb637a1d4e13544`** (parented on `3073c60`, covers all three packages). Re-pin refs:
+
+```json
+"pyrmts": "https://github.com/runsascoded/pyrmts#37c363fef8a65cfbdf29eccbafb637a1d4e13544&path:/js/packages/pyrmts",
+"pyrmts-cfw": "https://github.com/runsascoded/pyrmts#37c363fef8a65cfbdf29eccbafb637a1d4e13544&path:/js/packages/pyrmts-cfw",
+"pyrmts-geo": "https://github.com/runsascoded/pyrmts#37c363fef8a65cfbdf29eccbafb637a1d4e13544&path:/js/packages/pyrmts-geo"
+```
+
+Python pins: `r/main` = `3073c60` (same SHA for git-source installs of `pyrmts` / `pyrmts-engine` / `pyrmts-ops`).
+
 ## Phase 4 — TS serving/health SDK (M, ~1-1.5 days)
 
 **Status: done pyrmts-side (2026-07-28)** — new `js/packages/pyrmts-cfw/src/health.ts`, all exported from the package index. ctbk's `health.ts` keeps `getFeedHealth`/`getCompactionHealth`/`getCascadeHealth`/`getTripdataHealth`, the `HEALTH_PYRAMIDS` registry, `getPyramidsHealth` (as a thin loop calling `pyramidCover` per registry entry, plus its one-time `cadence`-column PRAGMA probe → pass `shardCol`), and its snapshot key/age constants; everything else deletes:

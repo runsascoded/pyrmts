@@ -20,7 +20,7 @@
 //     - { name: h1,  bin: 1h,   shards: [1d, 1mo] }
 import { parse as parseYaml } from 'yaml';
 const VALID_AXES = new Set(['time', 'step']);
-const VALID_DIM_TYPES = new Set(['int', 'string', 'h3', 'geohash']);
+const VALID_DIM_TYPES = new Set(['int', 'string', 'h3', 'geohash', 's2']);
 const VALID_MONOIDS = new Set([
     'sum', 'count', 'histogram', 'topk', 'botk', 'hll', 'tdigest',
 ]);
@@ -118,7 +118,7 @@ function parseDims(raw) {
             throw new Error(`parsePyramidYaml: dims[${i}].name must be a string`);
         }
         if (typeof dd.type !== 'string' || !VALID_DIM_TYPES.has(dd.type)) {
-            throw new Error(`parsePyramidYaml: dims[${i}].type '${String(dd.type)}' invalid (want one of int/string/h3/geohash)`);
+            throw new Error(`parsePyramidYaml: dims[${i}].type '${String(dd.type)}' invalid (want one of int/string/h3/geohash/s2)`);
         }
         return { name: dd.name, type: dd.type };
     });

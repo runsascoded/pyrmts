@@ -101,13 +101,14 @@ def test_push_commands():
         ref,
         dockerfile='python/pyrmts_engine/Dockerfile',
     ) == [
-        ['docker', 'build', '-t', ref, '--platform', 'linux/amd64',
+        ['docker', 'build', '-t', ref, '--provenance=false', '--sbom=false',
+         '--platform', 'linux/amd64',
          '-f', 'python/pyrmts_engine/Dockerfile', '.'],
         ['docker', 'push', ref],
     ]
     assert push_commands(ref, build=False) == [['docker', 'push', ref]]
     assert push_commands(ref, platform=None, context='wt/x') == [
-        ['docker', 'build', '-t', ref, 'wt/x'],
+        ['docker', 'build', '-t', ref, '--provenance=false', '--sbom=false', 'wt/x'],
         ['docker', 'push', ref],
     ]
 

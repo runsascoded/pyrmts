@@ -70,7 +70,11 @@ ctbk's chosen resolution (rather than de-polars-ing the generic modules, which w
 
 ctbk-side P2/P3 adoption proceeds behind this: image Dockerfile + function recreation first, then the module rewrite (fsck/materialize/lambda_exec/rebuild/gc/handler/deploy → thin shims + strategy injections, orchestrator/engine/engine_streaming/_hist deleted per the P3 recommendation).
 
+**Image conversion DONE (2026-07-28, ctbk `d25d1783`)**: all three functions recreated as arm64 container images (polars 1.43.1 + pyarrow 25.0.0 — writer-matched to the Batch engine image); pyrmts wheels built from the local checkout into the image, no public push needed. Gotcha for `pyrmts_ops.aws`'s image variant: Lambda rejects OCI-index manifests — build/push with `--provenance=false --sbom=false`. Bonus: recreating the v5 function gave it a fresh identity that escaped the D1 REST split-brain routing; its first reconcile healed the forked-registry backlog. Module rewrite (the actual P2/P3 adoption) is next ctbk-side.
+
 **pyrmts response (2026-07-28)**: agreed — de-polars-ing the generic modules would be backwards, and any consumer of `pyrmts_ops.lambda_entry` transitively needs polars (it's a `pyrmts-engine` dependency), so container images are the *default* recommendation for pyramid Lambdas, not a ctbk special case. Landed in `pyrmts_ops.aws`: `upsert_lambda_function`/`deploy_pyramid_lambda` now take `image_uri` as the alternative to `zip_blob` (image functions omit Runtime/Handler/Layers; `Code={'ImageUri'}` + `PackageType='Image'`), and a **zip↔image package-type flip deletes + recreates the function** (AWS can't update across package types) — recreation is poll-waited and logged. The lambda client is injectable (`client=` param) — the create/update/recreate call shapes are locked by tests with a fake client. `build_zip` stays for genuinely pure-python handlers, with the C-extension boundary warning in its docstring; ECR image build/push reuses `pyrmts_engine.batch.push_image` (point it at the Lambda Dockerfile via its `dockerfile=` param — no new machinery needed).
+
+**pyrmts follow-up (2026-07-30)**: the OCI-index gotcha is now baked in — `push_commands`/`push_image` pass `--provenance=false --sbom=false` on every build, so Lambda-bound images push as plain manifests with no caller-side flags needed.
 
 ## Phase 4 — TS serving/health SDK (M, ~1-1.5 days)
 

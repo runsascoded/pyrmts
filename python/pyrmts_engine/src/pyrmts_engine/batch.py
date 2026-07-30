@@ -112,7 +112,9 @@ def push_commands(
     """Docker argvs for `push` (login is separate — it needs the ECR token)."""
     cmds = []
     if build:
-        cmd = ['docker', 'build', '-t', image]
+        # No provenance/SBOM attestations: they turn the push into an OCI
+        # image index, which Lambda rejects for container-image functions.
+        cmd = ['docker', 'build', '-t', image, '--provenance=false', '--sbom=false']
         if platform is not None:
             cmd += ['--platform', platform]
         if dockerfile is not None:

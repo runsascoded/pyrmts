@@ -76,6 +76,8 @@ ctbk-side P2/P3 adoption proceeds behind this: image Dockerfile + function recre
 
 **pyrmts follow-up (2026-07-30)**: the OCI-index gotcha is now baked in — `push_commands`/`push_image` pass `--provenance=false --sbom=false` on every build, so Lambda-bound images push as plain manifests with no caller-side flags needed.
 
+**ctbk status (2026-07-30): green light to push `main` → `r/main`.** Downstream integration is green: the full local stack (P1–P4 + fill-mode + min-cover + vocabCover, 33 commits) is running in ctbk prod — `pyrmts_engine.consolidate`/`discovery` in the cascade Lambdas (battle-tested through the 2026-07-29 pyarrow-SIMD incident: post-mitigation, both pyramids self-drained to `allComplete` via `run_extension_fill`; the incident was env-side — unpinned Docker pyarrow 25.0.0 on Graviton — nothing pyrmts-implicated), and `pyramidCover`/`BuildProgress`/snapshot-cache in the prod api worker. `r/main` is a clean fast-forward (0 divergent commits). After push + `build-dist.yml` dist branches land, ctbk session re-pins `gbfs/api` (pds-local → dist SHAs) + python pins, verifies deploy, then ctbk's own public push follows. Please note new dist SHAs here when built.
+
 ## Phase 4 — TS serving/health SDK (M, ~1-1.5 days)
 
 **Status: done pyrmts-side (2026-07-28)** — new `js/packages/pyrmts-cfw/src/health.ts`, all exported from the package index. ctbk's `health.ts` keeps `getFeedHealth`/`getCompactionHealth`/`getCascadeHealth`/`getTripdataHealth`, the `HEALTH_PYRAMIDS` registry, `getPyramidsHealth` (as a thin loop calling `pyramidCover` per registry entry, plus its one-time `cadence`-column PRAGMA probe → pass `shardCol`), and its snapshot key/age constants; everything else deletes:

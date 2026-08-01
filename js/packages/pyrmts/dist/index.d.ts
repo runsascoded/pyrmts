@@ -1,5 +1,6 @@
 export type { Axis, Bin, ColumnFilter, Dim, Duration, FetchOptionsBase, FetchSegment, GeoSpec, Metric, MonoidName, Pyramid, Row, RunBoundary, Shard, StepCount, StepUnit, Storage, StorageBackend, Tier, TimeUnit, } from './types.js';
-export { addSpan, binsInRange, floorToSpan, formatPeriod, parseDuration, shardPeriodsCovering, } from './axis.js';
+export { addSpan, binsInRange, ceilToSpan, floorToSpan, formatPeriod, parseDuration, shardPeriodsCovering, } from './axis.js';
+export { shardBuildableAt, sourceTierFor } from './cascade-source.js';
 export type { ParsedTimeSpan } from './axis.js';
 export { DEFAULT_AUTO_MULTIPLIER, planQuery, planQueryFromInventory } from './planner.js';
 export type { PlanQueryInput, PlanSegment, QueryPlan, SmoothMode, SmoothingSpec, } from './planner.js';

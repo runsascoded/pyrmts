@@ -75,6 +75,11 @@ export function floorToSpan(t, span) {
             return new Date(Date.UTC(t.getUTCFullYear(), 0));
     }
 }
+// `t` if span-aligned, else the next span boundary.
+export function ceilToSpan(t, span) {
+    const floored = floorToSpan(t, span);
+    return floored.getTime() === t.getTime() ? floored : addSpan(floored, span);
+}
 // Count bins of `bin` overlapping [from, to). Bins are span-aligned (floored
 // at the start of each bin's boundary, not rolling from `from`).
 export function binsInRange(from, to, bin) {

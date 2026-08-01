@@ -15,7 +15,7 @@
 // Consumers keep their pyramid registry (which pyramids to surface,
 // genesis dates, key prefixes) and any app-specific health sections;
 // the cover math, doc contract, and cache pattern live here.
-import { floorToSpan, listExpectedShards, parseDuration, } from 'pyrmts';
+import { floorToSpan, listExpectedShards, parseDuration, shardBuildableAt, } from 'pyrmts';
 /** A cover slot whose period closed within this window and hasn't been
  *  registered yet counts as `pending`, not `missing`. */
 export const PENDING_GRACE_MS = 10 * 60_000;
@@ -81,20 +81,30 @@ export async function pyramidCover(db, pyramid, opts) {
             agg.expected += 1;
             const key = presentKey(t.name, sd, slot.periodStart.getTime());
             let status;
+            let buildableAtIso;
             if (present.has(key)) {
                 status = 'present';
                 agg.present += 1;
                 coverPresent += 1;
             }
-            else if (slot.periodEnd.getTime() > now.getTime() - pendingGraceMs) {
-                status = 'pending';
-                agg.pending += 1;
-                coverPending += 1;
-            }
             else {
-                status = 'missing';
-                if (firstMissingPeriod === null) {
-                    firstMissingPeriod = slot.periodStart.toISOString();
+                // Grace is measured from when a cron tick can first land the
+                // shard — later than periodEnd when the source cover is still
+                // open (structural lag; `buildableAt == periodEnd` otherwise).
+                const buildableAt = shardBuildableAt(pyramid, t.name, slot.periodEnd);
+                if (buildableAt.getTime() > slot.periodEnd.getTime()) {
+                    buildableAtIso = buildableAt.toISOString();
+                }
+                if (buildableAt.getTime() > now.getTime() - pendingGraceMs) {
+                    status = 'pending';
+                    agg.pending += 1;
+                    coverPending += 1;
+                }
+                else {
+                    status = 'missing';
+                    if (firstMissingPeriod === null) {
+                        firstMissingPeriod = slot.periodStart.toISOString();
+                    }
                 }
             }
             // Clip the head tile to genesis so the bar's x-domain is exact.
@@ -105,6 +115,7 @@ export async function pyramidCover(db, pyramid, opts) {
                 shardDur: sd,
                 status,
                 ...(status === 'present' ? { key: slot.key } : {}),
+                ...(buildableAtIso !== undefined ? { buildableAt: buildableAtIso } : {}),
             });
         }
         const rungs = rungOrder.map((sd) => ({

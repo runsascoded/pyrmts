@@ -1,6 +1,7 @@
 // pyrmts — multi-scale timeseries pyramids.
 // See ../../../../SPEC.md.
-export { addSpan, binsInRange, floorToSpan, formatPeriod, parseDuration, shardPeriodsCovering, } from './axis.js';
+export { addSpan, binsInRange, ceilToSpan, floorToSpan, formatPeriod, parseDuration, shardPeriodsCovering, } from './axis.js';
+export { shardBuildableAt, sourceTierFor } from './cascade-source.js';
 export { DEFAULT_AUTO_MULTIPLIER, planQuery, planQueryFromInventory } from './planner.js';
 export { getMonoid, stateColumns } from './monoids.js';
 export { stitch } from './stitch.js';

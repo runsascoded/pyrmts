@@ -19,6 +19,7 @@ export interface PyramidCoverSegment {
     shardDur: string;
     status: 'present' | 'pending' | 'missing';
     key?: string;
+    buildableAt?: string;
 }
 /** Per-tier min-cover status. `complete` iff no cover slot is MISSING
  *  (pending slots — just-closed, within the write-lag grace window —

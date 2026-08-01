@@ -27,11 +27,14 @@ export type {
 export {
   addSpan,
   binsInRange,
+  ceilToSpan,
   floorToSpan,
   formatPeriod,
   parseDuration,
   shardPeriodsCovering,
 } from './axis.js'
+
+export { shardBuildableAt, sourceTierFor } from './cascade-source.js'
 
 export type { ParsedTimeSpan } from './axis.js'
 

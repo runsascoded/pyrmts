@@ -165,6 +165,81 @@ def test_run_extension_fill_driver_registers_and_reconciles():
     )
 
 
+def test_run_extension_fill_source_readiness():
+    """`specs/source-readiness-pending.md`: an expected shard whose source
+    cover is still open (/h@3h ending 21:00 ← /q's smallest rung 2h, so
+    buildable at 22:00) is excluded as not-ready — zero attempts, no
+    `no_inputs` churn — then source and target both fill in one
+    dependency-ordered pass once the source closes."""
+    def raw_fill(hole, now):
+        s, e = hole
+        return base_wide_frame(
+            int(s.timestamp() * 1000), int(e.timestamp() * 1000),
+        ).to_arrow()
+
+    storage = MemStorage()
+    p = make_pyramid(storage=storage)
+    pyramid = replace(p, tiers=[
+        replace(p.tiers[0], shards=('2h',)),
+        replace(p.tiers[1], shards=('3h',)),
+    ])
+    t20 = datetime(2026, 1, 2, 20, tzinfo=timezone.utc)
+    write_base_shards(pyramid, shard_dur='2h', to=t20)
+    # Bring /h up to date as of 18:30: fills [00,03) … [15,18).
+    t18_30 = datetime(2026, 1, 2, 18, 30, tzinfo=timezone.utc)
+    results = run_extension_fill(
+        pyramid, genesis=FROM, now=t18_30, pyramid_name='test', fill_all=True,
+    )
+    assert [(r.gap.key, r.status) for r in results] == [
+        (f'pyr/h/3h/2026-01-02T{h:02d}.parquet', 'wrote') for h in range(0, 18, 3)
+    ]
+
+    # 21:30: /h@3h [18,21) is expected but its covering /q@2h tile
+    # [20,22) is still open → not ready, zero attempts.
+    t21_30 = datetime(2026, 1, 2, 21, 30, tzinfo=timezone.utc)
+    assert run_extension_fill(
+        pyramid, genesis=FROM, now=t21_30, pyramid_name='test',
+        fill_all=True, raw_fill=raw_fill,
+    ) == []
+
+    # 22:05: source closed → the /q@2h [20,22) gap and the /h@3h [18,21)
+    # gap fill in one dependency-ordered pass.
+    t22_05 = datetime(2026, 1, 2, 22, 5, tzinfo=timezone.utc)
+    results = run_extension_fill(
+        pyramid, genesis=FROM, now=t22_05, pyramid_name='test',
+        fill_all=True, raw_fill=raw_fill,
+    )
+    assert [(r.gap.key, r.status) for r in results] == [
+        ('pyr/q/2h/2026-01-02T20.parquet', 'wrote'),
+        ('pyr/h/3h/2026-01-02T18.parquet', 'wrote'),
+    ]
+
+
+def test_run_extension_fill_reports_not_ready(monkeypatch):
+    storage = MemStorage()
+    p = make_pyramid(storage=storage)
+    pyramid = replace(p, tiers=[
+        replace(p.tiers[0], shards=('2h',)),
+        replace(p.tiers[1], shards=('3h',)),
+    ])
+    t20 = datetime(2026, 1, 2, 20, tzinfo=timezone.utc)
+    write_base_shards(pyramid, shard_dur='2h', to=t20)
+    t18_30 = datetime(2026, 1, 2, 18, 30, tzinfo=timezone.utc)
+    run_extension_fill(pyramid, genesis=FROM, now=t18_30, pyramid_name='test', fill_all=True)
+
+    from pyrmts_engine import consolidate
+    lines: list[str] = []
+    monkeypatch.setattr(consolidate, 'err', lambda *a: lines.append(' '.join(map(str, a))))
+    t21_30 = datetime(2026, 1, 2, 21, 30, tzinfo=timezone.utc)
+    assert run_extension_fill(
+        pyramid, genesis=FROM, now=t21_30, pyramid_name='test',
+        fill_all=True, dry_run=True,
+    ) == []
+    # Dry run: the census line and nothing else (no would-fill lines —
+    # the one gap is not-ready).
+    assert lines == ['fillable gaps: 0 of 1 total missing (1 not ready — source cover open)']
+
+
 def test_run_single_gap():
     pyramid = build_base_ladder()
     index = MemShardIndex()

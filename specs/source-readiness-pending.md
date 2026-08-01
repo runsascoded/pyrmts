@@ -1,6 +1,16 @@
 # Source readiness: expected-but-not-yet-buildable shards are `pending`, not `missing`
 
-Status: **open** (2026-08-01, ctbk session). Companion specs: `shard-invalidation.md` (orthogonal — that one repairs the *past*, this one classifies the *future*; both shrink "missing" down to "actually wrong"), `engine-min-cover-source.md` (background on strict-cascade source selection, implemented).
+Status: **done pyrmts-side (2026-08-01)** (spec 2026-08-01, ctbk session). Companion specs: `shard-invalidation.md` (orthogonal — that one repairs the *past*, this one classifies the *future*; both shrink "missing" down to "actually wrong"), `engine-min-cover-source.md` (background on strict-cascade source selection, implemented).
+
+**pyrmts status (2026-08-01): implemented as specced.** Landed:
+
+- `pyrmts` (js): `ceilToSpan` (in `axis.ts`), `sourceTierFor` + `shardBuildableAt` (new `src/cascade-source.ts` — named to leave `cascade` free for a future `cascade_tiers` twin), all exported. `sourceTierFor`/`shardBuildableAt` take `Pick<Pyramid, 'tiers'>` (structural, like `pyramidCover`).
+- `pyrmts` (py): `ceil_to_span` (exported); `pyrmts_engine.materialize.buildable_at` (exported from package root).
+- `pyramidCover`: grace measured from `shardBuildableAt`; absent segments (pending **and** missing) get the `buildableAt` annotation when it exceeds periodEnd — a missing-for-real lagged slot keeps the tooltip context too. No other shape changes.
+- `run_extension_fill`: not-ready gaps excluded before the fill loop; census line is now `fillable gaps: N of M total missing (K not ready — source cover open)` (parenthetical always present — a `0 not ready` steady-state reads fine and keeps parsing trivial).
+- Tests: aligned/base/incident/two-level-recursion cases both sides; the avail-v5 (tier, rung, ending) sweep in both `pyrmts_engine/tests/test_materialize.py` and `js/…/cascade-source.test.ts` asserts the lag set is exactly `{/1h@3h at odd-hour ends: +1h}`; `pyramidCover` fixture at 21:30 (pending + `buildableAt`, `totalMissing=0`, `allComplete`) and 22:15 (missing); `run_extension_fill` at 21:30 (zero attempts, exact census line) and 22:05 (source `/q@2h [20,22)` + target `/h@3h [18,21)` fill in one dependency-ordered pass).
+
+ctbk adoption: bump `gbfs/api` pins to the next dist build (SHA to be recorded here post-push); soak monitor can drop the structural-lag special cases per the acceptance section.
 
 ## Motivating incident (2026-07-31, ctbk avail-v3 + avail-v5)
 

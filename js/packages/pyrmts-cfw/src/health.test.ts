@@ -127,6 +127,116 @@ describe('pyramidCover', () => {
     })
   })
 
+  test('source-lagged slot: pending (with buildableAt) until buildable + grace, then missing', async () => {
+    // The `/1h@3h [18,21)` incident shape: source /30m's smallest rung is
+    // 2h, so the 21:00-ending shard is buildable only at 22:00.
+    const lagPyramid = {
+      tiers: [
+        { name: '30m', bin: '30min', shards: ['2h'] },
+        { name: '1h', bin: '1h', shards: ['3h'] },
+      ] as Tier[],
+      keyTemplate: 'pyr/{tier}/{shard}/{period}.parquet',
+    } as Pick<Pyramid, 'tiers' | 'keyTemplate'>
+    const genesis = new Date('2026-01-02T12:00:00Z')
+    const rows = (upTo20h: boolean) => [
+      { tier: '30m', sd: '2h', period_start: ms('2026-01-02T12:00:00Z') },
+      { tier: '30m', sd: '2h', period_start: ms('2026-01-02T14:00:00Z') },
+      { tier: '30m', sd: '2h', period_start: ms('2026-01-02T16:00:00Z') },
+      { tier: '30m', sd: '2h', period_start: ms('2026-01-02T18:00:00Z') },
+      ...(upTo20h ? [{ tier: '30m', sd: '2h', period_start: ms('2026-01-02T20:00:00Z') }] : []),
+      { tier: '1h', sd: '3h', period_start: ms('2026-01-02T12:00:00Z') },
+      { tier: '1h', sd: '3h', period_start: ms('2026-01-02T15:00:00Z') },
+      // /1h@3h [18,21) absent.
+    ]
+
+    // 21:30 — [18,21) closed 30 min ago (past periodEnd + grace) but its
+    // source cover is open until 22:00 → pending, tier complete.
+    const at2130 = await pyramidCover(fakeDb(rows(false)), lagPyramid, {
+      name: 'avail', genesis, now: new Date('2026-01-02T21:30:00Z'),
+    })
+    expect(at2130).toEqual({
+      name: 'avail',
+      genesis: '2026-01-02T12:00:00.000Z',
+      now: '2026-01-02T21:30:00.000Z',
+      tiers: [
+        {
+          tier: '30m',
+          bin: '30min',
+          maxRung: '2h',
+          rungs: [
+            { shardDur: '2h', role: 'max', expected: 4, present: 4, pending: 0 },
+          ],
+          segments: [
+            { start: '2026-01-02T12:00:00.000Z', end: '2026-01-02T14:00:00.000Z', shardDur: '2h', status: 'present', key: 'pyr/30m/2h/2026-01-02T12.parquet' },
+            { start: '2026-01-02T14:00:00.000Z', end: '2026-01-02T16:00:00.000Z', shardDur: '2h', status: 'present', key: 'pyr/30m/2h/2026-01-02T14.parquet' },
+            { start: '2026-01-02T16:00:00.000Z', end: '2026-01-02T18:00:00.000Z', shardDur: '2h', status: 'present', key: 'pyr/30m/2h/2026-01-02T16.parquet' },
+            { start: '2026-01-02T18:00:00.000Z', end: '2026-01-02T20:00:00.000Z', shardDur: '2h', status: 'present', key: 'pyr/30m/2h/2026-01-02T18.parquet' },
+          ],
+          totalExpected: 4,
+          totalPresent: 4,
+          totalPending: 0,
+          complete: true,
+          firstMissingPeriod: null,
+          lastMaxBoundary: '2026-01-02T20:00:00.000Z',
+          dustAgeSec: 5400,
+          staleShardCount: 0,
+        },
+        {
+          tier: '1h',
+          bin: '1h',
+          maxRung: '3h',
+          rungs: [
+            { shardDur: '3h', role: 'max', expected: 3, present: 2, pending: 1 },
+          ],
+          segments: [
+            { start: '2026-01-02T12:00:00.000Z', end: '2026-01-02T15:00:00.000Z', shardDur: '3h', status: 'present', key: 'pyr/1h/3h/2026-01-02T12.parquet' },
+            { start: '2026-01-02T15:00:00.000Z', end: '2026-01-02T18:00:00.000Z', shardDur: '3h', status: 'present', key: 'pyr/1h/3h/2026-01-02T15.parquet' },
+            { start: '2026-01-02T18:00:00.000Z', end: '2026-01-02T21:00:00.000Z', shardDur: '3h', status: 'pending', buildableAt: '2026-01-02T22:00:00.000Z' },
+          ],
+          totalExpected: 3,
+          totalPresent: 2,
+          totalPending: 1,
+          complete: true,
+          firstMissingPeriod: null,
+          lastMaxBoundary: '2026-01-02T21:00:00.000Z',
+          dustAgeSec: 1800,
+          staleShardCount: 0,
+        },
+      ],
+      totalMissing: 0,
+      totalPending: 1,
+      totalStale: 0,
+      allComplete: true,
+    })
+
+    // 22:15 — past buildableAt (22:00) + 10-min grace → missing for real.
+    const at2215 = await pyramidCover(fakeDb(rows(true)), lagPyramid, {
+      name: 'avail', genesis, now: new Date('2026-01-02T22:15:00Z'),
+    })
+    expect(at2215?.totalMissing).toBe(1)
+    expect(at2215?.tiers[1]).toEqual({
+      tier: '1h',
+      bin: '1h',
+      maxRung: '3h',
+      rungs: [
+        { shardDur: '3h', role: 'max', expected: 3, present: 2, pending: 0 },
+      ],
+      segments: [
+        { start: '2026-01-02T12:00:00.000Z', end: '2026-01-02T15:00:00.000Z', shardDur: '3h', status: 'present', key: 'pyr/1h/3h/2026-01-02T12.parquet' },
+        { start: '2026-01-02T15:00:00.000Z', end: '2026-01-02T18:00:00.000Z', shardDur: '3h', status: 'present', key: 'pyr/1h/3h/2026-01-02T15.parquet' },
+        { start: '2026-01-02T18:00:00.000Z', end: '2026-01-02T21:00:00.000Z', shardDur: '3h', status: 'missing', buildableAt: '2026-01-02T22:00:00.000Z' },
+      ],
+      totalExpected: 3,
+      totalPresent: 2,
+      totalPending: 0,
+      complete: false,
+      firstMissingPeriod: '2026-01-02T18:00:00.000Z',
+      lastMaxBoundary: '2026-01-02T21:00:00.000Z',
+      dustAgeSec: 4500,
+      staleShardCount: 0,
+    })
+  })
+
   test('null on empty registry or registry error', async () => {
     expect(await pyramidCover(fakeDb([]), PYRAMID, { name: 'x', genesis: GENESIS, now: NOW })).toBeNull()
     const broken = { prepare() { throw new Error('D1 down') } } as unknown as D1Like

@@ -37,7 +37,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from pyrmts import ExpectedShard, Pyramid, write_tier_parquet
-from pyrmts.axis import format_period, parse_duration
+from pyrmts.axis import ceil_to_span, format_period, parse_duration
 from pyrmts.keys import substitute_key
 
 from .longform import combine_long, empty_long, long_to_wide, rebin_long, wide_to_long
@@ -86,6 +86,22 @@ def source_tier_for(pyramid: Pyramid, tier_name: str):
     if best is None:
         raise AssertionError(f"no source tier for /{tier_name} — pyramid ladder is malformed")
     return best
+
+
+def buildable_at(pyramid: Pyramid, tier_name: str, period_end: datetime) -> datetime:
+    """Earliest instant a shard of `tier_name` ending at `period_end` can
+    be built: its strict-cascade source cover is complete only once the
+    smallest-rung source tile containing the tail closes — recursively,
+    since that tile's own sources must close first (see
+    `specs/source-readiness-pending.md`). The smallest source rung is the
+    binding constraint (the rung list is a divisibility chain, so no
+    coarser tile closes earlier). Equals `period_end` for span-aligned
+    endings (the majority) and for the base tier (raw-ingest territory)."""
+    src = source_tier_for(pyramid, tier_name)
+    if src is None:
+        return period_end
+    src_end = ceil_to_span(period_end, parse_duration(str(src.shards[0])))
+    return max(src_end, buildable_at(pyramid, src.name, src_end))
 
 
 @dataclass

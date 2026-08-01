@@ -74,6 +74,12 @@ def floor_to_span(t: datetime, span: ParsedTimeSpan) -> datetime:
     raise AssertionError(f"unreachable: {unit}")
 
 
+def ceil_to_span(t: datetime, span: ParsedTimeSpan) -> datetime:
+    """`t` if span-aligned, else the next span boundary."""
+    floored = floor_to_span(t, span)
+    return floored if floored == t else add_span(floored, span)
+
+
 def bins_in_range(from_: datetime, to: datetime, bin: str) -> int:
     if to <= from_:
         return 0

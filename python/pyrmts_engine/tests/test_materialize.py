@@ -1,14 +1,19 @@
 """Strict-cascade per-shard materialization (`specs/pyrmts-ops-adoption.md`
 phase 2): source-tier selection, cover planning, byte-identical rebuilds,
-invariant violations, raw-ingest seam, D1 SQL emission."""
+invariant violations, raw-ingest seam, D1 SQL emission. Plus shard
+readiness (`buildable_at` — `specs/source-readiness-pending.md`)."""
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from pyrmts import Tier, shard_periods_covering
 from pyrmts_engine import (
     MaterializeResult,
+    buildable_at,
     discover_gaps,
     emit_d1_insert_sql,
     materialize_shard,
@@ -16,8 +21,13 @@ from pyrmts_engine import (
     wide_to_long,
 )
 
-from conftest import FROM, TO, base_wide_frame
+from conftest import FROM, TO, base_wide_frame, make_pyramid
 from test_engine import _run_engine
+
+
+def _ladder(*tiers: Tier):
+    """Fixture pyramid with the given tiers (data machinery unused)."""
+    return replace(make_pyramid(), tiers=list(tiers))
 
 
 def test_source_tier_for():
@@ -25,6 +35,95 @@ def test_source_tier_for():
     assert source_tier_for(pyramid, 'q') is None       # base tier: raw territory
     assert source_tier_for(pyramid, 'h').name == 'q'   # 1h % 15min == 0
     assert source_tier_for(pyramid, 'd').name == 'h'   # largest divisor wins
+
+
+def test_source_tier_for_malformed_ladder():
+    pyramid = _ladder(
+        Tier(name='2m', bin='2min', shards=('1h',)),
+        Tier(name='3m', bin='3min', shards=('1h',)),   # 3min % 2min != 0
+    )
+    with pytest.raises(AssertionError) as exc:
+        source_tier_for(pyramid, '3m')
+    assert str(exc.value) == 'no source tier for /3m — pyramid ladder is malformed'
+
+
+def test_buildable_at():
+    utc = lambda *a: datetime(*a, tzinfo=timezone.utc)
+
+    # Fixture ladder is fully aligned: every rung ending is a multiple of
+    # its source tier's smallest rung → buildable_at == period_end.
+    pyramid, _, _ = _run_engine()
+    for tier, end in [
+        ('q', utc(2026, 1, 3)),          # base tier: raw territory
+        ('h', utc(2026, 1, 3)),          # 1d ends ≡ 0 mod q's 6h
+        ('h', utc(2026, 1, 2, 6)),       # sub-day ending, still 6h-aligned
+        ('d', utc(2026, 1, 3)),          # 4d ends ≡ 0 mod h's 1d
+    ]:
+        assert buildable_at(pyramid, tier, end) == end
+
+    # The incident shape (/1h@3h ← /30m, r_min=2h): odd-hour endings wait
+    # for the next even hour; midnight endings are aligned.
+    incident = _ladder(
+        Tier(name='30m', bin='30min', shards=('2h', '6h')),
+        Tier(name='1h', bin='1h', shards=('3h', '6h')),
+    )
+    assert buildable_at(incident, '1h', utc(2026, 7, 31, 21)) == utc(2026, 7, 31, 22)
+    assert buildable_at(incident, '1h', utc(2026, 8, 1)) == utc(2026, 8, 1)
+
+    # Two levels of misalignment compound: ceil to 2h (22:00), then the
+    # source tile's own source cover ceils to 45min (22:30).
+    two_level = _ladder(
+        Tier(name='15m', bin='15min', shards=('45min',)),
+        Tier(name='30m', bin='30min', shards=('2h',)),
+        Tier(name='1h', bin='1h', shards=('3h',)),
+    )
+    assert buildable_at(two_level, '1h', utc(2026, 7, 31, 21)) == utc(2026, 7, 31, 22, 30)
+
+
+# The avail-v5 ladder (ctbk `configs/pyramids/avail-v5.yaml`, extended view:
+# `shards` + `lambda_shards`) — the parity fixture shared with
+# `js/packages/pyrmts/src/cascade-source.test.ts`.
+AVAIL_V5_TIERS = [
+    ('1m', '1min', ('5min', '10min', '30min', '1h', '3h', '6h', '12h', '1d', '2d')),
+    ('2m', '2min', ('10min', '30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d')),
+    ('3m', '3min', ('15min', '30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d')),
+    ('5m', '5min', ('15min', '30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d')),
+    ('10m', '10min', ('30min', '1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d')),
+    ('15m', '15min', ('1h', '3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d')),
+    ('30m', '30min', ('2h', '6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d')),
+    ('1h', '1h', ('3h', '6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d')),
+    ('2h', '2h', ('6h', '12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d')),
+    ('3h', '3h', ('12h', '1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d')),
+    ('6h', '6h', ('1d', '2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d', '1024d')),
+    ('12h', '12h', ('2d', '4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d', '1024d', '2048d')),
+    ('1d', '1d', ('4d', '8d', '16d', '32d', '64d', '128d', '256d', '512d', '1024d', '2048d')),
+    ('3d', '3d', ('12d', '24d', '48d', '96d', '192d', '384d', '768d', '1536d', '3072d')),
+    ('7d', '7d', ('28d', '56d', '112d', '224d', '448d', '896d', '1792d', '3584d', '7168d')),
+]
+
+
+def test_buildable_at_avail_v5_enumeration():
+    """Sweep every (tier, rung, ending) over 4 days of the avail-v5
+    ladder: the ONLY structurally-lagged class is /1h@3h at odd-hour
+    endings (source /30m's smallest rung is 2h), each waiting +1h."""
+    pyramid = _ladder(*[
+        Tier(name=name, bin=bin, shards=shards)
+        for name, bin, shards in AVAIL_V5_TIERS
+    ])
+    start = datetime(2026, 7, 28, tzinfo=timezone.utc)
+    stop = start + timedelta(days=4)
+    lags = {}
+    for name, _, shards in AVAIL_V5_TIERS:
+        for rung in shards:
+            for period in shard_periods_covering(start, stop, rung):
+                at = buildable_at(pyramid, name, period.end)
+                if at != period.end:
+                    lags[(name, rung, period.end)] = at - period.end
+    assert lags == {
+        ('1h', '3h', datetime(2026, 7, 28 + d, h, tzinfo=timezone.utc)): timedelta(hours=1)
+        for d in range(4)
+        for h in (3, 9, 15, 21)
+    }
 
 
 def test_materialize_shard_rebuilds_byte_identical():

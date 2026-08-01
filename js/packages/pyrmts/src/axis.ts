@@ -96,6 +96,12 @@ export function floorToSpan(t: Date, span: ParsedTimeSpan): Date {
   }
 }
 
+// `t` if span-aligned, else the next span boundary.
+export function ceilToSpan(t: Date, span: ParsedTimeSpan): Date {
+  const floored = floorToSpan(t, span)
+  return floored.getTime() === t.getTime() ? floored : addSpan(floored, span)
+}
+
 // Count bins of `bin` overlapping [from, to). Bins are span-aligned (floored
 // at the start of each bin's boundary, not rolling from `from`).
 export function binsInRange(from: Date, to: Date, bin: Duration): number {

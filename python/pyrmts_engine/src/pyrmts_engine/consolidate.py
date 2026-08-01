@@ -44,7 +44,7 @@ from pyrmts.types import Tier
 
 from .discovery import discover_gaps, list_existing_with_mtime, split_stale
 from .longform import empty_long, long_to_wide, rebin_long, wide_to_long
-from .materialize import MaterializeResult, shard_key, source_tier_for
+from .materialize import MaterializeResult, buildable_at, shard_key, source_tier_for
 from .plan import UNIT_MS, bin_floor_expr
 from .shard_index import ShardIndex, ShardRecord, now_ms
 
@@ -415,14 +415,25 @@ def run_extension_fill(
     if reconcile and shard_index is not None and not dry_run:
         reconcile_registrations(expected_by_tier, existing, shard_index, pyramid_name)
     smallest = {t.name: t.shards[0] for t in pyramid.tiers}
-    ext_gaps = [
-        g for g in gaps
-        if (fill_all or g.shard_dur != smallest[g.tier])
+    ext_gaps = []
+    n_not_ready = 0
+    for g in gaps:
+        if not (fill_all or g.shard_dur != smallest[g.tier]):
+            continue
         # Trailing max-shards whose notional period ends pre-genesis can
         # never exist — permanent no-ops, excluded from the census.
-        and g.period_end > genesis
-    ]
-    err(f"fillable gaps: {len(ext_gaps)} of {len(gaps)} total missing")
+        if g.period_end <= genesis:
+            continue
+        # Expected but not yet buildable: the source cover is still open
+        # (structural lag — e.g. a 3h shard ending mid-way through its
+        # source tier's smallest tile). It rejoins once the source
+        # closes; attempting now just burns a `no_inputs` per tick.
+        if buildable_at(pyramid, g.tier, g.period_end) > now:
+            n_not_ready += 1
+            continue
+        ext_gaps.append(g)
+    err(f"fillable gaps: {len(ext_gaps)} of {len(gaps)} total missing "
+        f"({n_not_ready} not ready — source cover open)")
     if dry_run:
         for g in ext_gaps[:40]:
             err(f"  would fill /{g.tier}@{g.shard_dur} {g.period_start.date()}")

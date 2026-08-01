@@ -12,6 +12,8 @@ Status: **done pyrmts-side (2026-08-01)** (spec 2026-08-01, ctbk session). Compa
 
 ctbk adoption: bump `gbfs/api` pins to the next dist build (SHA to be recorded here post-push); soak monitor can drop the structural-lag special cases per the acceptance section.
 
+**ctbk verification (2026-08-01, ctbk session): downstream green — clear to push.** Upstream suites re-run locally (411 js / 159 py, all pass); `gbfs/api` linked to the local builds via `pds l pyrmts` + `pds l pyrmts-cfw` → `tsc --noEmit` clean, 193 vitest pass. Push `main` → `r/main` and cut the dist build; record the dist SHA here and ctbk will re-pin + deploy.
+
 ## Motivating incident (2026-07-31, ctbk avail-v3 + avail-v5)
 
 `/health` (`pyramidCover`) reported `totalMissing=1` on both pyramids for ~40 min and paged the soak monitor. The "missing" shard was `/1h@3h [18:00,21:00)`: it becomes **expected** the moment its own period closes (21:00), but it's built by cross-tier rebin from the `/30m` tier, whose smallest rung is `2h` — the covering source tile `[20:00,22:00)` doesn't close until 22:00. For ~1 h the shard is expected-but-unfillable (the Lambda tick logged `no_inputs` on it every 5 min); the 22:03 tick wrote source then target in one dependency-ordered pass. Self-healing, structural, and recurring: in the ctbk ladder it happens for every `@3h` slot ending on an odd hour (03/09/15/21 UTC), ~4×/day, ~1 h each.

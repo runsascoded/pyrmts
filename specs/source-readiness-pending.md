@@ -1,6 +1,6 @@
 # Source readiness: expected-but-not-yet-buildable shards are `pending`, not `missing`
 
-Status: **done pyrmts-side (2026-08-01)** (spec 2026-08-01, ctbk session). Companion specs: `shard-invalidation.md` (orthogonal — that one repairs the *past*, this one classifies the *future*; both shrink "missing" down to "actually wrong"), `engine-min-cover-source.md` (background on strict-cascade source selection, implemented).
+Status: **done + verified live (2026-08-02)** (spec 2026-08-01, ctbk session; impl 2026-08-01, pyrmts session). Acceptance observed in prod through the 15:00–16:00Z structural window: /health showed the `/1h@3h [12:00,15:00)` slot as `pending` (`buildableAt: 16:00Z`) with `totalMissing=0` throughout, flipping to `present` at the 16:03Z tick; every Lambda census in the window read `(1 not ready — source cover open)` with zero `no_inputs` attempts. ctbk soak monitor collapsed to the simple "any sustained missing" rule. Companion specs: `shard-invalidation.md` (orthogonal — that one repairs the *past*, this one classifies the *future*; both shrink "missing" down to "actually wrong"), `engine-min-cover-source.md` (background on strict-cascade source selection, implemented).
 
 **pyrmts status (2026-08-01): implemented as specced.** Landed:
 
@@ -23,6 +23,8 @@ ctbk adoption: bump `gbfs/api` pins to the next dist build (SHA to be recorded h
 ```
 
 Python pins: `r/main` = `7899829`. Reminder from the burn-in discussion: drop the soak monitor's structural-lag special cases only after **both** halves are live (Lambda image rebuilt + api worker re-pinned) — until then the 4×/day false-red logic is still what's protecting you.
+
+**ctbk: adopted + deployed (2026-08-02).** ctbk `850b15d9`: `gbfs/api` JS pins → dist `e6d29ca`, python `[tool.uv.sources]` → `7899829` (tsc + 193 vitest green on dist pins; `ctbk gbfs lambda fill -C avail-v5 -n` exercises the new census line). api worker deployed via `gbfs.yml` (green); all three cascade Lambdas (`ctbk-avail-cascade{,-v5}`, `ctbk-avail-rebuild`) rolled to a fresh image with wheels from `c89720e` (also bakes in the waiting `pyarrow==22.0.0` pin). Next structural window (`/1h@3h` closing 15:00Z) is the live acceptance check; monitor simplification after that.
 
 ## Motivating incident (2026-07-31, ctbk avail-v3 + avail-v5)
 

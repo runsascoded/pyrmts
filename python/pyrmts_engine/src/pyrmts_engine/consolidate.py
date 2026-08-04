@@ -43,6 +43,7 @@ from pyrmts import ExpectedShard, Pyramid, parse_duration, write_tier_parquet
 from pyrmts.types import Tier
 
 from .discovery import discover_gaps, list_existing_with_mtime, split_stale
+from .invalidation import load_invalidations, overlaps, prune_spent
 from .longform import empty_long, long_to_wide, rebin_long, wide_to_long
 from .materialize import MaterializeResult, buildable_at, shard_key, source_tier_for
 from .plan import UNIT_MS, bin_floor_expr
@@ -221,6 +222,7 @@ def materialize_extension_shard(
     rg_size: int | None = None,
     sort: list[str] | None = None,
     head_check: bool = True,
+    overwrite_keys: set[str] | None = None,
     raw_fill: RawHoleFill | None = None,
     cross_tier_fill: CrossTierHoleFill | None = None,
 ) -> MaterializeResult:
@@ -232,12 +234,18 @@ def materialize_extension_shard(
     storage (with a pre-`stale_before` mtime, excluded from `key_set`)
     and must be overwritten in place — the HEAD probe would wrongly
     'exists'-skip it; `key_set` membership (fresh keys only) still
-    short-circuits re-runs."""
+    short-circuits re-runs. `overwrite_keys` is the per-key version
+    (invalidation-journal rebuilds: only the overlapped shards are
+    overwritten; every other gap keeps its HEAD guard)."""
     tag = f"/{gap.tier}@{gap.shard_dur} {gap.period_start.date()}"
     t0 = _time.time()
     if gap.key in key_set:
         return MaterializeResult(gap=gap, status='exists')
-    if head_check and pyramid.storage.head(gap.key) is not None:
+    if (
+        head_check
+        and (overwrite_keys is None or gap.key not in overwrite_keys)
+        and pyramid.storage.head(gap.key) is not None
+    ):
         key_set.add(gap.key)
         return MaterializeResult(gap=gap, status='exists')
     if gap.period_end <= genesis:
@@ -393,6 +401,7 @@ def run_extension_fill(
     dry_run: bool = False,
     fill_all: bool = False,
     stale_before: datetime | None = None,
+    honor_invalidations: bool = True,
     sort: list[str] | None = None,
     raw_fill: RawHoleFill | None = None,
     cross_tier_fill: CrossTierHoleFill | None = None,
@@ -408,10 +417,22 @@ def run_extension_fill(
     window first.
 
     `stale_before`: shards last-modified before this timestamp are
-    treated as missing and rebuilt in place (content invalidation)."""
+    treated as missing and rebuilt in place (content invalidation).
+
+    `honor_invalidations` (default on): load the pyramid's invalidation
+    journal (`specs/shard-invalidation.md`); built shards overlapping an
+    entry newer than their build join the gap list and are rebuilt in
+    place (fine→coarse, so coarse rebuilds read repaired fine tiles);
+    spent entries are pruned after the fill."""
     now = now or datetime.now(timezone.utc)
+    invs = []
+    if honor_invalidations:
+        invs, _ = load_invalidations(pyramid)
+        if invs:
+            err(f"invalidations: {len(invs)} journal entries")
     gaps, existing, expected_by_tier = discover_gaps(
-        pyramid, (genesis, now), stale_before=stale_before)
+        pyramid, (genesis, now), stale_before=stale_before,
+        invalidations=invs or None)
     if reconcile and shard_index is not None and not dry_run:
         reconcile_registrations(expected_by_tier, existing, shard_index, pyramid_name)
     smallest = {t.name: t.shards[0] for t in pyramid.tiers}
@@ -439,6 +460,12 @@ def run_extension_fill(
             err(f"  would fill /{g.tier}@{g.shard_dur} {g.period_start.date()}")
         return []
 
+    # Journal-stale gaps: the key exists (old content) and must be
+    # overwritten in place; every other gap keeps its HEAD guard.
+    overwrite_keys = {
+        g.key for g in ext_gaps if any(overlaps(inv, g) for inv in invs)
+    } if invs else None
+
     t0 = _time.time()
     results: list[MaterializeResult] = []
     for g in ext_gaps:
@@ -452,6 +479,7 @@ def run_extension_fill(
             pyramid, g,
             key_set=existing, genesis=genesis, sort=sort,
             head_check=stale_before is None,
+            overwrite_keys=overwrite_keys,
             raw_fill=raw_fill, cross_tier_fill=cross_tier_fill,
         )
         results.append(res)
@@ -461,6 +489,10 @@ def run_extension_fill(
     for r in results:
         by_status[r.status] = by_status.get(r.status, 0) + 1
     err(f"extension fill: {by_status or 'nothing to do'}")
+    if invs:
+        expected_all = [e for shards in expected_by_tier.values() for e in shards]
+        n_pruned, n_left = prune_spent(pyramid, expected_all)
+        err(f"invalidations: pruned {n_pruned} spent entries ({n_left} remain)")
     return results
 
 

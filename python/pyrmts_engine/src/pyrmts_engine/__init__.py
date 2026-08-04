@@ -31,6 +31,14 @@ from .engine import (
     WrittenShard,
     build_local,
 )
+from .invalidation import (
+    Invalidation,
+    invalidate,
+    journal_key,
+    load_invalidations,
+    prune_spent,
+    stale_keys_for,
+)
 from .materialize import (
     MaterializeResult,
     SourcePick,
@@ -86,6 +94,8 @@ __all__ = [
     'diff_with_existing', 'discover_gaps', 'group_by_tier_rung',
     'list_existing_keys', 'list_existing_with_mtime', 'report_gaps',
     'sort_by_dependency', 'split_stale',
+    'Invalidation', 'invalidate', 'journal_key', 'load_invalidations',
+    'prune_spent', 'stale_keys_for',
     'MaterializeResult', 'SourcePick', 'buildable_at', 'emit_d1_insert_sql',
     'materialize_shard', 'plan_source_cover_single_tier', 'shard_key',
     'source_long_for_gap', 'source_tier_for',

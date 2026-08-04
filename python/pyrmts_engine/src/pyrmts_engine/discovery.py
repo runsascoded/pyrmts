@@ -19,6 +19,7 @@ from functools import partial
 
 from pyrmts import ExpectedShard, Pyramid, list_expected_shards
 
+from .invalidation import Invalidation, stale_keys_for
 from .plan import _approx_ms
 
 err = partial(print, file=sys.stderr, flush=True)
@@ -34,23 +35,16 @@ def list_existing_keys(pyramid: Pyramid, prefix: str | None = None) -> set[str]:
 
 
 def list_existing_with_mtime(pyramid: Pyramid) -> dict[str, datetime | None]:
-    """Like `list_existing_keys` but `{key: LastModified}`. Uses the
-    S3/R2 paginator directly when the backend exposes one (`S3Storage`);
-    other backends fall back to `list()` with `None` mtimes (treated as
-    fresh — backends that can't report mtimes shouldn't trigger
-    rebuilds)."""
+    """Like `list_existing_keys` but `{key: LastModified}`, via the
+    backend's `list_with_mtime` (all built-in storages have one); other
+    backends fall back to `list()` with `None` mtimes (treated as fresh —
+    backends that can't report mtimes shouldn't trigger rebuilds)."""
     storage = pyramid.storage
     prefix = pyramid.keyTemplate.split('{')[0]
-    client = getattr(storage, '_client', None)
-    bucket = getattr(storage, 'bucket', None)
-    if client is None or bucket is None:
+    lister = getattr(storage, 'list_with_mtime', None)
+    if lister is None:
         return {key: None for key in storage.list(prefix)}
-    out: dict[str, datetime | None] = {}
-    paginator = client.get_paginator('list_objects_v2')
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get('Contents', []):
-            out[obj['Key']] = obj['LastModified']
-    return out
+    return dict(lister(prefix))
 
 
 def split_stale(
@@ -122,6 +116,7 @@ def discover_gaps(
     time_range: tuple[datetime, datetime],
     filter: dict | None = None,
     stale_before: datetime | None = None,
+    invalidations: list[Invalidation] | None = None,
 ) -> tuple[list[ExpectedShard], set[str], dict[str, list[ExpectedShard]]]:
     """End-to-end discovery: enumerate expected → LIST storage → diff →
     sort. Returns `(gaps_in_fill_order, existing_key_set,
@@ -131,7 +126,9 @@ def discover_gaps(
     - `existing_key_set`: the storage snapshot; fill loops extend it as
       shards are written so downstream source lookups see fresh inputs
       without new round trips. With `stale_before`, stale keys are
-      excluded (treated as missing → rebuilt in place).
+      excluded (treated as missing → rebuilt in place); `invalidations`
+      is the interval-scoped version of the same mechanic (expected
+      shards overlapping a journal entry newer than their build).
     - `expected_by_tier`: the full expected cover grouped by tier —
       threaded into `materialize.source_long_for_gap` so a gap's source
       picks come from the same outer cover the fill order materializes
@@ -146,6 +143,12 @@ def discover_gaps(
     err(f"  existing: {len(existing_mtimes)} keys on storage"
         + (f" ({len(stale)} stale, modified before {stale_before.isoformat()})"
            if stale_before is not None else ""))
+    if invalidations:
+        inv_stale = stale_keys_for(expected, existing_mtimes, invalidations)
+        if inv_stale:
+            existing -= inv_stale
+            err(f"  invalidated: {len(inv_stale)} built shards overlap journal "
+                f"entries → rebuild in place")
     missing = diff_with_existing(expected, existing)
     err(f"  missing:  {len(missing)} shards to fill")
     expected_by_tier: dict[str, list[ExpectedShard]] = {}

@@ -107,6 +107,22 @@ def plan(filters: tuple[str, ...], dot_out: str | None, fs_root: str | None, ran
 
 
 @cli.command()
+@option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
+@option('-r', '--range', 'range_', required=True, help="Half-open interval to invalidate, <from-iso>/<to-iso> (UTC)")
+@argument('config')
+def invalidate(fs_root: str | None, range_: str, config: str) -> None:
+    """Mark built shards overlapping the interval stale (append to the
+    pyramid's invalidation journal); the next extension-fill tick rebuilds
+    them in place. See `specs/shard-invalidation.md`."""
+    from .invalidation import invalidate as _invalidate, journal_key
+    pyramid = _load_pyramid(config, fs_root)
+    interval = _parse_range(range_)
+    n = _invalidate(pyramid, interval)
+    err(f"appended [{interval[0].isoformat()}, {interval[1].isoformat()}) to "
+        f"{journal_key(pyramid)}: {n} entries pending")
+
+
+@cli.command()
 @option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the detected memory limit; 0 disables)")
 @option('-C', '--close-workers', type=int, help="Concurrent close computations (default 2): more overlaps closes with the walk (wall) at the cost of stacked close transients (peak RSS)")
 @option('-c', '--close-chunk', help="Target combined-long bytes per close chunk, e.g. 1g (default 1g); smaller bounds each close's transient tighter")

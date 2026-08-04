@@ -61,3 +61,36 @@ def test_missing_profile_creds_raises(monkeypatch):
         'R2_SECRET_ACCESS_KEY in env, or configure the [cf] profile in '
         '~/.aws/credentials'
     )
+
+
+def test_mem_storage_mtimes_and_cas():
+    """`specs/shard-invalidation.md`: mtime listing + etag-CAS
+    (`put_if_match`) — the primitives the invalidation journal builds on."""
+    from datetime import datetime, timezone
+
+    from pyrmts import EtagConflict, MemStorage
+
+    t1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    t2 = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    s = MemStorage(clock=lambda: t1)
+
+    # Create-only (etag=None ≈ If-None-Match: *).
+    s.put_if_match('a', b'v1', None)
+    with pytest.raises(EtagConflict) as exc:
+        s.put_if_match('a', b'x', None)
+    assert str(exc.value) == 'put_if_match: a already exists'
+
+    blob, etag = s.get_with_etag('a')
+    assert (blob, etag) == (b'v1', '6654c734ccab8f440ff0825eb443dc7f')
+
+    # Conditional replace: matching etag lands, stale etag conflicts.
+    s.clock = lambda: t2
+    s.put_if_match('a', b'v2', etag)
+    assert s.get('a') == b'v2'
+    with pytest.raises(EtagConflict) as exc:
+        s.put_if_match('a', b'v3', etag)
+    assert str(exc.value) == 'put_if_match: a changed since read'
+
+    s.put('b', b'bb')
+    assert list(s.list_with_mtime('')) == [('a', t2), ('b', t2)]
+    assert list(s.list('')) == ['a', 'b']

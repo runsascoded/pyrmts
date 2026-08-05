@@ -71,7 +71,7 @@ from .shard_index import (
     ShardRecord,
     StorageJsonlShardIndex,
 )
-from .source import Source, WideShardSource
+from .source import Source, Tile, TiledSource, WideShardSource
 from .validate import (
     aligned_range,
     canonical_long,
@@ -90,7 +90,7 @@ __all__ = [
     'rebin_long', 'wide_to_long',
     'D1ShardIndex', 'JsonlShardIndex', 'MemShardIndex', 'NoopShardIndex',
     'ShardIndex', 'ShardRecord', 'StorageJsonlShardIndex',
-    'Source', 'WideShardSource',
+    'Source', 'Tile', 'TiledSource', 'WideShardSource',
     'diff_with_existing', 'discover_gaps', 'group_by_tier_rung',
     'list_existing_keys', 'list_existing_with_mtime', 'report_gaps',
     'sort_by_dependency', 'split_stale',

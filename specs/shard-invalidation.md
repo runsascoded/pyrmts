@@ -15,6 +15,8 @@ Deviations from the sketch: `invalidate` takes just `(pyramid, interval, *, now)
 
 Note for ctbk (journal-vs-registry): the D1 split-brain incident (`docs/incidents/2026-07-28-d1-rest-split-brain.md`) settles the registry-column alternative for good — invalidation state must live next to the shards in R2 (which never forked), not in D1. Also: R2's conditional-write (If-Match → 412) path should get a live smoke test before the journal takes prod traffic — scaffolding specced in utz (`~/c/utz/specs/s3-live-tests.md`).
 
+**Gate cleared (2026-08-05, ctbk session): R2 If-Match live smoke green.** utz's live suite passed 8/8 against R2 (`s3://ctbk/tmp/utz-s3-tests`, profile `cf`), including the stale-etag conflict and `If-None-Match: *` create-race paths; a direct probe confirmed R2 surfaces `PreconditionFailed` / HTTP 412 on both — byte-identical to AWS, no except-arm changes needed. Findings recorded in the utz spec. **pyrmts is clear to push `main` → `r/main`** (the 6 local commits: invalidation impl, source-readiness done-move, raw-ingest spec + `TiledSource` chassis) and record the new `dist` SHA for ctbk re-pins.
+
 ## Motivation
 
 Consumers occasionally get **new data for an already-built interval**: a WAL minute recovered from a secondary source, a backfill correcting a bad ingest window, a redundant poller landing a minute late, or a vocab/denorm repair that changes how old raw rows expand. Today the engine has only two blunt tools:

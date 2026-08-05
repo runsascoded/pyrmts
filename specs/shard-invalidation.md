@@ -17,6 +17,8 @@ Note for ctbk (journal-vs-registry): the D1 split-brain incident (`docs/incident
 
 **Gate cleared (2026-08-05, ctbk session): R2 If-Match live smoke green.** utz's live suite passed 8/8 against R2 (`s3://ctbk/tmp/utz-s3-tests`, profile `cf`), including the stale-etag conflict and `If-None-Match: *` create-race paths; a direct probe confirmed R2 surfaces `PreconditionFailed` / HTTP 412 on both — byte-identical to AWS, no except-arm changes needed. Findings recorded in the utz spec. **pyrmts is clear to push `main` → `r/main`** (the 6 local commits: invalidation impl, source-readiness done-move, raw-ingest spec + `TiledSource` chassis) and record the new `dist` SHA for ctbk re-pins.
 
+**Pushed (2026-08-05, pyrmts session): ctbk re-pin SHAs.** `main` = `ce770e7` (carries the invalidation impl + `TiledSource` chassis) — bump the `pyproject.toml` uv source rev to it. `build-dist.yml` ran green but ended "No changes to dist branch": the `dist` branch packs only the JS packages, and this push was Python + specs only — JS `pds gh` pins stay at `dist` SHA `e6d29ca`.
+
 ## Motivation
 
 Consumers occasionally get **new data for an already-built interval**: a WAL minute recovered from a secondary source, a backfill correcting a bad ingest window, a redundant poller landing a minute late, or a vocab/denorm repair that changes how old raw rows expand. Today the engine has only two blunt tools:

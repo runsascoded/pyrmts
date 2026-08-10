@@ -4,6 +4,8 @@ Status: **phases 1 + 2 implemented; ctbk downstream integration green (Python si
 
 **ctbk downstream integration (2026-08-10, ctbk session, this checkout @ `bcb6e4f` local-linked)**: ctbk pytest suite 62/62 green; both `configs/pyramids/rides-v5-{start,end}.yaml` extended with the calendar family (`{1,2,3,6}mo + 1y`, pow-2-year shards per the rides-v5 RESOLVED DESIGN) and parse clean through `parse_pyramid_yaml`; ladder validation correctly rejects `5mo` ("doesn't tile a year evenly"); `list_expected_shards` over genesis→2026-08-10 enumerates sensible calendar covers (e.g. `1mo`: `16y/2000` + `4y/2016` + `2y/2024`; 18 calendar shards/anchor). Not yet exercised from ctbk: engine calendar *build* (needs the r/main push → new engine image → Batch calendar fill) and the TS het-tiling serve path (adopting after push, via `pds`). Push away; record the final SHA here for the ctbk re-pin.
 
+**Pushed (2026-08-10, pyrmts session) — re-pin SHAs**: `main` = `ed50cdb92b916bbd9bc5b7ffc7897c97f702de0e` (`ed50cdb`; Python pin — `pyproject.toml` uv source rev); `dist` = `60439222ad02c11da83b78ad17e1ef35b95d2baa` (`6043922`, "dist: pyrmts + pyrmts-cfw + pyrmts-geo @ ed50cdb"; JS pins via `pds gh`). Build-dist CI green (run 31436159019).
+
 **pyrmts status (2026-08-10): phase 1 landed.** Python 200 tests green (+14), JS 419 (+8), `tsc` clean; not yet pushed — per §Sequencing, ctbk runs downstream integration from this checkout before the `r/main` push.
 
 - `floor_to_span`: `Nmo` (validates `12 % N == 0`, same message as JS) + `Ny` (year-0 anchored) per the contract; `ceil_to_span`/`bins_in_range`/`shard_periods_covering`/`format_period` delegate and needed no changes, as predicted.

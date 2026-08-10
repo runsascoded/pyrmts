@@ -23,11 +23,48 @@ export function validateLadders(pyramid) {
 }
 function validateLadder(tier) {
     const binMs = binMsOrThrow(tier);
+    const binMonths = isStepBin(tier.bin) ? null : monthsOrNull(tier.bin);
+    if (!isStepBin(tier.bin)) {
+        validateMonthSpan(tier.bin, tier.name);
+    }
     const shardsMs = [];
     let prevMs = null;
+    let prevMonths = null;
+    let prevNominal = null;
     for (let i = 0; i < tier.shards.length; i++) {
         const shard = tier.shards[i];
         const ms = shardMsOrNull(shard, tier.name);
+        // Calendar checks (`specs/calendar-units.md`): `Nmo` must tile a year;
+        // calendar-calendar pairs divide in months (`y` ≡ `12mo`); mixed
+        // fixed/calendar pairs assert only nominal-width (30d/365d) ascension.
+        const months = shard === '1run' ? null : monthsOrNull(shard);
+        if (shard !== '1run') {
+            validateMonthSpan(shard, tier.name);
+            if (months !== null) {
+                if (i === 0 && binMonths !== null) {
+                    if (months < binMonths) {
+                        throw new Error(`validateLadders: tier '${tier.name}' shards[0]='${shard}' ` +
+                            `is smaller than bin '${tier.bin}' (in months)`);
+                    }
+                    if (months % binMonths !== 0) {
+                        throw new Error(`validateLadders: tier '${tier.name}' bin '${tier.bin}' does not ` +
+                            `divide shards[0]='${shard}' (in months)`);
+                    }
+                }
+                if (prevMonths !== null && months % prevMonths !== 0) {
+                    throw new Error(`validateLadders: tier '${tier.name}' shards[${i - 1}]='${tier.shards[i - 1]}' ` +
+                        `does not divide shards[${i}]='${shard}' (in months)`);
+                }
+            }
+            const nominal = nominalMs(shard);
+            // Both-fixed pairs are covered by the exact integer-ms checks below.
+            if (prevNominal !== null && (months !== null || prevMonths !== null) && nominal <= prevNominal) {
+                throw new Error(`validateLadders: tier '${tier.name}' shards not ascending ` +
+                    `(shards[${i}]='${shard}' <= shards[${i - 1}]='${tier.shards[i - 1]}' by nominal width)`);
+            }
+            prevNominal = nominal;
+        }
+        prevMonths = months;
         if (ms !== null) {
             if (binMs !== null && ms < binMs) {
                 throw new Error(`validateLadders: tier '${tier.name}' shards[${i}]='${shard}' (${ms}ms) ` +
@@ -64,12 +101,41 @@ function shardMsOrNull(shard, tierName) {
 }
 function binMsOrThrow(tier) {
     const bin = tier.bin;
-    if (bin.endsWith('step') || bin.endsWith('steps') || bin.endsWith('ksteps') || bin.endsWith('msteps')) {
+    if (isStepBin(bin)) {
         return null; // step-axis bins don't measure in ms
     }
     const parsed = parseDuration(bin);
     if (parsed.unit === 'mo' || parsed.unit === 'y')
         return null;
     return fixedDurationMs(bin);
+}
+function isStepBin(bin) {
+    return bin.endsWith('step') || bin.endsWith('steps') || bin.endsWith('ksteps') || bin.endsWith('msteps');
+}
+// Calendar durations in months (`y` ≡ `12mo`), `null` for fixed-width.
+function monthsOrNull(dur) {
+    const parsed = parseDuration(dur);
+    if (parsed.unit === 'mo')
+        return parsed.count;
+    if (parsed.unit === 'y')
+        return 12 * parsed.count;
+    return null;
+}
+function validateMonthSpan(dur, tierName) {
+    const parsed = parseDuration(dur);
+    if (parsed.unit === 'mo' && 12 % parsed.count !== 0) {
+        throw new Error(`validateLadders: tier '${tierName}' month-span '${dur}' doesn't tile a ` +
+            `year evenly (12 % ${parsed.count} !== 0)`);
+    }
+}
+// Width for ordering only — calendar entries use nominal 30d/365d.
+function nominalMs(dur) {
+    const parsed = parseDuration(dur);
+    const dayMs = 24 * 60 * 60_000;
+    if (parsed.unit === 'mo')
+        return parsed.count * 30 * dayMs;
+    if (parsed.unit === 'y')
+        return parsed.count * 365 * dayMs;
+    return fixedDurationMs(dur);
 }
 //# sourceMappingURL=ladder.js.map

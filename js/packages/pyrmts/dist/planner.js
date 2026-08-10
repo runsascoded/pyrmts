@@ -154,11 +154,14 @@ export function planQuery(pyramid, input) {
 // (`tier.shards.at(-1)`) for all segments — it's a coarse-output path where
 // fine-grained shard-duration fall-through doesn't help (each output bin is
 // already an arbitrary width; we just need data at the chosen tier).
+//
+// Calendar-variable targets (`mo`/`y`) delegate to `planRaggedCalendar` —
+// non-periodic, so no phase caching; greedy containment instead of DP.
 function planRagged(pyramid, input, targetBin) {
     const { from, to } = input.range;
     const tParsed = parseDuration(targetBin);
     if (tParsed.unit === 'mo' || tParsed.unit === 'y') {
-        throw new Error(`planQuery: targetBin '${targetBin}' is calendar-variable; ragged decomposition supports fixed-width units only`);
+        return planRaggedCalendar(pyramid, input, targetBin, tParsed);
     }
     const targetBinMs = fixedDurationMs(targetBin);
     const eligibleTiers = [];
@@ -250,11 +253,11 @@ function planRagged(pyramid, input, targetBin) {
                 curr.absEndMs = next.absEndMs;
             }
             else {
-                segments.push(emitRaggedSegment(pyramid, curr, targetBinMs, input.filter ?? {}));
+                segments.push(emitRaggedSegment(pyramid, curr, targetBin, input.filter ?? {}));
                 curr = { ...next };
             }
         }
-        segments.push(emitRaggedSegment(pyramid, curr, targetBinMs, input.filter ?? {}));
+        segments.push(emitRaggedSegment(pyramid, curr, targetBin, input.filter ?? {}));
     }
     const rawWm = effective[pyramid.tiers[0].name];
     const authoritativeEnd = rawWm < to ? rawWm : null;
@@ -304,10 +307,9 @@ function decomposeBin(eligibleTiers, targetBinMs, binStartMs) {
     }
     return solve(binStartMs);
 }
-function emitRaggedSegment(pyramid, range, targetBinMs, filter) {
+function emitRaggedSegment(pyramid, range, targetBin, filter) {
     const fromDate = new Date(range.absStartMs);
     const toDate = new Date(range.absEndMs);
-    const tierMs = fixedDurationMs(range.tier.bin);
     const shardDur = range.tier.shards[range.tier.shards.length - 1];
     return {
         from: fromDate,
@@ -315,8 +317,171 @@ function emitRaggedSegment(pyramid, range, targetBinMs, filter) {
         shardTier: range.tier,
         shardDur,
         keys: shardKeys(pyramid, range.tier, shardDur, fromDate, toDate, filter),
-        reaggregate: tierMs !== targetBinMs,
+        reaggregate: !spanWidthEquals(range.tier.bin, targetBin),
     };
+}
+const DAY_MS = 24 * 60 * 60_000;
+// Normalized-width equality: months for calendar units (`1y` ≡ `12mo`),
+// epoch-ms for fixed-width. Calendar vs fixed never compare equal.
+function spanWidthEquals(a, b) {
+    const pa = parseDuration(a);
+    const pb = parseDuration(b);
+    const am = pa.unit === 'mo' ? pa.count : pa.unit === 'y' ? pa.count * 12 : null;
+    const bm = pb.unit === 'mo' ? pb.count : pb.unit === 'y' ? pb.count * 12 : null;
+    if (am !== null || bm !== null)
+        return am === bm;
+    return fixedDurationMs(a) === fixedDurationMs(b);
+}
+// Source-tier selection for a calendar `targetBin` (`specs/calendar-units.md`):
+//   - `exactTier`: a materialized calendar tier whose bin width equals the
+//     target's (months-normalized) — preferred per-bin when covered.
+//   - `eligible`: fixed-width tiers usable for het-tiling, coarsest-first.
+//     Calendar bin boundaries are day-aligned, so whole-day multiples plus
+//     day-divisor base tiers (`1d` or finer) qualify; a base tier is what
+//     makes packing exact, so without one (and without `exactTier`) the
+//     target is unservable and we throw. With `exactTier` but no base,
+//     het-tiling is disabled (partial multi-day covers with dropped residue
+//     would silently misreport bins) — uncovered bins are simply omitted.
+function calendarEligibleTiers(pyramid, targetBin, caller) {
+    const t = parseDuration(targetBin);
+    const targetMonths = t.unit === 'mo' ? t.count : t.count * 12;
+    let exactTier;
+    const eligible = [];
+    for (const tier of pyramid.tiers) {
+        const p = parseDuration(tier.bin);
+        if (p.unit === 'mo' || p.unit === 'y') {
+            const months = p.unit === 'mo' ? p.count : p.count * 12;
+            if (months === targetMonths && exactTier === undefined)
+                exactTier = tier;
+            continue;
+        }
+        const ms = fixedDurationMs(tier.bin);
+        if (ms % DAY_MS !== 0 && DAY_MS % ms !== 0)
+            continue;
+        eligible.push({ tier, ms });
+    }
+    const hasBase = eligible.some(e => DAY_MS % e.ms === 0);
+    if (!hasBase) {
+        if (exactTier === undefined) {
+            throw new Error(`${caller}: calendar targetBin '${targetBin}' needs a base tier whose bin divides 1d ` +
+                `(calendar boundaries are day-aligned; pyramid tiers: ${pyramid.tiers.map(x => x.bin).join(', ')})`);
+        }
+        eligible.length = 0;
+    }
+    eligible.sort((x, y) => y.ms - x.ms);
+    return { ...(exactTier !== undefined ? { exactTier } : {}), eligible };
+}
+// Calendar-target ragged planner, watermark flavor (`specs/calendar-units.md`
+// phase 2). Walks target bins `[a, b)`; each is either served whole from
+// `exactTier` (when its effective watermark seals the full bin) or
+// het-tiled via `packCalendarWatermark`. The trailing partial bin (query end
+// or watermark inside the bin) het-tiles up to the covered edge — the
+// calendar flavor of mixed-tier tail coverage.
+function planRaggedCalendar(pyramid, input, targetBin, targetSpan) {
+    const { from, to } = input.range;
+    const { exactTier, eligible } = calendarEligibleTiers(pyramid, targetBin, 'planQuery');
+    const smoothMode = input.smoothMode ?? 'centered';
+    const smoothing = input.smoothing !== undefined
+        ? resolveSmoothing(input.smoothing, targetBin, from, to, smoothMode)
+        : null;
+    const { from: plannedFrom, to: plannedTo } = smoothing
+        ? extendForSmoothing(from, to, targetBin, smoothing.smoothBinCount, smoothMode)
+        : { from, to };
+    const effective = effectiveLargestShardWatermarks(pyramid.tiers, input.watermarks ?? {}, plannedTo);
+    const earliest = effectiveEarliestWatermarks(pyramid.tiers, input.earliestWatermarks ?? {});
+    const atoms = [];
+    let binStart = floorToSpan(plannedFrom, targetSpan);
+    while (binStart < plannedTo) {
+        const binEnd = addSpan(binStart, targetSpan);
+        const a = binStart.getTime();
+        const b = binEnd.getTime();
+        const exactCovered = exactTier !== undefined
+            && effective[exactTier.name].getTime() >= b
+            && (earliest[exactTier.name]?.getTime() ?? -Infinity) <= a;
+        if (exactCovered) {
+            atoms.push({ tier: exactTier, absStartMs: a, absEndMs: b });
+        }
+        else {
+            const packed = [];
+            packCalendarWatermark(eligible, effective, earliest, a, Math.min(b, plannedTo.getTime()), 0, packed);
+            packed.sort((x, y) => x.absStartMs - y.absStartMs);
+            atoms.push(...packed);
+        }
+        binStart = binEnd;
+    }
+    const segments = [];
+    if (atoms.length > 0) {
+        let curr = { ...atoms[0] };
+        for (let i = 1; i < atoms.length; i++) {
+            const next = atoms[i];
+            if (next.tier === curr.tier && next.absStartMs === curr.absEndMs) {
+                curr.absEndMs = next.absEndMs;
+            }
+            else {
+                segments.push(emitRaggedSegment(pyramid, curr, targetBin, input.filter ?? {}));
+                curr = { ...next };
+            }
+        }
+        segments.push(emitRaggedSegment(pyramid, curr, targetBin, input.filter ?? {}));
+    }
+    const rawWm = effective[pyramid.tiers[0].name];
+    const authoritativeEnd = rawWm < to ? rawWm : null;
+    return {
+        ...(exactTier !== undefined ? { outputTier: exactTier } : {}),
+        outputBin: targetBin,
+        segments,
+        authoritativeEnd,
+        visibleRange: { from, to },
+        smoothing: smoothing
+            ? {
+                smoothBin: smoothing.smoothBin,
+                smoothBinCount: smoothing.smoothBinCount,
+                smoothMode,
+                smoothSourceTier: exactTier?.name ?? `<ragged:${targetBin}>`,
+            }
+            : null,
+    };
+}
+// Greedy segment-tree pack of `[startMs, endMs)`, watermark flavor: at the
+// coarsest tier, take the run of grid-aligned atoms fully inside the
+// interval and sealed (`effective` ≥ atom end, `earliest` ≤ atom start);
+// recurse the edge residues with finer tiers. Day-divisor tiers may append
+// a trailing atom clipped by `effective`/`endMs` — their rows can't
+// straddle a day (hence calendar-bin) boundary, so partial-seal inclusion
+// is the main walk's clip-to-effective semantic. Multi-day tiers stay
+// strictly sealed-and-fully-inside (a mid-period 14d row could otherwise
+// pull cross-boundary data into the target bin). Uncovered residue is
+// dropped — watermark coverage is edge-monotone, so residues only occur at
+// the genesis/tip edges.
+function packCalendarWatermark(tiers, effective, earliest, startMs, endMs, tierIdx, out) {
+    if (startMs >= endMs || tierIdx >= tiers.length)
+        return;
+    const { tier, ms } = tiers[tierIdx];
+    const eff = effective[tier.name].getTime();
+    const earlyDate = earliest[tier.name];
+    const early = earlyDate === undefined ? -Infinity : earlyDate.getTime();
+    const runStart = Math.ceil(Math.max(startMs, early) / ms) * ms;
+    const runEnd = Math.floor(Math.min(endMs, eff) / ms) * ms;
+    let covered = null;
+    if (runStart < runEnd) {
+        out.push({ tier, absStartMs: runStart, absEndMs: runEnd });
+        covered = { start: runStart, end: runEnd };
+    }
+    if (DAY_MS % ms === 0) {
+        const clipTo = Math.min(endMs, eff);
+        const pStart = Math.floor(clipTo / ms) * ms;
+        if (pStart < clipTo && pStart >= startMs && early <= pStart
+            && (covered === null || pStart >= covered.end)) {
+            out.push({ tier, absStartMs: pStart, absEndMs: clipTo });
+            covered = { start: covered?.start ?? pStart, end: clipTo };
+        }
+    }
+    if (covered === null) {
+        packCalendarWatermark(tiers, effective, earliest, startMs, endMs, tierIdx + 1, out);
+        return;
+    }
+    packCalendarWatermark(tiers, effective, earliest, startMs, covered.start, tierIdx + 1, out);
+    packCalendarWatermark(tiers, effective, earliest, covered.end, endMs, tierIdx + 1, out);
 }
 function gcd(a, b) {
     while (b !== 0) {
@@ -721,7 +886,7 @@ function planRaggedFromInventory(pyramid, input, targetBin, tierInventory) {
     const { from, to } = input.range;
     const tParsed = parseDuration(targetBin);
     if (tParsed.unit === 'mo' || tParsed.unit === 'y') {
-        throw new Error(`planQueryFromInventory: targetBin '${targetBin}' is calendar-variable; ragged decomposition supports fixed-width units only`);
+        return planRaggedCalendarFromInventory(pyramid, input, targetBin, tParsed, tierInventory);
     }
     const targetBinMs = fixedDurationMs(targetBin);
     const eligibleTiers = [];
@@ -818,52 +983,17 @@ function planRaggedFromInventory(pyramid, input, targetBin, tierInventory) {
     const segments = [];
     if (atoms.length > 0) {
         let curr = { ...atoms[0] };
-        const emit = (range) => {
-            const rows = tierInventory.get(range.tier.name) ?? [];
-            // Walk the range through inventory in period order, picking one
-            // tile per stretch. Under min-cover a single largest-fitting tile
-            // usually spans the whole coalesced range.
-            const keys = [];
-            let chosenShardDur = range.tier.shards[range.tier.shards.length - 1];
-            let widestOrder = -1;
-            const rank = shardOrderIndex(range.tier);
-            let cur = range.absStartMs;
-            while (cur < range.absEndMs) {
-                const covering = coveringRows(rows, cur);
-                if (covering.length === 0)
-                    break; // should not happen — atoms already checked
-                const chosen = pickBestCovering(covering, range.tier);
-                keys.push(chosen.key);
-                const r = rank.get(chosen.shardDur) ?? -1;
-                if (r > widestOrder) {
-                    widestOrder = r;
-                    chosenShardDur = chosen.shardDur;
-                }
-                const nextCur = chosen.periodEnd.getTime();
-                if (nextCur <= cur)
-                    break; // defensive; prevents infinite loop
-                cur = nextCur;
-            }
-            segments.push({
-                from: new Date(range.absStartMs),
-                to: new Date(range.absEndMs),
-                shardTier: range.tier,
-                shardDur: chosenShardDur,
-                keys,
-                reaggregate: fixedDurationMs(range.tier.bin) !== targetBinMs,
-            });
-        };
         for (let i = 1; i < atoms.length; i++) {
             const next = atoms[i];
             if (next.tier === curr.tier && next.absStartMs === curr.absEndMs) {
                 curr.absEndMs = next.absEndMs;
             }
             else {
-                emit(curr);
+                segments.push(inventoryRaggedSegment(tierInventory, curr, targetBin));
                 curr = { ...next };
             }
         }
-        emit(curr);
+        segments.push(inventoryRaggedSegment(tierInventory, curr, targetBin));
     }
     // authoritativeEnd — watermark-derived (same as planRagged).
     const effective = effectiveLargestShardWatermarks(pyramid.tiers, input.watermarks ?? {}, plannedTo);
@@ -884,5 +1014,144 @@ function planRaggedFromInventory(pyramid, input, targetBin, tierInventory) {
             }
             : null,
     };
+}
+// Materialize a coalesced ragged range against inventory: walk period
+// order picking one covering tile per stretch. Under min-cover a single
+// largest-fitting tile usually spans the whole coalesced range.
+function inventoryRaggedSegment(tierInventory, range, targetBin) {
+    const rows = tierInventory.get(range.tier.name) ?? [];
+    const keys = [];
+    let chosenShardDur = range.tier.shards[range.tier.shards.length - 1];
+    let widestOrder = -1;
+    const rank = shardOrderIndex(range.tier);
+    let cur = range.absStartMs;
+    while (cur < range.absEndMs) {
+        const covering = coveringRows(rows, cur);
+        if (covering.length === 0)
+            break; // should not happen — atoms already checked
+        const chosen = pickBestCovering(covering, range.tier);
+        keys.push(chosen.key);
+        const r = rank.get(chosen.shardDur) ?? -1;
+        if (r > widestOrder) {
+            widestOrder = r;
+            chosenShardDur = chosen.shardDur;
+        }
+        const nextCur = chosen.periodEnd.getTime();
+        if (nextCur <= cur)
+            break; // defensive; prevents infinite loop
+        cur = nextCur;
+    }
+    return {
+        from: new Date(range.absStartMs),
+        to: new Date(range.absEndMs),
+        shardTier: range.tier,
+        shardDur: chosenShardDur,
+        keys,
+        reaggregate: !spanWidthEquals(range.tier.bin, targetBin),
+    };
+}
+// Calendar-target ragged planner, inventory flavor. Same bin walk as
+// `planRaggedCalendar`, but coverage is decided by registered shards:
+//   - `exactTier` serves a bin when a registered shard fully contains it
+//     AND the tier's effective watermark seals the bin — registration is
+//     shard-granular (a half-filled `1y`-of-months shard registers with
+//     full-period bounds), so the watermark is what keeps the un-closed
+//     tip falling through to finer tiers.
+//   - Het-tiling tests each atom against registered tiles individually
+//     (registration isn't interval-monotone), recursing interior gaps to
+//     finer tiers; unregistered residue is dropped, mirroring the fixed
+//     inventory path's "unlisted is intentional".
+function planRaggedCalendarFromInventory(pyramid, input, targetBin, targetSpan, tierInventory) {
+    const { from, to } = input.range;
+    const { exactTier, eligible } = calendarEligibleTiers(pyramid, targetBin, 'planQueryFromInventory');
+    const smoothMode = input.smoothMode ?? 'centered';
+    const smoothing = input.smoothing !== undefined
+        ? resolveSmoothing(input.smoothing, targetBin, from, to, smoothMode)
+        : null;
+    const { from: plannedFrom, to: plannedTo } = smoothing
+        ? extendForSmoothing(from, to, targetBin, smoothing.smoothBinCount, smoothMode)
+        : { from, to };
+    const effective = effectiveLargestShardWatermarks(pyramid.tiers, input.watermarks ?? {}, plannedTo);
+    const atoms = [];
+    let binStart = floorToSpan(plannedFrom, targetSpan);
+    while (binStart < plannedTo) {
+        const binEnd = addSpan(binStart, targetSpan);
+        const a = binStart.getTime();
+        const b = binEnd.getTime();
+        const exactRows = exactTier !== undefined ? tierInventory.get(exactTier.name) : undefined;
+        const exactCovered = exactTier !== undefined
+            && exactRows !== undefined
+            && effective[exactTier.name].getTime() >= b
+            && fullyContainingRows(exactRows, a, b).length > 0;
+        if (exactCovered) {
+            atoms.push({ tier: exactTier, absStartMs: a, absEndMs: b });
+        }
+        else {
+            const packed = [];
+            packCalendarInventory(eligible, tierInventory, a, b, 0, packed);
+            packed.sort((x, y) => x.absStartMs - y.absStartMs);
+            atoms.push(...packed);
+        }
+        binStart = binEnd;
+    }
+    const segments = [];
+    if (atoms.length > 0) {
+        let curr = { ...atoms[0] };
+        for (let i = 1; i < atoms.length; i++) {
+            const next = atoms[i];
+            if (next.tier === curr.tier && next.absStartMs === curr.absEndMs) {
+                curr.absEndMs = next.absEndMs;
+            }
+            else {
+                segments.push(inventoryRaggedSegment(tierInventory, curr, targetBin));
+                curr = { ...next };
+            }
+        }
+        segments.push(inventoryRaggedSegment(tierInventory, curr, targetBin));
+    }
+    const rawWm = effective[pyramid.tiers[0].name];
+    const authoritativeEnd = rawWm < to ? rawWm : null;
+    return {
+        ...(exactTier !== undefined ? { outputTier: exactTier } : {}),
+        outputBin: targetBin,
+        segments,
+        authoritativeEnd,
+        visibleRange: { from, to },
+        smoothing: smoothing
+            ? {
+                smoothBin: smoothing.smoothBin,
+                smoothBinCount: smoothing.smoothBinCount,
+                smoothMode,
+                smoothSourceTier: exactTier?.name ?? `<ragged:${targetBin}>`,
+            }
+            : null,
+    };
+}
+// Greedy pack of `[startMs, endMs)`, inventory flavor: at the coarsest
+// tier, take every grid-aligned atom fully inside the interval that a
+// registered tile fully contains; each uncovered stretch (including the
+// unaligned edges) recurses to finer tiers. Unlike the watermark flavor,
+// coverage here isn't interval-monotone, so atoms are tested one by one
+// and interior gaps recurse too.
+function packCalendarInventory(tiers, tierInventory, startMs, endMs, tierIdx, out) {
+    if (startMs >= endMs || tierIdx >= tiers.length)
+        return;
+    const { tier, ms } = tiers[tierIdx];
+    const rows = tierInventory.get(tier.name);
+    if (rows === undefined || rows.length === 0) {
+        packCalendarInventory(tiers, tierInventory, startMs, endMs, tierIdx + 1, out);
+        return;
+    }
+    let gapStart = startMs;
+    for (let c = Math.ceil(startMs / ms) * ms; c + ms <= endMs; c += ms) {
+        if (fullyContainingRows(rows, c, c + ms).length === 0)
+            continue;
+        out.push({ tier, absStartMs: c, absEndMs: c + ms });
+        if (gapStart < c)
+            packCalendarInventory(tiers, tierInventory, gapStart, c, tierIdx + 1, out);
+        gapStart = c + ms;
+    }
+    if (gapStart < endMs)
+        packCalendarInventory(tiers, tierInventory, gapStart, endMs, tierIdx + 1, out);
 }
 //# sourceMappingURL=planner.js.map

@@ -19,6 +19,8 @@ Note for ctbk (journal-vs-registry): the D1 split-brain incident (`docs/incident
 
 **Pushed (2026-08-05, pyrmts session): ctbk re-pin SHAs.** `main` = `ce770e7` (carries the invalidation impl + `TiledSource` chassis) — bump the `pyproject.toml` uv source rev to it. `build-dist.yml` ran green but ended "No changes to dist branch": the `dist` branch packs only the JS packages, and this push was Python + specs only — JS `pds gh` pins stay at `dist` SHA `e6d29ca`.
 
+**ctbk burn-in: prod synthetic repair green (2026-08-05, ctbk session).** Adoption shipped (`ctbk gbfs invalidate` CLI, repair-generation edge-cache keying off the journal's R2 mtime, `RAW_FINALITY_S` → `CRON_JITTER_GRACE_S=120`) and deployed (workers + Lambda image on the `ce770e7` pin). Live E2E on `avail-v5`: a 1-minute invalidate → next 5-min tick rebuilt all 13 overlapping shards in place, fine→coarse, **byte-identical etags** (same inputs → same bytes), journal pruned 4s after the coarsest rebuild (~5.5 min append→pruned), edge cache rotated, `/health` clean. The CAS journal, `discover_gaps(invalidations=…)`, per-key `overwrite_keys` bypass, and prune all behaved exactly as specced on prod data — from ctbk's side this spec is done (a passive week-long soak continues).
+
 ## Motivation
 
 Consumers occasionally get **new data for an already-built interval**: a WAL minute recovered from a secondary source, a backfill correcting a bad ingest window, a redundant poller landing a minute late, or a vocab/denorm repair that changes how old raw rows expand. Today the engine has only two blunt tools:

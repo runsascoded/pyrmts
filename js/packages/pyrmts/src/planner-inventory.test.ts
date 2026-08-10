@@ -312,3 +312,110 @@ describe('planQueryFromInventory: min-cover phantom-key regression', () => {
     expect(segments(plan)).toEqual([])
   })
 })
+
+describe('planQueryFromInventory: calendar targetBin', () => {
+  // Six 1d@7d tiles covering [Jun 29, Aug 10) — full July plus the first
+  // nine August days (the live tip's registered coverage).
+  const dayTiles: RecordedShard[] = [
+    shard('1d', '7d', '2026-06-29T00:00:00Z', '2026-07-06T00:00:00Z'),
+    shard('1d', '7d', '2026-07-06T00:00:00Z', '2026-07-13T00:00:00Z'),
+    shard('1d', '7d', '2026-07-13T00:00:00Z', '2026-07-20T00:00:00Z'),
+    shard('1d', '7d', '2026-07-20T00:00:00Z', '2026-07-27T00:00:00Z'),
+    shard('1d', '7d', '2026-07-27T00:00:00Z', '2026-08-03T00:00:00Z'),
+    shard('1d', '7d', '2026-08-03T00:00:00Z', '2026-08-10T00:00:00Z'),
+  ]
+
+  test('month bins pack from registered day tiles; unregistered tail drops', () => {
+    // July packs fully at the 1d tier (every day atom is contained in a
+    // registered 7d tile); August packs Aug 1–9 and drops Aug 10+ (no
+    // tile). The 1d runs coalesce across the month boundary into one
+    // segment keyed to all six tiles.
+    const plan = planQueryFromInventory(
+      availLike,
+      {
+        range: { from: d('2026-07-01T00:00:00Z'), to: d('2026-09-01T00:00:00Z') },
+        binBudget: 1,
+        targetBin: '1mo',
+      },
+      dayTiles,
+    )
+    expect(plan.outputTier).toBeUndefined()
+    expect(plan.outputBin).toBe('1mo')
+    expect(segments(plan)).toEqual([
+      {
+        from: '2026-07-01T00:00:00.000Z',
+        to: '2026-08-10T00:00:00.000Z',
+        tier: '1d',
+        shardDur: '7d',
+        keys: [
+          'avail-v3/1d/7d/2026-06-29T00.parquet',
+          'avail-v3/1d/7d/2026-07-06T00.parquet',
+          'avail-v3/1d/7d/2026-07-13T00.parquet',
+          'avail-v3/1d/7d/2026-07-20T00.parquet',
+          'avail-v3/1d/7d/2026-07-27T00.parquet',
+          'avail-v3/1d/7d/2026-08-03T00.parquet',
+        ],
+        reaggregate: true,
+      },
+    ])
+  })
+
+  test('registered calendar tier serves sealed months; watermark gates the tip', () => {
+    // A 1y-of-months shard registers with full-period bounds even while
+    // half-filled, so registration alone would swallow August. The mo
+    // watermark (sealed through Aug 1) keeps the un-closed tip falling
+    // through to the registered day tiles.
+    const availCal: Pyramid = {
+      ...availLike,
+      tiers: [...availLike.tiers, { name: 'mo', bin: '1mo', shards: ['1y'] }],
+    }
+    const plan = planQueryFromInventory(
+      availCal,
+      {
+        range: { from: d('2026-06-01T00:00:00Z'), to: d('2026-09-01T00:00:00Z') },
+        binBudget: 1,
+        targetBin: '1mo',
+        watermarks: { 'mo@1y': d('2026-08-01T00:00:00Z') },
+      },
+      [
+        shard('mo', '1y', '2026-01-01T00:00:00Z', '2027-01-01T00:00:00Z'),
+        ...dayTiles,
+      ],
+    )
+    expect(plan.outputTier?.name).toBe('mo')
+    expect(segments(plan)).toEqual([
+      {
+        from: '2026-06-01T00:00:00.000Z',
+        to: '2026-08-01T00:00:00.000Z',
+        tier: 'mo',
+        shardDur: '1y',
+        keys: ['avail-v3/mo/1y/2026-01-01T00.parquet'],
+        reaggregate: false,
+      },
+      {
+        from: '2026-08-01T00:00:00.000Z',
+        to: '2026-08-10T00:00:00.000Z',
+        tier: '1d',
+        shardDur: '7d',
+        keys: [
+          'avail-v3/1d/7d/2026-07-27T00.parquet',
+          'avail-v3/1d/7d/2026-08-03T00.parquet',
+        ],
+        reaggregate: true,
+      },
+    ])
+  })
+
+  test('calendar targetBin with empty inventory yields no segments', () => {
+    const plan = planQueryFromInventory(
+      availLike,
+      {
+        range: { from: d('2026-07-01T00:00:00Z'), to: d('2026-08-01T00:00:00Z') },
+        binBudget: 1,
+        targetBin: '1mo',
+      },
+      [],
+    )
+    expect(segments(plan)).toEqual([])
+  })
+})

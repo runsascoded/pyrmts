@@ -736,13 +736,25 @@ describe('planQuery: targetBin (ragged decomposition)', () => {
     })).toThrow(/no decomposition of targetBin '5min'.*gcd 120000 doesn't divide 300000/)
   })
 
-  test('throws for calendar-variable targetBin (mo/y)', () => {
-    expect(() => planQuery(awair, {
+  test('calendar targetBin served whole from a same-width calendar tier', () => {
+    // awair has mo1 (bin 1mo). No watermarks → effective = plannedTo, which
+    // seals both January and February → one coalesced mo1 segment, no
+    // reaggregation. (Het-tiling cases live in the calendar describe below.)
+    const plan = planQuery(awair, {
       range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-03-01T00:00:00Z') },
       binBudget: 1000,
       targetBin: '1mo',
       filter: { device_id: 17617 },
-    })).toThrow(/calendar-variable/)
+    })
+    expect(plan.outputBin).toBe('1mo')
+    expect(plan.outputTier?.name).toBe('mo1')
+    expect(segments(plan)).toEqual([{
+      from: '2026-01-01T00:00:00.000Z',
+      to: '2026-03-01T00:00:00.000Z',
+      tier: 'mo1',
+      keys: ['awair-17617/mo1/2026.parquet'],
+      reaggregate: false,
+    }])
   })
 
   test('throws on a specific bin where alignment dead-ends (gcd ok but per-bin DP fails)', () => {
@@ -781,6 +793,155 @@ describe('planQuery: targetBin (ragged decomposition)', () => {
     // it from a real tier name; consumers needing a real tier need to read
     // segments[].shardTier instead.
     expect(plan.smoothing?.smoothSourceTier).toBe('<ragged:5min>')
+  })
+})
+
+describe('planQuery: calendar targetBin (het-tiling)', () => {
+  // Whole-day fixed ladder — the spec's {1d, 3d, 7d, 14d} family
+  // (`specs/calendar-units.md`). Calendar targets pack each month bin from
+  // these, greedy coarsest-first fully-inside (segment-tree style), with
+  // `1d` as the exact base case. Expected atoms below are hand-derived from
+  // epoch-day arithmetic (2026-01-01 = epoch day 20454, divisible by 14
+  // and 7; 2026-02-01 = 20485).
+  const days: Pyramid = {
+    storage: mockStorage,
+    keyTemplate: 'toy/{tier}/{shard}/{period}.parquet',
+    axis: 'time',
+    binCol: 'ts',
+    dims: [],
+    metrics: [{ name: 'v', monoid: 'sum' }],
+    tiers: [
+      { name: 'd1', bin: '1d', shards: ['1y'] },
+      { name: 'd3', bin: '3d', shards: ['1y'] },
+      { name: 'd7', bin: '7d', shards: ['1y'] },
+      { name: 'd14', bin: '14d', shards: ['1y'] },
+    ],
+  }
+
+  test('packs one month coarsest-first with edge residues recursing finer', () => {
+    // Feb 2026 = epoch days [20485, 20513). 14d grid hits 20496/20510 → one
+    // fully-inside 14d atom Feb 12–26. Left residue Feb 1–12: 7d grid
+    // aligns at 20489 (Feb 5) → 7d Feb 5–12; no 3d atom fits [Feb 1, Feb 5)
+    // → 1d base. Right residue Feb 26–Mar 1: 1d.
+    const plan = planQuery(days, {
+      range: { from: d('2026-02-01T00:00:00Z'), to: d('2026-03-01T00:00:00Z') },
+      binBudget: 1000,
+      targetBin: '1mo',
+    })
+    expect(plan.outputTier).toBeUndefined()
+    expect(plan.outputBin).toBe('1mo')
+    expect(segments(plan)).toEqual([
+      { from: '2026-02-01T00:00:00.000Z', to: '2026-02-05T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-02-05T00:00:00.000Z', to: '2026-02-12T00:00:00.000Z', tier: 'd7', keys: ['toy/d7/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-02-12T00:00:00.000Z', to: '2026-02-26T00:00:00.000Z', tier: 'd14', keys: ['toy/d14/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-02-26T00:00:00.000Z', to: '2026-03-01T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+    ])
+  })
+
+  test('adjacent same-tier atoms coalesce across the month-bin boundary', () => {
+    // January pack: 14d run Jan 1–29 (Jan 1 is 14d-grid-aligned), 1d
+    // Jan 29–Feb 1. That trailing 1d run merges with February's leading 1d
+    // run (Feb 1–5) into one segment — reaggregation floors each row to its
+    // own month, so cross-bin segments are safe.
+    const plan = planQuery(days, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-03-01T00:00:00Z') },
+      binBudget: 1000,
+      targetBin: '1mo',
+    })
+    expect(segments(plan)).toEqual([
+      { from: '2026-01-01T00:00:00.000Z', to: '2026-01-29T00:00:00.000Z', tier: 'd14', keys: ['toy/d14/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-01-29T00:00:00.000Z', to: '2026-02-05T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-02-05T00:00:00.000Z', to: '2026-02-12T00:00:00.000Z', tier: 'd7', keys: ['toy/d7/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-02-12T00:00:00.000Z', to: '2026-02-26T00:00:00.000Z', tier: 'd14', keys: ['toy/d14/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-02-26T00:00:00.000Z', to: '2026-03-01T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+    ])
+  })
+
+  test('materialized calendar tier serves sealed months; tip het-tiles from day tiers', () => {
+    // mo sealed through Aug 1, day tiers through Aug 10, query to Aug 15.
+    // Jun+Jul served whole from mo (coalesced, no reaggregation); August
+    // het-tiles [Aug 1, Aug 10): 1d Aug 1–2, 3d Aug 2–8 (grid 20667/20673),
+    // 1d Aug 8–10. Aug 10–15 is past every watermark → dropped.
+    const daysMo: Pyramid = {
+      ...days,
+      tiers: [...days.tiers, { name: 'mo', bin: '1mo', shards: ['1y'] }],
+    }
+    const plan = planQuery(daysMo, {
+      range: { from: d('2026-06-01T00:00:00Z'), to: d('2026-08-15T00:00:00Z') },
+      binBudget: 1000,
+      targetBin: '1mo',
+      watermarks: {
+        'mo@1y': d('2026-08-01T00:00:00Z'),
+        'd1@1y': d('2026-08-10T00:00:00Z'),
+      },
+    })
+    expect(plan.outputTier?.name).toBe('mo')
+    expect(segments(plan)).toEqual([
+      { from: '2026-06-01T00:00:00.000Z', to: '2026-08-01T00:00:00.000Z', tier: 'mo', keys: ['toy/mo/1y/2026.parquet'], reaggregate: false },
+      { from: '2026-08-01T00:00:00.000Z', to: '2026-08-02T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-08-02T00:00:00.000Z', to: '2026-08-08T00:00:00.000Z', tier: 'd3', keys: ['toy/d3/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-08-08T00:00:00.000Z', to: '2026-08-10T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+    ])
+    expect(plan.authoritativeEnd?.toISOString()).toBe('2026-08-10T00:00:00.000Z')
+  })
+
+  test('mid-day day-tier watermark clips the trailing 1d atom (partial-seal tip)', () => {
+    // d1 sealed to Aug 10 12:00 (intra-day partial fill). The 1d run ends
+    // at the last whole sealed day (Aug 10 00:00); a clipped 1d atom
+    // [Aug 10, Aug 10T12:00) rides on top — day rows can't straddle the
+    // month boundary, so this is the main walk's clip-to-effective
+    // semantic. Coalesces with the run.
+    const plan = planQuery(days, {
+      range: { from: d('2026-08-01T00:00:00Z'), to: d('2026-09-01T00:00:00Z') },
+      binBudget: 1000,
+      targetBin: '1mo',
+      watermarks: { 'd1@1y': d('2026-08-10T12:00:00Z') },
+    })
+    expect(segments(plan)).toEqual([
+      { from: '2026-08-01T00:00:00.000Z', to: '2026-08-02T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-08-02T00:00:00.000Z', to: '2026-08-08T00:00:00.000Z', tier: 'd3', keys: ['toy/d3/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-08-08T00:00:00.000Z', to: '2026-08-10T12:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+    ])
+  })
+
+  test('earliest watermark clips the genesis month to a leading residue drop', () => {
+    // Genesis Feb 5 (propagates from d1 to all coarser tiers): the Feb bin
+    // starts packing at Feb 5 — same 7d/14d atoms as the full-month pack,
+    // but [Feb 1, Feb 5) has no eligible coverage and is dropped.
+    const plan = planQuery(days, {
+      range: { from: d('2026-02-01T00:00:00Z'), to: d('2026-03-01T00:00:00Z') },
+      binBudget: 1000,
+      targetBin: '1mo',
+      earliestWatermarks: { d1: d('2026-02-05T00:00:00Z') },
+    })
+    expect(segments(plan)).toEqual([
+      { from: '2026-02-05T00:00:00.000Z', to: '2026-02-12T00:00:00.000Z', tier: 'd7', keys: ['toy/d7/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-02-12T00:00:00.000Z', to: '2026-02-26T00:00:00.000Z', tier: 'd14', keys: ['toy/d14/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-02-26T00:00:00.000Z', to: '2026-03-01T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+    ])
+  })
+
+  test('throws without a day-divisor base tier or a same-width calendar tier', () => {
+    const noBase: Pyramid = {
+      ...days,
+      tiers: [{ name: 'h7', bin: '7h', shards: ['1y'] }],
+    }
+    expect(() => planQuery(noBase, {
+      range: { from: d('2026-02-01T00:00:00Z'), to: d('2026-03-01T00:00:00Z') },
+      binBudget: 1000,
+      targetBin: '1mo',
+    })).toThrow(
+      "planQuery: calendar targetBin '1mo' needs a base tier whose bin divides 1d " +
+      '(calendar boundaries are day-aligned; pyramid tiers: 7h)',
+    )
+  })
+
+  test('rejects month spans that do not tile a year', () => {
+    expect(() => planQuery(days, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2027-01-01T00:00:00Z') },
+      binBudget: 1000,
+      targetBin: '5mo',
+    })).toThrow("Month-span 5mo doesn't tile a year evenly (12 % 5 !== 0)")
   })
 })
 

@@ -1,6 +1,6 @@
 # Calendar units: multi-unit spans + calendar-target het-tiling (ctbk #122)
 
-Status: **phase 1 implemented (Python + parity fixture + JS ladder validation); phase 2 (TS ragged calendar packing) open** (spec 2026-08-07, ctbk session; phase 1 impl 2026-08-10, pyrmts session). Unblocks ctbk rides-v5 calendar tiers (`specs/rides-v5.md` over there) and, longer-term, the avail multi-unit calendar shard target ladder (`ctbk/specs/pyramid-cascade.md` §target-vs-shipped).
+Status: **phases 1 + 2 implemented** (spec 2026-08-07, ctbk session; phase 1 impl 2026-08-10, phase 2 impl 2026-08-10, pyrmts session). Unblocks ctbk rides-v5 calendar tiers (`specs/rides-v5.md` over there) and, longer-term, the avail multi-unit calendar shard target ladder (`ctbk/specs/pyramid-cascade.md` §target-vs-shipped). Awaiting ctbk downstream integration from this checkout (per §Sequencing) before `r/main` push + re-pin SHA recording.
 
 **pyrmts status (2026-08-10): phase 1 landed.** Python 200 tests green (+14), JS 419 (+8), `tsc` clean; not yet pushed — per §Sequencing, ctbk runs downstream integration from this checkout before the `r/main` push.
 
@@ -12,6 +12,16 @@ Status: **phase 1 implemented (Python + parity fixture + JS ladder validation); 
 - Gap discovery: multi-unit rungs work unmodified in both languages; twin tests (`1mo`-bin tier, `[1y, 4y]` rungs, mid-year genesis clips `effective_start`, live tip descends `4y`→`1y` and leaves the sub-`1y` tail to finer tiers) assert the identical cover.
 - Engine calendar build (`test_calendar.py`): `1mo/3mo/1y`-bin tiers cascade (`1mo ← 15min`, `3mo ← 1mo`, `1y ← 3mo`) over full leap-2024, window-split-invariant byte-for-byte (`4d` vs `32d` windows), matching an independent hand-derived anchor; keys come out `pyr/mo/1y/2024.parquet`-shaped. (Test uses bounded synthetic values — the shared fixture's `sumsq = i²` exceeds 2^53 float-exactness at year scale.)
 - Out of scope, unchanged as specced: `_validate_window` (fixed-width ingest windows), `consolidate.py`'s fixed-width wall.
+
+**pyrmts status (2026-08-10, later): phase 2 landed.** JS 432 tests green (+13), `tsc` clean; still not pushed pending ctbk integration.
+
+- `planRagged`/`planRaggedFromInventory` delegate calendar `targetBin` to new `planRaggedCalendar`/`planRaggedCalendarFromInventory` (`planner.ts`): target bins enumerated via `floorToSpan`/`addSpan`; per bin, a materialized calendar tier of exactly the target's width (months-normalized, `1y` ≡ `12mo`) serves the bin whole when covered, else greedy coarsest-first fully-inside het-tiling from whole-day-multiple fixed tiers with edge-residue recursion (`packCalendarWatermark`/`packCalendarInventory`), day-divisor base tier required (throws without one unless an exact calendar tier exists).
+- Watermark flavor: per-atom sealed checks (`effective` ≥ atom end, `earliest` ≤ atom start); day-divisor tiers may emit a trailing atom clipped to `effective` (rows can't straddle the calendar boundary — main-walk clip semantics); multi-day tiers stay strictly sealed-and-fully-inside (a mid-period `14d` row could pull cross-boundary data into the target bin). Uncovered residue drops — only at genesis/tip edges since watermark coverage is edge-monotone.
+- Inventory flavor: per-atom registered-tile containment, interior gaps recurse finer, unregistered residue drops ("unlisted is intentional"). Exact-tier bins additionally require the tier's effective watermark to seal the bin — registration is shard-granular (a half-filled `1y`-of-months shard registers with full-period bounds), so the watermark is what makes the un-closed tip fall through to finer registered tiles.
+- Cross-bin coalescing of adjacent same-tier atoms (reaggregation floors rows individually, so month-boundary-spanning `1d` segments are safe); `stitch` unchanged as predicted.
+- Acceptance #2 (`calendar-ragged.test.ts`): `{1d,3d,7d,14d}` toy pyramid, LCG sum-monoid data over 2023–2024 (leap Feb), `1mo`/`3mo`/`1y` het-tiled plan+stitch exactly equals brute-force 1d→calendar groupby across year/month boundaries.
+- Pinned plan tests both flavors (`planner.test.ts`, `planner-inventory.test.ts`): Feb-2026 pack (`1d/7d/14d/1d`, epoch-day-derived), cross-bin `1d` coalescing, materialized-tier-preferred with het-tiled tip, mid-day partial-seal `1d` clip, genesis `earliest` clip, registered-day-tile tip serving, watermark-gated calendar-tier tip, no-base-tier error, `5mo` rejection.
+- Untouched as specced: `NICE_WIDTHS`, smoothing semantics (`resolveSmoothing` already handled calendar output bins; ragged calendar plans carry `smoothSourceTier` = exact tier name or `<ragged:1mo>` placeholder), fixed-target ragged path (`emitRaggedSegment`/inventory emit refactored to width-normalized `reaggregate` — behavior-identical for fixed).
 
 ## Motivation
 

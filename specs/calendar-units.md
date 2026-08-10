@@ -1,6 +1,8 @@
 # Calendar units: multi-unit spans + calendar-target het-tiling (ctbk #122)
 
-Status: **phases 1 + 2 implemented** (spec 2026-08-07, ctbk session; phase 1 impl 2026-08-10, phase 2 impl 2026-08-10, pyrmts session). Unblocks ctbk rides-v5 calendar tiers (`specs/rides-v5.md` over there) and, longer-term, the avail multi-unit calendar shard target ladder (`ctbk/specs/pyramid-cascade.md` §target-vs-shipped). Awaiting ctbk downstream integration from this checkout (per §Sequencing) before `r/main` push + re-pin SHA recording.
+Status: **phases 1 + 2 implemented; ctbk downstream integration green (Python side) — clear to push `r/main`** (spec 2026-08-07, ctbk session; phase 1 impl 2026-08-10, phase 2 impl 2026-08-10, pyrmts session). Unblocks ctbk rides-v5 calendar tiers (`specs/rides-v5.md` over there) and, longer-term, the avail multi-unit calendar shard target ladder (`ctbk/specs/pyramid-cascade.md` §target-vs-shipped).
+
+**ctbk downstream integration (2026-08-10, ctbk session, this checkout @ `bcb6e4f` local-linked)**: ctbk pytest suite 62/62 green; both `configs/pyramids/rides-v5-{start,end}.yaml` extended with the calendar family (`{1,2,3,6}mo + 1y`, pow-2-year shards per the rides-v5 RESOLVED DESIGN) and parse clean through `parse_pyramid_yaml`; ladder validation correctly rejects `5mo` ("doesn't tile a year evenly"); `list_expected_shards` over genesis→2026-08-10 enumerates sensible calendar covers (e.g. `1mo`: `16y/2000` + `4y/2016` + `2y/2024`; 18 calendar shards/anchor). Not yet exercised from ctbk: engine calendar *build* (needs the r/main push → new engine image → Batch calendar fill) and the TS het-tiling serve path (adopting after push, via `pds`). Push away; record the final SHA here for the ctbk re-pin.
 
 **pyrmts status (2026-08-10): phase 1 landed.** Python 200 tests green (+14), JS 419 (+8), `tsc` clean; not yet pushed — per §Sequencing, ctbk runs downstream integration from this checkout before the `r/main` push.
 

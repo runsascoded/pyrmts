@@ -91,3 +91,56 @@ def test_to_dot():
         '  "h" -> "d";',
         '}',
     ]
+
+
+def test_divides_calendar_multi_unit():
+    """`specs/calendar-units.md` § Python changes #2: the `_divides` truth
+    table for multi-unit calendar spans."""
+    from pyrmts_engine.plan import _divides
+
+    table = [
+        ('1d', '1mo'), ('1h', '1mo'), ('1mo', '3mo'), ('1mo', '1y'),
+        ('3mo', '6mo'), ('6mo', '1y'), ('1y', '4y'),
+        ('3d', '1mo'), ('2mo', '3mo'), ('1mo', '1d'), ('4y', '1y'),
+    ]
+    assert [(p, t, _divides(p, t)) for p, t in table] == [
+        ('1d', '1mo', True), ('1h', '1mo', True), ('1mo', '3mo', True), ('1mo', '1y', True),
+        ('3mo', '6mo', True), ('6mo', '1y', True), ('1y', '4y', True),
+        ('3d', '1mo', False), ('2mo', '3mo', False), ('1mo', '1d', False), ('4y', '1y', False),
+    ]
+
+
+def test_bin_floor_expr_calendar_parity():
+    """`bin_floor_expr` reproduces the normative calendar-floor fixture for
+    every calendar span — the regression pin for the polars `Ny` anchor
+    divergence (`dt.truncate('4y')` is epoch-anchored: 1970-01-01 would
+    floor to 1970, the contract says 1968)."""
+    import json
+    from datetime import datetime
+    from pathlib import Path
+
+    import polars as pl
+
+    from pyrmts_engine.plan import bin_floor_expr
+
+    fixture = json.loads(
+        (Path(__file__).parents[3] / 'fixtures' / 'calendar-floors.json').read_text()
+    )
+    by_span: dict[str, list[dict]] = {}
+    for c in fixture['cases']:
+        by_span.setdefault(c['span'], []).append(c)
+    for span, cases in by_span.items():
+        df = pl.DataFrame({
+            'dt': [int(datetime.fromisoformat(c['t']).timestamp() * 1000) for c in cases],
+        })
+        floored = df.select(bin_floor_expr('dt', span).alias('f'))['f'].to_list()
+        expected = [int(datetime.fromisoformat(c['floor']).timestamp() * 1000) for c in cases]
+        assert (span, floored) == (span, expected)
+
+
+def test_bin_floor_expr_month_span_must_tile_year():
+    from pyrmts_engine.plan import bin_floor_expr
+
+    with pytest.raises(ValueError) as exc:
+        bin_floor_expr('dt', '5mo')
+    assert str(exc.value) == "Month-span 5mo doesn't tile a year evenly (12 % 5 !== 0)"

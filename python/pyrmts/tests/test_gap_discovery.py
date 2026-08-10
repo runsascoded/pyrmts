@@ -262,3 +262,28 @@ def test_no_emitted_tile_has_period_end_past_to():
     for s in got:
         assert s.period_end <= to
         assert s.effective_end == s.period_end
+
+
+def test_multi_unit_calendar_rungs_mid_year_genesis_and_tip():
+    """`specs/calendar-units.md` § Python changes #4: `1mo`-bin tier with
+    `[1y, 4y]` rungs. Genesis mid-year → the straddling `4y` max tile is
+    emitted with `effective_start` clipped; the live-tip remainder descends
+    to `1y` tiles fully inside the range, and the sub-`1y` tail is left to
+    finer tiers."""
+    p = _pyramid([Tier(name='1mo', bin='1mo', shards=('1y', '4y'))])
+    got = list_expected_shards(p, (
+        datetime(2021, 7, 1, tzinfo=UTC),
+        datetime(2026, 3, 1, tzinfo=UTC),
+    ))
+    assert [
+        (s.shard_dur, s.period_start.isoformat(), s.period_end.isoformat(),
+         s.effective_start.isoformat(), s.effective_end.isoformat())
+        for s in got
+    ] == [
+        ('4y', '2020-01-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00',
+         '2021-07-01T00:00:00+00:00', '2024-01-01T00:00:00+00:00'),
+        ('1y', '2024-01-01T00:00:00+00:00', '2025-01-01T00:00:00+00:00',
+         '2024-01-01T00:00:00+00:00', '2025-01-01T00:00:00+00:00'),
+        ('1y', '2025-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',
+         '2025-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+    ]

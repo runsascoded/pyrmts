@@ -69,12 +69,25 @@ def _divides(p_bin: str, t_bin: str) -> bool:
 def bin_floor_expr(col: str, bin_dur: str) -> pl.Expr:
     """Polars expression flooring an epoch-ms column to `bin_dur` starts."""
     span = parse_duration(bin_dur)
-    if span.unit in ('mo', 'y'):
-        if span.count != 1:
-            raise ValueError(f"Multi-unit calendar bins not supported: {bin_dur}")
+    if span.unit == 'mo':
+        if 12 % span.count != 0:
+            raise ValueError(
+                f"Month-span {span.count}mo doesn't tile a year evenly (12 % {span.count} !== 0)"
+            )
+        # truncate('Nmo') is epoch-anchored, which matches the contract's
+        # year-anchoring exactly when 12 % N == 0 (1970-01 is a January).
         return (
             pl.col(col).cast(pl.Datetime('ms'))
-            .dt.truncate(f"1{span.unit}")
+            .dt.truncate(f"{span.count}mo")
+            .cast(pl.Int64)
+        )
+    if span.unit == 'y':
+        # NOT truncate('Ny'): polars anchors multi-year at the epoch (1970),
+        # the contract (JS `floorToSpan`) is year-0 anchored — `4y` → 2024,
+        # not 2026. Floor via year arithmetic instead.
+        dt = pl.col(col).cast(pl.Datetime('ms'))
+        return (
+            pl.datetime(dt.dt.year() // span.count * span.count, 1, 1, time_unit='ms')
             .cast(pl.Int64)
         )
     bin_ms = span.count * UNIT_MS[span.unit]

@@ -1,6 +1,17 @@
 # Calendar units: multi-unit spans + calendar-target het-tiling (ctbk #122)
 
-Status: **draft — spec ask from ctbk session** (2026-08-07). Unblocks ctbk rides-v5 calendar tiers (`specs/rides-v5.md` over there) and, longer-term, the avail multi-unit calendar shard target ladder (`ctbk/specs/pyramid-cascade.md` §target-vs-shipped).
+Status: **phase 1 implemented (Python + parity fixture + JS ladder validation); phase 2 (TS ragged calendar packing) open** (spec 2026-08-07, ctbk session; phase 1 impl 2026-08-10, pyrmts session). Unblocks ctbk rides-v5 calendar tiers (`specs/rides-v5.md` over there) and, longer-term, the avail multi-unit calendar shard target ladder (`ctbk/specs/pyramid-cascade.md` §target-vs-shipped).
+
+**pyrmts status (2026-08-10): phase 1 landed.** Python 200 tests green (+14), JS 419 (+8), `tsc` clean; not yet pushed — per §Sequencing, ctbk runs downstream integration from this checkout before the `r/main` push.
+
+- `floor_to_span`: `Nmo` (validates `12 % N == 0`, same message as JS) + `Ny` (year-0 anchored) per the contract; `ceil_to_span`/`bins_in_range`/`shard_periods_covering`/`format_period` delegate and needed no changes, as predicted.
+- **Parity fixture**: `fixtures/calendar-floors.json` — 77 cases (7 spans × 11 instants: boundaries, leap day, pre-epoch, epoch, 2048), *generated from JS `floorToSpan`* (the deployed reference) and asserted verbatim by both suites (`test_axis.py::test_calendar_floor_parity`, `axis.test.ts`). Sentinel case: `4y` floors 1970-01-01 to **1968** — the exact instant the polars epoch-anchor bug would get wrong.
+- `bin_floor_expr`: `Nmo` via `dt.truncate` (epoch ≡ year anchoring when `12 % N == 0`); `Ny` via year-arithmetic `pl.datetime(year // N * N, 1, 1)` — the divergence was confirmed empirically before fixing (`truncate('4y')`: 2026→2026, 1921→1918; contract: 2024, 1920). `test_plan.py::test_bin_floor_expr_calendar_parity` runs the polars path over all 77 fixture cases.
+- `_divides` verified against the spec's truth table (no code change needed — already calendar-aware).
+- Ladder validation (both languages): calendar-calendar pairs divide in months (`y` ≡ `12mo`), `Nmo` must tile a year, mixed fixed/calendar pairs assert nominal-width (30d/365d) ascension; both-fixed pairs keep the pre-existing exact-ms checks and messages. `[1mo, 3mo, 1y]` accepted, `[2mo, 3mo]` / `5mo` / descending-mixed rejected with pinned messages.
+- Gap discovery: multi-unit rungs work unmodified in both languages; twin tests (`1mo`-bin tier, `[1y, 4y]` rungs, mid-year genesis clips `effective_start`, live tip descends `4y`→`1y` and leaves the sub-`1y` tail to finer tiers) assert the identical cover.
+- Engine calendar build (`test_calendar.py`): `1mo/3mo/1y`-bin tiers cascade (`1mo ← 15min`, `3mo ← 1mo`, `1y ← 3mo`) over full leap-2024, window-split-invariant byte-for-byte (`4d` vs `32d` windows), matching an independent hand-derived anchor; keys come out `pyr/mo/1y/2024.parquet`-shaped. (Test uses bounded synthetic values — the shared fixture's `sumsq = i²` exceeds 2^53 float-exactness at year scale.)
+- Out of scope, unchanged as specced: `_validate_window` (fixed-width ingest windows), `consolidate.py`'s fixed-width wall.
 
 ## Motivation
 

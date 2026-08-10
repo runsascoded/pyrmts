@@ -209,3 +209,63 @@ def test_lambda_shards_must_continue_chain():
     text = EXTRAS_YAML.replace('lambda_shards: [2d, 4d]', 'lambda_shards: [36h]')
     with pytest.raises(ValueError, match=r"shards\[1\] '1d' does not divide shards\[2\] '36h'"):
         parse_pyramid_yaml(text)
+
+
+def _one_tier_yaml(tier_line: str) -> str:
+    return dedent(f"""
+        storage:
+          type: r2
+          bucket: 380nwk
+          key: 'a/{{tier}}/{{period}}.parquet'
+        binCol: ts
+        dims: []
+        metrics:
+          - {{ name: n, monoid: count }}
+        tiers:
+          - {tier_line}
+    """).strip()
+
+
+def test_allows_multi_unit_calendar_chain():
+    """`specs/calendar-units.md`: `[1mo, 3mo, 1y]`-style multi-unit calendar
+    ladders divide in months."""
+    cfg = parse_pyramid_yaml(_one_tier_yaml('{ name: mo, bin: 1mo, shards: [1mo, 3mo, 1y] }'))
+    assert cfg.tiers[0].shards == ('1mo', '3mo', '1y')
+    cfg = parse_pyramid_yaml(_one_tier_yaml('{ name: y, bin: 1y, shards: [1y, 4y] }'))
+    assert cfg.tiers[0].shards == ('1y', '4y')
+
+
+def test_rejects_non_dividing_calendar_rungs():
+    with pytest.raises(ValueError) as exc:
+        parse_pyramid_yaml(_one_tier_yaml('{ name: mo, bin: 1mo, shards: [2mo, 3mo] }'))
+    assert str(exc.value) == (
+        "parse_pyramid_yaml: tiers[0] ('mo'): shards[0] '2mo' does not divide "
+        "shards[1] '3mo' (in months)"
+    )
+
+
+def test_rejects_month_span_not_tiling_year():
+    with pytest.raises(ValueError) as exc:
+        parse_pyramid_yaml(_one_tier_yaml('{ name: mo, bin: 5mo, shards: [1y] }'))
+    assert str(exc.value) == (
+        "parse_pyramid_yaml: tiers[0] ('mo'): month-span '5mo' doesn't tile a "
+        "year evenly (12 % 5 !== 0)"
+    )
+
+
+def test_rejects_calendar_bin_not_dividing_calendar_shard():
+    with pytest.raises(ValueError) as exc:
+        parse_pyramid_yaml(_one_tier_yaml('{ name: mo, bin: 6mo, shards: [4mo] }'))
+    assert str(exc.value) == (
+        "parse_pyramid_yaml: tiers[0] ('mo'): shards[0] '4mo' is smaller than "
+        "bin '6mo' (in months)"
+    )
+
+
+def test_rejects_descending_mixed_pair_by_nominal_width():
+    with pytest.raises(ValueError) as exc:
+        parse_pyramid_yaml(_one_tier_yaml('{ name: raw, bin: 1d, shards: [1mo, 14d] }'))
+    assert str(exc.value) == (
+        "parse_pyramid_yaml: tiers[0] ('raw'): shards not ascending "
+        "(shards[1] '14d' <= shards[0] '1mo' by nominal width)"
+    )

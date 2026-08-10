@@ -375,4 +375,46 @@ describe('listMissingShards', () => {
       to: d('2026-06-01T01:00:00Z'),
     })).rejects.toThrow(/inventory/)
   })
+
+  test('multi-unit calendar rungs: mid-year genesis + live-tip descent', () => {
+    // Twin of Python `test_multi_unit_calendar_rungs_mid_year_genesis_and_tip`
+    // (`specs/calendar-units.md`): straddling `4y` max tile clipped at
+    // genesis; trailing remainder descends to `1y`; sub-`1y` tail left to
+    // finer tiers.
+    const p = makePyramid()
+    p.tiers = [{ name: '1mo', bin: '1mo', shards: ['1y', '4y'] }]
+    const got = listExpectedShards(p, {
+      from: d('2021-07-01T00:00:00Z'),
+      to: d('2026-03-01T00:00:00Z'),
+    })
+    expect(got.map(s => ({
+      shardDur: s.shardDur,
+      periodStart: s.periodStart.toISOString(),
+      periodEnd: s.periodEnd.toISOString(),
+      effectiveStart: s.effectiveStart.toISOString(),
+      effectiveEnd: s.effectiveEnd.toISOString(),
+    }))).toEqual([
+      {
+        shardDur: '4y',
+        periodStart: '2020-01-01T00:00:00.000Z',
+        periodEnd: '2024-01-01T00:00:00.000Z',
+        effectiveStart: '2021-07-01T00:00:00.000Z',
+        effectiveEnd: '2024-01-01T00:00:00.000Z',
+      },
+      {
+        shardDur: '1y',
+        periodStart: '2024-01-01T00:00:00.000Z',
+        periodEnd: '2025-01-01T00:00:00.000Z',
+        effectiveStart: '2024-01-01T00:00:00.000Z',
+        effectiveEnd: '2025-01-01T00:00:00.000Z',
+      },
+      {
+        shardDur: '1y',
+        periodStart: '2025-01-01T00:00:00.000Z',
+        periodEnd: '2026-01-01T00:00:00.000Z',
+        effectiveStart: '2025-01-01T00:00:00.000Z',
+        effectiveEnd: '2026-01-01T00:00:00.000Z',
+      },
+    ])
+  })
 })

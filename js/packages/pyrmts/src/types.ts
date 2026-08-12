@@ -60,6 +60,48 @@ export interface Storage {
   get(key: string): Promise<Uint8Array | null>
   put(key: string, bytes: Uint8Array): Promise<void>
   list(prefix: string): AsyncIterable<string>
+  // ---- Optional: CAS + mtime primitives (invalidation.ts) ----
+  // `Storage` implementations that back mutable state (invalidation
+  // journals, watermarks, other coordination docs) should implement
+  // these. Read-only backends (a fetch-only worker on a bucket the
+  // build side owns) don't need them. Backends without them throw
+  // `NotSupported` when consumers reach for CAS or mtime data.
+
+  // `(content, etag)` for a subsequent `putIfMatch`. Etag opaque to the
+  // caller; round-trip verbatim. `null` etag when the object doesn't
+  // exist (paired with `null` content — the create-only case).
+  getWithEtag?(key: string): Promise<[Uint8Array | null, string | null]>
+  // Conditional put. `etag` from `getWithEtag`, or `null` = create-only
+  // (If-None-Match:* semantics). Throws `EtagConflict` on precondition
+  // failure — the retry contract callers rely on.
+  putIfMatch?(key: string, bytes: Uint8Array, etag: string | null): Promise<void>
+  // Async iterator over `[key, mtime]` under `prefix` — mtime is the
+  // backend's "last modified" (R2 `uploaded`, S3 `LastModified`, FS
+  // `mtime`, MemStorage `clock`). `null` = mtime unknown, treated as
+  // fresh by invalidation staleness (backends that can't report mtimes
+  // shouldn't trigger rebuilds).
+  listWithMtime?(prefix: string): AsyncIterable<[string, Date | null]>
+}
+
+// Raised when a `putIfMatch` precondition fails (object changed since
+// the etag was read, or existed when create-only was requested).
+// Callers retry — see `invalidate` / `pruneSpent` for the pattern.
+export class EtagConflict extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EtagConflict'
+  }
+}
+
+// Raised by consumers that reach for optional `Storage` methods on a
+// backend that doesn't implement them (e.g. `invalidate` on a read-only
+// fetch-only backend). Kept distinct from `EtagConflict` so callers
+// can distinguish "backend can't do this" from "you lost the race".
+export class NotSupported extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'NotSupported'
+  }
 }
 
 // Generic row type returned by storage backends. Kept here (not in monoids.ts)

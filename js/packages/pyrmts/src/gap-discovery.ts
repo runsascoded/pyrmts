@@ -23,6 +23,8 @@
 // part of the cover.
 
 import { addSpan, floorToSpan, formatPeriod, parseDuration } from './axis.js'
+import type { Invalidation } from './invalidation.js'
+import { staleKeysFor } from './invalidation.js'
 import { substituteKey } from './keys.js'
 import type { Pyramid, Shard, Tier } from './types.js'
 import type { ShardIndex } from './shard-index.js'
@@ -163,6 +165,13 @@ function makeExpected(
 // so a non-indexed shard is invisible to queries anyway. Consumers
 // wanting a storage-only check can layer `storage.head(key)` on top.
 //
+// `invalidations`, when supplied, folds in stale-from-invalidation
+// keys: any recorded shard overlapping a journal entry whose
+// `requestedAt` is newer than the shard's `writtenAt` joins the gap
+// list (same mechanic as Python `discover_gaps(invalidations=…)`,
+// mtimes sourced from the index's `writtenAt` instead of storage).
+// Consumers with storage mtimes should call `staleKeysFor` directly.
+//
 // Throws if the index has inventory disabled (`D1ShardIndex(
 // { skipInventory: true })` / `ManifestShardIndex(
 // { includeInventory: false })`) — gap discovery would otherwise report
@@ -173,16 +182,35 @@ export async function listMissingShards(
   shardIndex: ShardIndex,
   range: { from: Date; to: Date },
   filter: Record<string, string | number> = {},
+  opts: { invalidations?: Invalidation[] } = {},
 ): Promise<ExpectedShard[]> {
   const expected = listExpectedShards(pyramid, range, filter)
   const recorded = await shardIndex.listShards(pyramidName)
-  const seen = new Set<string>()
+  const recordedByDiff = new Map<string, Date | undefined>()
   for (const r of recorded) {
-    seen.add(diffKey(r.tier, r.shardDur, r.periodStart.getTime()))
+    recordedByDiff.set(diffKey(r.tier, r.shardDur, r.periodStart.getTime()), r.writtenAt)
   }
-  return expected.filter(e =>
-    !seen.has(diffKey(e.tier, e.shardDur, e.periodStart.getTime())),
+  const missing = expected.filter(e =>
+    !recordedByDiff.has(diffKey(e.tier, e.shardDur, e.periodStart.getTime())),
   )
+  const invs = opts.invalidations ?? []
+  if (invs.length === 0) return missing
+  // Build `{key: writtenAt}` for the recorded-and-expected subset so
+  // `staleKeysFor` can apply the overlap staleness rule. Unknown
+  // `writtenAt` (older manifests without the field) → null → treated
+  // as fresh (backends that can't report mtimes shouldn't trigger
+  // rebuilds — same rule Python's `split_stale` uses).
+  const mtimes = new Map<string, Date | null>()
+  for (const e of expected) {
+    const dk = diffKey(e.tier, e.shardDur, e.periodStart.getTime())
+    if (!recordedByDiff.has(dk)) continue  // already in `missing`; skip
+    mtimes.set(e.key, recordedByDiff.get(dk) ?? null)
+  }
+  const stale = staleKeysFor(expected, mtimes, invs)
+  if (stale.size === 0) return missing
+  const seenKeys = new Set(missing.map(m => m.key))
+  const staleShards = expected.filter(e => stale.has(e.key) && !seenKeys.has(e.key))
+  return [...missing, ...staleShards]
 }
 
 // `(tier, shardDur, periodStartMs)` is the natural identity for an

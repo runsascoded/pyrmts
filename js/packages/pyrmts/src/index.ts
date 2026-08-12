@@ -24,6 +24,8 @@ export type {
   TimeUnit,
 } from './types.js'
 
+export { EtagConflict, NotSupported } from './types.js'
+
 export {
   addSpan,
   binsInRange,
@@ -79,6 +81,19 @@ export type {
 
 export { listExpectedShards, listMissingShards } from './gap-discovery.js'
 export type { ExpectedShard } from './gap-discovery.js'
+
+export {
+  CAS_ATTEMPTS,
+  JOURNAL_BASENAME,
+  invalidate,
+  journalKey,
+  listExistingWithMtime,
+  loadInvalidations,
+  overlaps,
+  pruneSpent,
+  staleKeysFor,
+} from './invalidation.js'
+export type { Invalidation } from './invalidation.js'
 
 export { substituteKey } from './keys.js'
 

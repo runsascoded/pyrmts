@@ -111,7 +111,7 @@ def test_allows_mixed_fixed_and_calendar_units():
         storage:
           type: r2
           bucket: 380nwk
-          key: 'a/{tier}/{period}.parquet'
+          key: 'a/{tier}/{shard}/{period}.parquet'
         binCol: ts
         dims: []
         metrics:
@@ -128,7 +128,7 @@ def test_allows_calendar_chain():
         storage:
           type: r2
           bucket: 380nwk
-          key: 'a/{tier}/{period}.parquet'
+          key: 'a/{tier}/{shard}/{period}.parquet'
         binCol: ts
         dims: []
         metrics:
@@ -216,7 +216,7 @@ def _one_tier_yaml(tier_line: str) -> str:
         storage:
           type: r2
           bucket: 380nwk
-          key: 'a/{{tier}}/{{period}}.parquet'
+          key: 'a/{{tier}}/{{shard}}/{{period}}.parquet'
         binCol: ts
         dims: []
         metrics:
@@ -269,3 +269,131 @@ def test_rejects_descending_mixed_pair_by_nominal_width():
         "parse_pyramid_yaml: tiers[0] ('raw'): shards not ascending "
         "(shards[1] '14d' <= shards[0] '1mo' by nominal width)"
     )
+
+
+# The awair Aug-2026 outage: `key: '.../{tier}/{period}.parquet'` (no
+# `{shard}`) paired with a multi-rung tier (`[1d, 4d, 32d]`) — two rungs
+# starting on the same day collided on one R2 key and silently corrupted
+# downstream reads for ~1 month. `parse_pyramid_yaml` must reject the
+# config at parse time so this never lands in production.
+
+def _multi_rung_yaml(key: str, tier_line: str) -> str:
+    return dedent(f"""
+        storage:
+          type: r2
+          bucket: 380nwk
+          key: '{key}'
+        binCol: ts
+        dims: [{{ name: device_id, type: int }}]
+        metrics:
+          - {{ name: temp, monoid: sum }}
+        tiers:
+          - {{ name: raw, bin: 1min, shards: [1h] }}
+          - {tier_line}
+    """).strip()
+
+
+def test_rejects_multi_rung_ladder_missing_shard_placeholder():
+    text = _multi_rung_yaml(
+        'pyramid/awair-{device_id}/{tier}/{period}.parquet',
+        '{ name: m3, bin: 3min, shards: [1d, 4d, 32d] }',
+    )
+    with pytest.raises(ValueError) as exc:
+        parse_pyramid_yaml(text)
+    assert str(exc.value) == (
+        "parse_pyramid_yaml: tier 'm3' has a multi-rung ladder "
+        "(['1d', '4d', '32d']) but keyTemplate "
+        "'pyramid/awair-{device_id}/{tier}/{period}.parquet' is missing "
+        "the '{shard}' placeholder — rungs starting on the same period "
+        "would collide on one key. Add '{shard}' to the template "
+        "(e.g. '.../{tier}/{shard}/{period}.parquet') or collapse the "
+        "tier to a single shard rung."
+    )
+
+
+def test_accepts_multi_rung_ladder_with_shard_placeholder():
+    text = _multi_rung_yaml(
+        'pyramid/awair-{device_id}/{tier}/{shard}/{period}.parquet',
+        '{ name: m3, bin: 3min, shards: [1d, 4d, 32d] }',
+    )
+    cfg = parse_pyramid_yaml(text)
+    assert cfg.tiers[1] == Tier(name='m3', bin='3min', shards=('1d', '4d', '32d'))
+
+
+def test_accepts_all_single_rung_ladders_without_shard_placeholder():
+    """Every tier is single-rung → each period gets a unique key
+    regardless of `{shard}`. This is the pre-multi-rung awair shape and
+    must not false-positive."""
+    text = dedent("""
+        storage:
+          type: r2
+          bucket: 380nwk
+          key: 'pyramid/awair-{device_id}/{tier}/{period}.parquet'
+        binCol: ts
+        dims: [{ name: device_id, type: int }]
+        metrics:
+          - { name: temp, monoid: sum }
+        tiers:
+          - { name: raw, bin: 1min, shards: [1h] }
+          - { name: h1,  bin: 1h,   shards: [1d] }
+    """).strip()
+    cfg = parse_pyramid_yaml(text)
+    assert len(cfg.tiers) == 2
+
+
+def test_accepts_single_rung_with_shard_placeholder():
+    """awair's canonical `raw` tier + `.../{tier}/{shard}/{period}`
+    template — a placeholder is not required for single-rung tiers, but
+    it's not rejected either (substitutes to the single shard's label)."""
+    text = dedent("""
+        storage:
+          type: r2
+          bucket: 380nwk
+          key: 'pyramid/awair-{device_id}/{tier}/{shard}/{period}.parquet'
+        binCol: ts
+        dims: [{ name: device_id, type: int }]
+        metrics:
+          - { name: temp, monoid: sum }
+        tiers:
+          - { name: raw, bin: 1min, shards: [1h] }
+    """).strip()
+    cfg = parse_pyramid_yaml(text)
+    assert cfg.tiers[0] == Tier(name='raw', bin='1min', shards=('1h',))
+
+
+def test_rejects_lambda_shards_extending_single_rung_without_placeholder():
+    """`lambda_shards` fold into the runtime ladder view
+    (`merge_lambda_shards`) — a tier with `shards: [1d]` +
+    `lambda_shards: [4d]` is multi-rung at runtime and needs the
+    placeholder just as much as a bare `shards: [1d, 4d]` tier."""
+    text = dedent("""
+        storage:
+          type: r2
+          bucket: 380nwk
+          key: 'pyramid/awair-{device_id}/{tier}/{period}.parquet'
+        binCol: ts
+        dims: [{ name: device_id, type: int }]
+        metrics:
+          - { name: temp, monoid: sum }
+        tiers:
+          - { name: raw, bin: 1min, shards: [1h] }
+          - { name: m3,  bin: 3min, shards: [1d], lambda_shards: [4d] }
+    """).strip()
+    with pytest.raises(ValueError, match=r"tier 'm3' has a multi-rung ladder"):
+        parse_pyramid_yaml(text)
+
+
+def test_pyramid_from_config_revalidates_shard_placeholder():
+    """A hand-built `PyramidConfig` (bypassing `parse_pyramid_yaml`) must
+    also be rejected — defense in depth against non-yaml config paths."""
+    from pyrmts import MemStorage, PyramidConfig, pyramid_from_config
+    cfg = PyramidConfig(
+        storage={'type': 'mem'},
+        keyTemplate='pyramid/awair-{device_id}/{tier}/{period}.parquet',
+        binCol='ts',
+        dims=[],
+        metrics=[],
+        tiers=[Tier(name='m3', bin='3min', shards=('1d', '4d', '32d'))],
+    )
+    with pytest.raises(ValueError, match=r"tier 'm3' has a multi-rung ladder"):
+        pyramid_from_config(cfg, MemStorage())

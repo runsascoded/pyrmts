@@ -72,10 +72,15 @@ def parse_pyramid_yaml(text: str) -> PyramidConfig:
     )
     if 'geo' in raw and raw['geo'] is not None:
         cfg.geo = _parse_geo(raw['geo'])
+    validate_shard_placeholder(cfg.keyTemplate, cfg.tiers)
     return cfg
 
 
 def pyramid_from_config(cfg: PyramidConfig, storage: Storage) -> Pyramid:
+    # Re-validate the `{shard}` placeholder guard so a hand-built
+    # `PyramidConfig` (bypassing `parse_pyramid_yaml`) still can't reach
+    # downstream fill/serve code with a collision-prone template.
+    validate_shard_placeholder(cfg.keyTemplate, cfg.tiers)
     return Pyramid(
         storage=storage,
         keyTemplate=cfg.keyTemplate,
@@ -86,6 +91,34 @@ def pyramid_from_config(cfg: PyramidConfig, storage: Storage) -> Pyramid:
         tiers=cfg.tiers,
         geo=cfg.geo,
     )
+
+
+def validate_shard_placeholder(key_template: str, tiers: list[Tier]) -> None:
+    """A multi-rung tier's per-shard label is the only thing that keeps
+    two rungs starting on the same period (e.g. `4d`+`32d`, both aligned
+    on `2026-08-07`) from writing to the same key and silently clobbering
+    each other. `format_period` produces identical text for the shared
+    start, so `{shard}` in the keyTemplate is what disambiguates them.
+    Single-rung tiers don't need it (one label per period).
+
+    `lambda_shards` are counted alongside `shards` — the extension-fill
+    view (`merge_lambda_shards`) folds them together, so a tier with
+    `shards: [1d]` + `lambda_shards: [4d]` is a multi-rung tier at
+    runtime and needs the placeholder just the same."""
+    if '{shard}' in key_template:
+        return
+    for tier in tiers:
+        combined = list(tier.shards) + list(tier.lambda_shards)
+        if len(combined) > 1:
+            raise ValueError(
+                f"parse_pyramid_yaml: tier {tier.name!r} has a multi-rung "
+                f"ladder ({combined!r}) but keyTemplate "
+                f"{key_template!r} is missing the '{{shard}}' placeholder — "
+                f"rungs starting on the same period would collide on one "
+                f"key. Add '{{shard}}' to the template "
+                f"(e.g. '.../{{tier}}/{{shard}}/{{period}}.parquet') or "
+                f"collapse the tier to a single shard rung."
+            )
 
 
 def _parse_storage_block(raw: Any) -> tuple[dict[str, Any], str]:

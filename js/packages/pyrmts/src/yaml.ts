@@ -79,7 +79,30 @@ export function parsePyramidYaml(text: string): PyramidConfig {
     tiers: parseTiers(root.tiers),
   }
   if (root.geo !== undefined) cfg.geo = parseGeo(root.geo)
+  validateShardPlaceholder(cfg.keyTemplate, cfg.tiers)
   return cfg
+}
+
+// A multi-rung tier's per-shard label is the only thing that keeps two
+// rungs starting on the same period (e.g. `4d`+`32d`, both aligned on
+// `2026-08-07`) from writing to the same key and silently clobbering
+// each other. `formatPeriod` produces identical text for the shared
+// start, so `{shard}` in the keyTemplate is what disambiguates them.
+// Single-rung tiers don't need it (one label per period).
+export function validateShardPlaceholder(keyTemplate: string, tiers: Tier[]): void {
+  if (keyTemplate.includes('{shard}')) return
+  for (const tier of tiers) {
+    if (tier.shards.length > 1) {
+      throw new Error(
+        `parsePyramidYaml: tier '${tier.name}' has a multi-rung ladder ` +
+        `(${JSON.stringify(tier.shards)}) but keyTemplate '${keyTemplate}' ` +
+        `is missing the '{shard}' placeholder — rungs starting on the same ` +
+        `period would collide on one key. Add '{shard}' to the template ` +
+        `(e.g. '.../{tier}/{shard}/{period}.parquet') or collapse the tier ` +
+        `to a single shard rung.`,
+      )
+    }
+  }
 }
 
 function parseGeo(raw: unknown): GeoSpec {
@@ -108,8 +131,12 @@ function parseGeo(raw: unknown): GeoSpec {
   return { cellCol, resolutions }
 }
 
-// Materialize a full Pyramid by wiring in a StorageBackend.
+// Materialize a full Pyramid by wiring in a StorageBackend. Re-validates
+// the `{shard}` placeholder guard so a hand-built PyramidConfig
+// (bypassing `parsePyramidYaml`) still can't reach downstream fill/serve
+// code with a collision-prone template.
 export function pyramidFromConfig(cfg: PyramidConfig, storage: StorageBackend): Pyramid {
+  validateShardPlaceholder(cfg.keyTemplate, cfg.tiers)
   const p: Pyramid = {
     storage,
     keyTemplate: cfg.keyTemplate,

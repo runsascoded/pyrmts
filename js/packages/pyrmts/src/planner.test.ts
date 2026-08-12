@@ -1280,6 +1280,11 @@ describe('planQuery: ladder validation', () => {
   test('throws on non-divisibility-chained ladder', () => {
     const bad: Pyramid = {
       ...awair,
+      // Multi-rung ladders need `{shard}` in the template (guarded by
+      // `validateLadders` — see `parsePyramidYaml: {shard} placeholder
+      // guard` in yaml.test.ts). Include it here so this test exercises
+      // the divisibility check it's actually about.
+      keyTemplate: 'awair-{device_id}/{tier}/{shard}/{period}.parquet',
       tiers: [{ name: 'raw', bin: '1min', shards: ['1h', '3h', '5h'] }],
     }
     expect(() => planQuery(bad, {
@@ -1292,6 +1297,7 @@ describe('planQuery: ladder validation', () => {
   test('throws when smallest shard < bin', () => {
     const bad: Pyramid = {
       ...awair,
+      keyTemplate: 'awair-{device_id}/{tier}/{shard}/{period}.parquet',
       tiers: [{ name: 'h1', bin: '1h', shards: ['1min', '1h'] }],
     }
     expect(() => planQuery(bad, {

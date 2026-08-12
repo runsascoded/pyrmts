@@ -22,11 +22,24 @@ export interface ValidatedTierLadder {
 //   - non-divisibility (each shard must divide the next; promotion is concat)
 //   - mixing fixed-width and calendar-variable (`mo`/`y`) durations in one ladder
 //   - `1run` outside step-axis
+//   - multi-rung tier with `keyTemplate` missing `{shard}` (rungs starting
+//     on the same period would collide on one key)
 export function validateLadders(pyramid: Pyramid): ValidatedTierLadder[] {
   const out: ValidatedTierLadder[] = []
   for (const tier of pyramid.tiers) {
     if (!Array.isArray(tier.shards) || tier.shards.length === 0) {
       throw new Error(`validateLadders: tier '${tier.name}' has empty shards`)
+    }
+    if (tier.shards.length > 1 && !pyramid.keyTemplate.includes('{shard}')) {
+      throw new Error(
+        `validateLadders: tier '${tier.name}' has a multi-rung ladder ` +
+        `(${JSON.stringify(tier.shards)}) but keyTemplate ` +
+        `'${pyramid.keyTemplate}' is missing the '{shard}' placeholder — ` +
+        `rungs starting on the same period would collide on one key. ` +
+        `Add '{shard}' to the template (e.g. ` +
+        `'.../{tier}/{shard}/{period}.parquet') or collapse the tier to a ` +
+        `single shard rung.`,
+      )
     }
     out.push(validateLadder(tier))
   }

@@ -168,6 +168,68 @@ tiers: [{ name: raw, bin: 1d, shards: [] }]
   })
 })
 
+describe('parsePyramidYaml: {shard} placeholder guard', () => {
+  // The awair Aug-2026 outage: `key: '.../{tier}/{period}.parquet'` (no
+  // `{shard}`) paired with a multi-rung tier (`[1d, 4d, 32d]`) — two
+  // rungs starting on the same day collided on one R2 key and silently
+  // corrupted downstream reads for ~1 month. `parsePyramidYaml` must
+  // reject the config at parse time so this never lands in production.
+
+  test('multi-rung tier + template without {shard} throws (names offending tier + missing placeholder)', () => {
+    const bad = `
+storage: { type: r2, key: 'pyramid/awair-{device_id}/{tier}/{period}.parquet' }
+dims: [{ name: device_id, type: int }]
+metrics: [{ name: temp, monoid: sum }]
+tiers:
+  - { name: raw, bin: 1min, shards: [1h] }
+  - { name: m3,  bin: 3min, shards: [1d, 4d, 32d] }
+`
+    expect(() => parsePyramidYaml(bad)).toThrow(
+      /tier 'm3' has a multi-rung ladder \(\["1d","4d","32d"\]\) but keyTemplate 'pyramid\/awair-\{device_id\}\/\{tier\}\/\{period\}\.parquet' is missing the '\{shard\}' placeholder/,
+    )
+  })
+
+  test('multi-rung tier + template with {shard} parses fine', () => {
+    const cfg = parsePyramidYaml(`
+storage: { type: r2, key: 'pyramid/awair-{device_id}/{tier}/{shard}/{period}.parquet' }
+dims: [{ name: device_id, type: int }]
+metrics: [{ name: temp, monoid: sum }]
+tiers:
+  - { name: raw, bin: 1min, shards: [1h] }
+  - { name: m3,  bin: 3min, shards: [1d, 4d, 32d] }
+`)
+    expect(cfg.tiers[1]).toEqual({ name: 'm3', bin: '3min', shards: ['1d', '4d', '32d'] })
+  })
+
+  test('single-rung tiers + template without {shard} parses fine (no false positive)', () => {
+    // Every tier is single-rung → each period gets a unique key regardless
+    // of `{shard}`. This is the pre-multi-rung awair shape.
+    const cfg = parsePyramidYaml(`
+storage: { type: r2, key: 'pyramid/awair-{device_id}/{tier}/{period}.parquet' }
+dims: [{ name: device_id, type: int }]
+metrics: [{ name: temp, monoid: sum }]
+tiers:
+  - { name: raw, bin: 1min, shards: [1h] }
+  - { name: h1,  bin: 1h,   shards: [1d] }
+`)
+    expect(cfg.tiers).toHaveLength(2)
+  })
+
+  test('single-rung tier + template with {shard} parses fine (placeholder is still valid)', () => {
+    // awair's canonical `raw` tier + `.../{tier}/{shard}/{period}` template
+    // — a placeholder is not required for single-rung tiers, but it's not
+    // rejected either (substitutes to the single shard's label).
+    const cfg = parsePyramidYaml(`
+storage: { type: r2, key: 'pyramid/awair-{device_id}/{tier}/{shard}/{period}.parquet' }
+dims: [{ name: device_id, type: int }]
+metrics: [{ name: temp, monoid: sum }]
+tiers:
+  - { name: raw, bin: 1min, shards: [1h] }
+`)
+    expect(cfg.tiers).toEqual([{ name: 'raw', bin: '1min', shards: ['1h'] }])
+  })
+})
+
 describe('pyramidFromConfig', () => {
   test('wires Storage into a full Pyramid', () => {
     const cfg = parsePyramidYaml(awairYaml)

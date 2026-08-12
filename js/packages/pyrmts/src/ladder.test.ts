@@ -46,3 +46,37 @@ describe('validateLadders calendar rungs', () => {
       .toThrow("validateLadders: tier 'mo' shards not ascending (shards[1]='14d' <= shards[0]='1mo' by nominal width)")
   })
 })
+
+describe('validateLadders {shard} placeholder guard', () => {
+  // Same guard `parsePyramidYaml` enforces, but downstream — a Pyramid
+  // constructed by hand (no yaml round-trip) still can't reach the
+  // planner with a collision-prone template.
+
+  test('rejects multi-rung tier when keyTemplate lacks {shard}', () => {
+    const p: Pyramid = {
+      storage: { fetch: async () => { throw new Error('not used') } } as Pyramid['storage'],
+      keyTemplate: 'awair-{device_id}/{tier}/{period}.parquet',
+      axis: 'time',
+      binCol: 'ts',
+      dims: [{ name: 'device_id', type: 'int' }],
+      metrics: [{ name: 'n', monoid: 'count' }],
+      tiers: [{ name: 'm3', bin: '3min', shards: ['1d', '4d', '32d'] }],
+    }
+    expect(() => validateLadders(p)).toThrow(
+      /tier 'm3' has a multi-rung ladder \(\["1d","4d","32d"\]\) but keyTemplate 'awair-\{device_id\}\/\{tier\}\/\{period\}\.parquet' is missing the '\{shard\}' placeholder/,
+    )
+  })
+
+  test('accepts single-rung tier when keyTemplate lacks {shard}', () => {
+    const p: Pyramid = {
+      storage: { fetch: async () => { throw new Error('not used') } } as Pyramid['storage'],
+      keyTemplate: 'awair-{device_id}/{tier}/{period}.parquet',
+      axis: 'time',
+      binCol: 'ts',
+      dims: [{ name: 'device_id', type: 'int' }],
+      metrics: [{ name: 'n', monoid: 'count' }],
+      tiers: [{ name: 'raw', bin: '1min', shards: ['1h'] }],
+    }
+    expect(() => validateLadders(p)).not.toThrow()
+  })
+})

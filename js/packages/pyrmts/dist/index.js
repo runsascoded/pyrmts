@@ -1,5 +1,6 @@
 // pyrmts — multi-scale timeseries pyramids.
 // See ../../../../SPEC.md.
+export { EtagConflict, NotSupported } from './types.js';
 export { addSpan, binsInRange, ceilToSpan, floorToSpan, formatPeriod, parseDuration, shardPeriodsCovering, } from './axis.js';
 export { shardBuildableAt, sourceTierFor } from './cascade-source.js';
 export { DEFAULT_AUTO_MULTIPLIER, planQuery, planQueryFromInventory } from './planner.js';
@@ -10,6 +11,7 @@ export { fetchShardData, parquetBackend } from './fetch.js';
 export { validateLadders } from './ladder.js';
 export { CachedShardIndex, WATERMARK_KEY_SEPARATOR, decodeWatermarkKey, encodeWatermarkKey, } from './shard-index.js';
 export { listExpectedShards, listMissingShards } from './gap-discovery.js';
+export { CAS_ATTEMPTS, JOURNAL_BASENAME, invalidate, journalKey, listExistingWithMtime, loadInvalidations, overlaps, pruneSpent, staleKeysFor, } from './invalidation.js';
 export { substituteKey } from './keys.js';
 export { ManifestShardIndex } from './manifest-shard-index.js';
 // `assertShardIndexConformance` is exported separately as

@@ -1,3 +1,4 @@
+import type { Invalidation } from './invalidation.js';
 import type { Pyramid, Shard } from './types.js';
 import type { ShardIndex } from './shard-index.js';
 export interface ExpectedShard {
@@ -16,5 +17,7 @@ export declare function listExpectedShards(pyramid: Pyramid, range: {
 export declare function listMissingShards(pyramid: Pyramid, pyramidName: string, shardIndex: ShardIndex, range: {
     from: Date;
     to: Date;
-}, filter?: Record<string, string | number>): Promise<ExpectedShard[]>;
+}, filter?: Record<string, string | number>, opts?: {
+    invalidations?: Invalidation[];
+}): Promise<ExpectedShard[]>;
 //# sourceMappingURL=gap-discovery.d.ts.map

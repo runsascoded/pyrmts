@@ -30,6 +30,15 @@ export interface Storage {
     get(key: string): Promise<Uint8Array | null>;
     put(key: string, bytes: Uint8Array): Promise<void>;
     list(prefix: string): AsyncIterable<string>;
+    getWithEtag?(key: string): Promise<[Uint8Array | null, string | null]>;
+    putIfMatch?(key: string, bytes: Uint8Array, etag: string | null): Promise<void>;
+    listWithMtime?(prefix: string): AsyncIterable<[string, Date | null]>;
+}
+export declare class EtagConflict extends Error {
+    constructor(message: string);
+}
+export declare class NotSupported extends Error {
+    constructor(message: string);
 }
 export type Row = Record<string, unknown>;
 export interface FetchSegment {

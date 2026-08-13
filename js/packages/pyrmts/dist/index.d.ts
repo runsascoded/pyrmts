@@ -1,4 +1,5 @@
 export type { Axis, Bin, ColumnFilter, Dim, Duration, FetchOptionsBase, FetchSegment, GeoSpec, Metric, MonoidName, Pyramid, Row, RunBoundary, Shard, StepCount, StepUnit, Storage, StorageBackend, Tier, TimeUnit, } from './types.js';
+export { EtagConflict, NotSupported } from './types.js';
 export { addSpan, binsInRange, ceilToSpan, floorToSpan, formatPeriod, parseDuration, shardPeriodsCovering, } from './axis.js';
 export { shardBuildableAt, sourceTierFor } from './cascade-source.js';
 export type { ParsedTimeSpan } from './axis.js';
@@ -18,6 +19,8 @@ export { CachedShardIndex, WATERMARK_KEY_SEPARATOR, decodeWatermarkKey, encodeWa
 export type { CachedShardIndexOptions, DecodedWatermarkKey, ListShardsFilter, RecordShardInput, RecordedShard, ShardIndex, } from './shard-index.js';
 export { listExpectedShards, listMissingShards } from './gap-discovery.js';
 export type { ExpectedShard } from './gap-discovery.js';
+export { CAS_ATTEMPTS, JOURNAL_BASENAME, invalidate, journalKey, listExistingWithMtime, loadInvalidations, overlaps, pruneSpent, staleKeysFor, } from './invalidation.js';
+export type { Invalidation } from './invalidation.js';
 export { substituteKey } from './keys.js';
 export { ManifestShardIndex } from './manifest-shard-index.js';
 export type { ManifestShardIndexOptions } from './manifest-shard-index.js';

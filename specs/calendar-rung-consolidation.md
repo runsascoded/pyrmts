@@ -6,6 +6,8 @@
 > - **§3 was also off**: mixed fixed/calendar pairs only checked nominal *ascension*, not divisibility — acceptance #4's `[7d, 1mo]` reject required adding the nominal-divisibility check. Added to `pyrmts/yaml.py` `_validate_shard_ladder` **and** the JS mirror `ladder.ts` `validateLadders` (kept in lockstep, matching messages), with tests on both sides (`[1d, 1mo]`/`[3d, 1mo]`/`[1d, 3mo]` accept, `[7d, 1mo]` rejects "by nominal width").
 > - Acceptance #2 test (`test_calendar_consolidation_byte_identical_to_engine_build`): Feb 2026 (28×1d) + Aug 2026 (31×1d) consolidate byte-identical to the engine building each `1mo` shard directly from the 1d source (stronger than concat-equality — independent wide→long→rebin path), plus 'exists' short-circuit and forced-rebuild RGIP (same md5).
 > - Python 212 passed, JS 441 passed, `tsc -b` clean. Awaiting awair adoption (repin, `raw: [1d, 1mo]` flip, Lambda 1d tip writes) before moving to `done/`.
+>
+> **Pushed (2026-08-14) — re-pin SHAs** (after rebasing onto `r/main`'s `9aa7c45` JS-invalidation-port + `fb1e727` `{shard}`-guard, one trivial test-file conflict; full suites re-green post-rebase: 202 py + 17 ops + 7 geo + 469 js): `main` = `f8bfe0c01290b02cda636fd5d759b8cb2c2fb6d4` (this spec's implementation now at `82171cc`); `dist` = `bf6aa2e` ("dist: pyrmts + pyrmts-cfw + pyrmts-geo @ f8bfe0c"). Build-dist CI green (run 31830037513).
 
 Source: awair session, 2026-08-14 (spec written by awair session at pyrmts's request; ~/c/awair). Companion consumer note: awair `#32 Multi-rung raw: [1d, 1mo]` (blocked on this).
 

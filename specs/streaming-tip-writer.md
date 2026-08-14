@@ -6,6 +6,8 @@
 > - `pyrmts/tip_writer.py` `TipWriter` implemented with the spec's defaults: `pa.Table` input only, finest-rung targeting, `on_conflict='keep-last'` (also `keep-first` / `error`), no locking. Additional decisions: appended rows must lie inside the `at`-selected shard period (raises instead of silently mis-filing); appending nothing is a full no-op (no write, no journal entry); exceptions in the `with` body skip the flush; writer-era schema drift (string vs large_string) is cast to the existing shard's schema on merge; the journal entry covers `[min_ts, max_ts + bin)` of the *appended* rows only; `now=` kwarg injects `requested_at` for tests.
 > - Acceptance #7 test: 60 one-minute tip appends → final shard byte-identical to a one-shot `write_tier_parquet` of all rows, journal = 60 exact `[bin_start, bin_end)` entries. Suites: pyrmts+engine 196, ops 24, geo 7 — all green.
 > - Awaiting awair follow-ups (#5, #8: delete its `invalidate.py` reimplementation, shrink `write_pyrmts_raw_shard`) before moving to `done/`.
+>
+> **Pushed (2026-08-14) — re-pin SHAs**: `main` = `f8bfe0c01290b02cda636fd5d759b8cb2c2fb6d4` (this spec's implementation now at `f8bfe0c` itself, after rebase onto `r/main`); `dist` = `bf6aa2e`. Note the moved module coexists with `r/main`'s `9aa7c45` JS port (`js/packages/pyrmts/src/invalidation.ts`) — both write-sides now live in their respective core packages, mirroring each other's wire format.
 
 Source: awair session, 2026-08-14 (spec written by awair session at pyrmts's request; ~/c/awair). Companion: `calendar-rung-consolidation.md` (unblocks the "1d tip + 1mo consolidation" layout this helper targets).
 

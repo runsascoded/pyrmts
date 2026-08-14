@@ -175,3 +175,11 @@ Stays in `specs/` until awair completes acceptance #5 (cascade rewire + `raw: [1
 
 - `main`: `bdafada733000a731a605c16235297aa8f94e792` (Python pin, if needed — no Python changes beyond the parity test)
 - `dist`: `54cbdc9` (JS pin via `pds gh` / package.json)
+
+## Adoption (2026-08-14, awair session — verified live)
+
+Awair repinned (`dist 54cbdc9`), rewired `cfw/cascade/src/write.ts` with a new raw same-tier consolidation path over `tileFromExisting`, split the mid-month `raw/1mo/2026-08.parquet` monoliths into daily shards (4 devices × 14 days, add-only + idempotent), flipped `raw: [1mo] → [1d, 1mo]`, and redeployed all 4 Lambdas + cascade + serve. Live: Lambdas write bounded ~40–55KB `raw/1d` tips (vs ~600KB monolith by day 14), cascade ticks clean (journal `pruneSpent` working, no spurious `raw/1mo` gap for the partial month), serve returns fresh bins.
+
+Correction to the TL;DR's premise: awair's cascade did NOT previously do same-tier promotion — the `m30/128d` tick cited was a cross-tier rebuild (m30 from m10 over a 128d period). The same-tier path is new with this adoption; `tileFromExisting` is its first and only tiling walk.
+
+Acceptance #5's month-close check (Sept 1: cascade consolidates `raw/1mo/2026-08.parquet` from 31 dailies, byte-comparable to the pre-migration snapshot kept in R2) is the one remaining live milestone; moving to `done/` now per awair's ask, with that follow-up tracked on their side.

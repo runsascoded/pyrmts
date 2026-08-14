@@ -1,5 +1,12 @@
 # Streaming-tip writer: move `invalidate` to `pyrmts` core; optional `TipWriter` SDK helper
 
+> **Status (2026-08-14, pyrmts session): implemented — both the primary move and the optional `TipWriter`.** Notes:
+> - `pyrmts/invalidation.py` (via `git mv`, history preserved) holds the write-side: `Invalidation`, `JOURNAL_BASENAME`, `CAS_ATTEMPTS`, `journal_key`, `load_invalidations`, `invalidate` — core-only imports (`.storage`, `.types`, stdlib). `pyrmts_engine/invalidation.py` keeps `overlaps`/`stale_keys_for`/`prune_spent` and re-exports the moved names (plus `_encode`, which `prune_spent` shares) — engine callers unchanged.
+> - Write-side tests moved to `pyrmts/tests/test_invalidation_write.py` (basename differs from the engine's `test_invalidation.py` — pytest rootdir import mode collides on equal basenames); zero engine imports, satisfying acceptance #4 (journal roundtrip + CAS-retry-preserves-concurrent-append).
+> - `pyrmts/tip_writer.py` `TipWriter` implemented with the spec's defaults: `pa.Table` input only, finest-rung targeting, `on_conflict='keep-last'` (also `keep-first` / `error`), no locking. Additional decisions: appended rows must lie inside the `at`-selected shard period (raises instead of silently mis-filing); appending nothing is a full no-op (no write, no journal entry); exceptions in the `with` body skip the flush; writer-era schema drift (string vs large_string) is cast to the existing shard's schema on merge; the journal entry covers `[min_ts, max_ts + bin)` of the *appended* rows only; `now=` kwarg injects `requested_at` for tests.
+> - Acceptance #7 test: 60 one-minute tip appends → final shard byte-identical to a one-shot `write_tier_parquet` of all rows, journal = 60 exact `[bin_start, bin_end)` entries. Suites: pyrmts+engine 196, ops 24, geo 7 — all green.
+> - Awaiting awair follow-ups (#5, #8: delete its `invalidate.py` reimplementation, shrink `write_pyrmts_raw_shard`) before moving to `done/`.
+
 Source: awair session, 2026-08-14 (spec written by awair session at pyrmts's request; ~/c/awair). Companion: `calendar-rung-consolidation.md` (unblocks the "1d tip + 1mo consolidation" layout this helper targets).
 
 ## TL;DR

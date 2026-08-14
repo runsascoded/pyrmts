@@ -1,7 +1,13 @@
-"""First-class shard invalidation (`specs/shard-invalidation.md`): mark
-every built shard overlapping an interval stale; the extension-fill tick
-rebuilds them **in place** (dependency-ordered, so coarse rebuilds read
-repaired fine tiles) and prunes spent entries.
+"""Shard-invalidation journal — write-side (`specs/shard-invalidation.md`,
+`specs/streaming-tip-writer.md`): append `[start, end)` repair requests;
+the engine's extension-fill tick rebuilds every overlapping built shard
+**in place** and prunes spent entries (reader-side lives in
+`pyrmts_engine.invalidation` — it needs the engine's discovery context).
+
+The write-side lives here in core — not the engine package — because any
+producer appends to the journal: streaming-tip writers (awair's Lambda,
+a CFW cron) mark the intervals they touch without pulling the engine's
+polars dep tree.
 
 The journal is a small JSON doc next to the shards
 (`<pyramid_prefix>_invalidations.json`): a list of
@@ -19,15 +25,11 @@ lose it.
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import partial
 
-from pyrmts import ExpectedShard, Pyramid
-from pyrmts.storage import EtagConflict
-
-err = partial(print, file=sys.stderr, flush=True)
+from .storage import EtagConflict
+from .types import Pyramid
 
 JOURNAL_BASENAME = '_invalidations.json'
 CAS_ATTEMPTS = 5
@@ -77,11 +79,6 @@ def load_invalidations(pyramid: Pyramid) -> tuple[list[Invalidation], str | None
     ], etag
 
 
-def overlaps(inv: Invalidation, shard: ExpectedShard) -> bool:
-    """Half-open interval overlap — edge-touching periods are excluded."""
-    return shard.period_start < inv.end and inv.start < shard.period_end
-
-
 def invalidate(
     pyramid: Pyramid,
     interval: tuple[datetime, datetime],
@@ -111,55 +108,4 @@ def invalidate(
                 raise
             continue
         return len(invs) + 1
-    raise AssertionError('unreachable')
-
-
-def stale_keys_for(
-    expected: list[ExpectedShard],
-    mtimes: dict[str, datetime | None],
-    invalidations: list[Invalidation],
-) -> set[str]:
-    """Keys of expected shards that exist on storage and are overlapped
-    by a journal entry newer than their last build. Staleness applies to
-    EXPECTED shards only — superseded/stray keys are GC's concern, not
-    the fill's. Unknown mtimes are fresh (backends that can't report
-    mtimes shouldn't trigger rebuilds — same rule as `split_stale`)."""
-    if not invalidations:
-        return set()
-    return {
-        e.key
-        for e in expected
-        if (mtime := mtimes.get(e.key)) is not None
-        and any(overlaps(inv, e) and mtime < inv.requested_at for inv in invalidations)
-    }
-
-
-def prune_spent(
-    pyramid: Pyramid,
-    expected: list[ExpectedShard],
-    *,
-    mtimes: dict[str, datetime | None] | None = None,
-) -> tuple[int, int]:
-    """Drop journal entries with no remaining stale overlap (idempotent
-    by construction: replaying a spent entry finds nothing stale). Called
-    by the fill driver after it writes. Fresh mtimes are re-listed unless
-    provided. Returns `(n_pruned, n_remaining)`."""
-    key = journal_key(pyramid)
-    if mtimes is None:
-        from .discovery import list_existing_with_mtime
-        mtimes = list_existing_with_mtime(pyramid)
-    for attempt in range(CAS_ATTEMPTS):
-        invs, etag = load_invalidations(pyramid)
-        if not invs:
-            return 0, 0
-        keep = [inv for inv in invs if stale_keys_for(expected, mtimes, [inv])]
-        if len(keep) == len(invs):
-            return 0, len(invs)
-        try:
-            pyramid.storage.put_if_match(key, _encode(keep), etag)
-        except EtagConflict:
-            if attempt == CAS_ATTEMPTS - 1:
-                raise
-            continue
-        return len(invs) - len(keep), len(keep)
     raise AssertionError('unreachable')

@@ -1,29 +1,29 @@
-"""First-class shard invalidation (`specs/shard-invalidation.md`):
-journal append/CAS, overlap staleness, in-place dependency-ordered
-repair through `run_extension_fill`, journal prune, expected-only
-scoping, byte-identity of repaired shards."""
+"""First-class shard invalidation, reader-side (`specs/shard-invalidation.md`):
+overlap staleness, in-place dependency-ordered repair through
+`run_extension_fill`, journal prune, expected-only scoping,
+byte-identity of repaired shards. Write-side (append/CAS) tests live in
+`pyrmts/tests/test_invalidation.py` — the journal appender moved to
+`pyrmts.invalidation` for streaming producers
+(`specs/streaming-tip-writer.md`); imports of it here go through the
+`pyrmts_engine` back-compat re-exports on purpose."""
 from __future__ import annotations
 
 import hashlib
 import io
-import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
 import polars as pl
-import pytest
 
-from pyrmts import EtagConflict, MemStorage, list_expected_shards, write_tier_parquet
+from pyrmts import MemStorage, list_expected_shards, write_tier_parquet
 from pyrmts_engine import (
     Invalidation,
     MemShardIndex,
     invalidate,
-    journal_key,
     load_invalidations,
     run_extension_fill,
     stale_keys_for,
 )
-from pyrmts_engine.invalidation import _encode
 
 from conftest import FROM, base_wide_frame, make_pyramid, write_base_shards
 
@@ -105,53 +105,6 @@ def test_overlap_staleness_edge_touching():
     # Unknown mtimes → fresh (can't confirm staleness).
     assert stale_keys_for(expected, {e.key: None for e in expected}, [inv]) == set()
     assert stale_keys_for(expected, mtimes, []) == set()
-
-
-def test_invalidate_appends_and_journal_roundtrip():
-    clock = [T_INIT]
-    pyramid = make_ladder(MemStorage(clock=lambda: clock[0]))
-    assert journal_key(pyramid) == J_KEY
-    assert invalidate(pyramid, (W_START, W_END), now=T_REQ) == 1
-    t2 = utc(2026, 1, 2, 21, 5)
-    assert invalidate(pyramid, (utc(2026, 1, 2, 12), utc(2026, 1, 2, 13)), now=t2) == 2
-    invs, etag = load_invalidations(pyramid)
-    assert invs == [
-        Invalidation(start=W_START, end=W_END, requested_at=T_REQ),
-        Invalidation(start=utc(2026, 1, 2, 12), end=utc(2026, 1, 2, 13), requested_at=t2),
-    ]
-    assert etag is not None
-    assert json.loads(pyramid.storage.get(J_KEY)) == [
-        {'start': W_START.timestamp(), 'end': W_END.timestamp(), 'requested_at': T_REQ.timestamp()},
-        {'start': utc(2026, 1, 2, 12).timestamp(), 'end': utc(2026, 1, 2, 13).timestamp(), 'requested_at': t2.timestamp()},
-    ]
-
-    with pytest.raises(ValueError) as exc:
-        invalidate(pyramid, (W_END, W_START), now=T_REQ)
-    assert str(exc.value) == (
-        'invalidate: empty interval [2026-01-02T09:30:00+00:00, 2026-01-02T09:00:00+00:00)'
-    )
-
-
-def test_invalidate_cas_retry_preserves_concurrent_append():
-    """A prune/append racing this append conflicts the CAS; the retry
-    re-reads and lands on top — the concurrent entry is never dropped."""
-    other = Invalidation(start=utc(2026, 1, 2, 3), end=utc(2026, 1, 2, 4), requested_at=T_REQ)
-
-    class RacingStorage(MemStorage):
-        raced = False
-
-        def put_if_match(self, key, data, etag):
-            if key == J_KEY and not self.raced:
-                self.raced = True
-                # Concurrent writer lands first → our etag is stale.
-                self.put(key, _encode([other]))
-            super().put_if_match(key, data, etag)
-
-    pyramid = make_ladder(RacingStorage())
-    mine = (utc(2026, 1, 2, 9), utc(2026, 1, 2, 10))
-    assert invalidate(pyramid, mine, now=T_REQ) == 2
-    invs, _ = load_invalidations(pyramid)
-    assert invs == [other, Invalidation(start=mine[0], end=mine[1], requested_at=T_REQ)]
 
 
 def test_invalidation_repair_end_to_end():

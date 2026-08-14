@@ -81,9 +81,23 @@ export function minimalCover(
   }
 }
 
-// Walk up from each `system` cell, creating ancestor nodes on demand,
-// until the frontier collapses to a common root (or stalls at the
-// backend's root level). Returns the forest of relevant roots.
+// Level-stratified bottom-up walk: repeatedly step every chain top at
+// the current *deepest* level to its parent, creating/linking ancestor
+// nodes on demand. `cellToParent` is single-step (child level = parent
+// level + 1), so deepest-first guarantees all of a node's children have
+// linked into it — and propagated their counts — before the node itself
+// propagates upward. Correct for arbitrary mixed-level systems (e.g.,
+// per-station LUC cells spanning many levels), where a lockstep walk
+// strands late-arriving counts below already-propagated ancestors.
+//
+// A chain stops at level 0 (backend root) or at `coarsestLevel`. The
+// walk ends when every chain has stopped, or early when the frontier
+// collapses to a single root. Returns the forest of relevant roots.
+//
+// `system` cells must be mutually disjoint (no ancestor–descendant
+// pairs): an "exclude" ancestor spatially containing an "include"
+// descendant is ill-defined for point-set covers. Detected during the
+// walk (a chain stepping into a system cell) and thrown.
 function buildTree(
   index: SpatialIndex,
   include: string[],
@@ -91,33 +105,59 @@ function buildTree(
   coarsestLevel?: number,
 ): CellNode[] {
   const includeSet = new Set(include)
+  const systemSet = new Set(system)
   const nodes = new Map<string, CellNode>()
+  // Chain tops still to be stepped, bucketed by level.
+  const byLevel = new Map<number, Set<string>>()
+  const bucket = (level: number): Set<string> => {
+    let b = byLevel.get(level)
+    if (b === undefined) {
+      b = new Set()
+      byLevel.set(level, b)
+    }
+    return b
+  }
 
   for (const cell of system) {
+    const level = index.cellLevel(cell)
     nodes.set(cell, {
       cell,
-      level: index.cellLevel(cell),
+      level,
       parent: null,
       children: [],
       includeCount: includeSet.has(cell) ? 1 : 0,
       excludeCount: includeSet.has(cell) ? 0 : 1,
     })
+    bucket(level).add(cell)
   }
 
-  let frontier = new Set(system)
-  let prevSize = -1
-  while (frontier.size > 1 && frontier.size !== prevSize) {
-    prevSize = frontier.size
-    const newFrontier = new Set<string>()
-    for (const cellId of frontier) {
+  let stopped = 0
+  while (byLevel.size > 0) {
+    let active = 0
+    for (const b of byLevel.values()) active += b.size
+    if (stopped + active === 1) break  // frontier collapsed to a single root
+    const deepest = Math.max(...byLevel.keys())
+    const cells = byLevel.get(deepest)!
+    byLevel.delete(deepest)
+    for (const cellId of cells) {
       const node = nodes.get(cellId)!
       if (node.level === 0 || (coarsestLevel !== undefined && node.level <= coarsestLevel)) {
-        // Stop the walk: hit the backend root, or the caller-imposed
-        // coarsest-level cap. Keep as a forest-root candidate.
-        newFrontier.add(cellId)
+        // Hit the backend root or the caller-imposed coarsest-level
+        // cap. Keep as a forest-root candidate.
+        stopped++
         continue
       }
       const parentCell = index.cellToParent(cellId)
+      if (systemSet.has(parentCell)) {
+        // Descend `children[0]` to a leaf: only original system cells
+        // are childless, so the error names a real system token even
+        // when the offending ancestor is several levels up.
+        let leaf = node
+        while (leaf.children.length > 0) leaf = leaf.children[0]!
+        throw new Error(
+          `minimalCover: system cells must be mutually disjoint; '${parentCell}' is an ancestor of '${leaf.cell}'`,
+        )
+      }
       let parentNode = nodes.get(parentCell)
       if (parentNode === undefined) {
         parentNode = {
@@ -129,16 +169,15 @@ function buildTree(
           excludeCount: 0,
         }
         nodes.set(parentCell, parentNode)
+        bucket(parentNode.level).add(parentCell)
       }
-      if (node.parent !== parentNode) {
-        node.parent = parentNode
-        parentNode.children.push(node)
-        parentNode.includeCount += node.includeCount
-        parentNode.excludeCount += node.excludeCount
-      }
-      newFrontier.add(parentCell)
+      // Each chain top steps exactly once (buckets are consumed), so
+      // this link never duplicates.
+      node.parent = parentNode
+      parentNode.children.push(node)
+      parentNode.includeCount += node.includeCount
+      parentNode.excludeCount += node.excludeCount
     }
-    frontier = newFrontier
   }
 
   const roots: CellNode[] = []

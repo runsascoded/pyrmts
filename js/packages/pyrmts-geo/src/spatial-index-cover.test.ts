@@ -301,6 +301,73 @@ describe('minimalCover → filterCellsByCover end-to-end', () => {
   })
 })
 
+describe('minimalCover: mixed-level systems (LUC cells)', () => {
+  // ctbk station "LUC" systems have one cell per station at whatever
+  // level makes it unique — levels 10–20 mixed in one call. Pinned
+  // tokens below are real ctbk cells: '89c2574b3'/'89c2574b5' are L16
+  // siblings under '89c2574b4' (L15) → '89c2574b' (L14) → '89c2574c'
+  // (L13); '89c2574c4' (L15) → '89c2574d' (L14) merges the first chain
+  // at '89c2574c'.
+
+  test('mixed-level siblings: include one of two L16 siblings', () => {
+    const cover = minimalCover(s2Index, ['89c2574b3'], ['89c2574b3', '89c2574b5'])
+    expect(cover).toEqual({ include: ['89c2574b3'], exclude: [] })
+  })
+
+  test('mixed-level coarsening: rolls to the L14 divergence child (stall-exit used to stop at L15)', () => {
+    const cover = minimalCover(s2Index, ['89c2574b3'], ['89c2574b3', '89c2574c4'])
+    expect(cover).toEqual({ include: ['89c2574b'], exclude: [] })
+  })
+
+  test('sparse-deep: two L20 leaves sharing an L12 ancestor → the L13 divergence child, no stall', () => {
+    const nyc = LatLng.fromDegrees(40.74, -73.99)
+    const a12 = cellid.parent(cellid.fromLatLng(nyc), 12)
+    const [c13a, c13b] = cellid.children(a12)
+    const leafUnder = (ci: bigint, level: number): bigint => {
+      let cur = ci
+      while (cellid.level(cur) < level) cur = cellid.children(cur)[0]!
+      return cur
+    }
+    const leafA = cellid.toToken(leafUnder(c13a!, 20))
+    const leafB = cellid.toToken(leafUnder(c13b!, 20))
+    const cover = minimalCover(s2Index, [leafA], [leafA, leafB])
+    expect(cover).toEqual({ include: [cellid.toToken(c13a!)], exclude: [] })
+  })
+
+  test('mixed-level subtraction: 3-of-4 L16 children + distant L14 cell → +parent −child', () => {
+    const nyc = LatLng.fromDegrees(40.74, -73.99)
+    const p15 = cellid.parent(cellid.fromLatLng(nyc), 15)
+    const kids = cellid.children(p15).map(c => cellid.toToken(c))
+    // A different L14 child of the L13 ancestor — makes `system` span
+    // levels 14 and 16.
+    const a13 = cellid.parent(p15, 13)
+    const p14 = cellid.toToken(cellid.parent(p15, 14))
+    const d14 = cellid.children(a13).map(c => cellid.toToken(c)).find(t => t !== p14)!
+    const include = [kids[0]!, kids[1]!, kids[2]!]
+    const cover = minimalCover(s2Index, include, [...kids, d14])
+    expect(cover).toEqual({ include: [cellid.toToken(p15)], exclude: [kids[3]] })
+  })
+
+  test('coarsestLevel respected with mixed levels: stays at L15', () => {
+    const cover = minimalCover(s2Index, ['89c2574b3'], ['89c2574b3', '89c2574c4'], { coarsestLevel: 15 })
+    expect(cover).toEqual({ include: ['89c2574b4'], exclude: [] })
+  })
+
+  test('ancestor in system throws, naming both tokens', () => {
+    expect(() => minimalCover(s2Index, ['89c259b23'], ['89c259b23', '89c259b24'])).toThrow(
+      "minimalCover: system cells must be mutually disjoint; '89c259b24' is an ancestor of '89c259b23'",
+    )
+  })
+
+  test('deep-nested ancestor in system: error names the original system cell, not the chain cell', () => {
+    // '89c2574c' (L13) is three levels above '89c2574b3' (L16); the walk
+    // hits it via the intermediate '89c2574b' (L14) chain cell.
+    expect(() => minimalCover(s2Index, ['89c2574b3'], ['89c2574b3', '89c2574c'])).toThrow(
+      "minimalCover: system cells must be mutually disjoint; '89c2574c' is an ancestor of '89c2574b3'",
+    )
+  })
+})
+
 describe('minimalCover: brute-force optimality (small trees)', () => {
   // Lineage descendant check (same as cellid.contains on S2 tokens).
   function isDescendantOf(leaf: string, ancestor: string): boolean {

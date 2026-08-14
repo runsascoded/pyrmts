@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml as _yaml
 
-from .axis import parse_duration
+from .axis import nominal_delta_ms, parse_duration
 from .types import (
     Axis,
     Dim,
@@ -251,9 +251,11 @@ def _validate_shard_ladder(
     fixed-width rung. `bin_` (if fixed-width) must divide `shards[0]` (if
     fixed-width). Calendar durations (`mo`/`y`) divide in *months* (`y` ≡
     `12mo`) against calendar neighbors, and `Nmo` must tile a year
-    (`12 % N == 0`); mixed fixed/calendar pairs check only nominal-width
-    ascension (30d/365d) — month-length variation makes exact integer-ms
-    comparisons meaningless there (`specs/calendar-units.md`).
+    (`12 % N == 0`); mixed fixed/calendar pairs check nominal-width
+    (30d/365d) ascension and divisibility — month-length variation makes
+    exact integer-ms comparisons meaningless there, but the nominal chain
+    keeps consolidation tiling sane (`specs/calendar-units.md`,
+    `specs/calendar-rung-consolidation.md`).
     Mirrors JS `validateLadders` (`js/.../ladder.ts`)."""
     for dur in [bin_] + shards:
         span = parse_duration(dur)
@@ -285,11 +287,21 @@ def _validate_shard_ladder(
     for j in range(1, len(shards)):
         if shard_months[j - 1] is None and shard_months[j] is None:
             continue  # both fixed: the exact integer-ms checks below apply
-        if _nominal_ms(shards[j]) <= _nominal_ms(shards[j - 1]):
+        prev_nom, cur_nom = nominal_delta_ms(shards[j - 1]), nominal_delta_ms(shards[j])
+        if cur_nom <= prev_nom:
             raise ValueError(
                 f"parse_pyramid_yaml: tiers[{tier_idx}] ({tier_name!r}): "
                 f"shards not ascending (shards[{j}] {shards[j]!r} <= "
                 f"shards[{j-1}] {shards[j-1]!r} by nominal width)"
+            )
+        # Calendar-calendar pairs are exact-checked in months above; mixed
+        # pairs chain by nominal width so same-tier consolidation tiling
+        # stays sane (`specs/calendar-rung-consolidation.md`).
+        if (shard_months[j - 1] is None) != (shard_months[j] is None) and cur_nom % prev_nom != 0:
+            raise ValueError(
+                f"parse_pyramid_yaml: tiers[{tier_idx}] ({tier_name!r}): "
+                f"shards[{j-1}] {shards[j-1]!r} does not divide shards[{j}] "
+                f"{shards[j]!r} (by nominal width)"
             )
     bin_ms = _fixed_ms_or_none(bin_)
     shard_ms_list = [_fixed_ms_or_none(s) for s in shards]
@@ -346,18 +358,6 @@ def _months_or_none(s: str) -> int | None:
     if span.unit == 'y':
         return 12 * span.count
     return None
-
-
-def _nominal_ms(s: str) -> int:
-    """Width for ordering only — calendar entries use nominal 30d/365d."""
-    from .axis import _MS
-    span = parse_duration(s)
-    day_ms = _MS['d']
-    if span.unit == 'mo':
-        return span.count * 30 * day_ms
-    if span.unit == 'y':
-        return span.count * 365 * day_ms
-    return span.count * _MS[span.unit]
 
 
 def _parse_geo(raw: Any) -> GeoSpec:

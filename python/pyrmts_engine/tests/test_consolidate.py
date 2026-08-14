@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from pyrmts import ExpectedShard, MemStorage, list_expected_shards
+from pyrmts import ExpectedShard, MemStorage, list_expected_shards, shard_periods_covering
 from pyrmts_engine import (
     MemShardIndex,
     WideShardSource,
@@ -112,6 +112,103 @@ def test_overlap_cover_clips_partial_tiles():
         ('pyr/q/1d/2026-01-04.parquet', jan4_12, datetime(2026, 1, 5, tzinfo=timezone.utc)),
         ('pyr/q/1d/2026-01-05.parquet', datetime(2026, 1, 5, tzinfo=timezone.utc), jan5_12),
     ]
+
+
+def make_calendar_ladder(storage, *, extended: bool):
+    """awair's raw shape (`specs/calendar-rung-consolidation.md`): base
+    tier stores 1d tip shards; the extended view adds the 1mo
+    consolidation rung. Single tier so expected covers stay q-only."""
+    p = make_pyramid(storage=storage)
+    return replace(p, tiers=[
+        replace(p.tiers[0], shards=('1d', '1mo') if extended else ('1d',)),
+    ])
+
+
+FEB = datetime(2026, 2, 1, tzinfo=timezone.utc)
+MAR = datetime(2026, 3, 1, tzinfo=timezone.utc)
+AUG = datetime(2026, 8, 1, tzinfo=timezone.utc)
+SEP = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+
+def _mo_gap(pyramid, month_start: datetime, month_end: datetime) -> ExpectedShard:
+    gaps = list_expected_shards(pyramid, (month_start, month_end))
+    assert [(g.shard_dur, g.period_start, g.period_end) for g in gaps] == [
+        ('1mo', month_start, month_end),
+    ]
+    return gaps[0]
+
+
+def test_tile_from_existing_calendar_rung():
+    """A 1mo gap tiles from daily shards — 28 for Feb 2026, 31 for Aug —
+    with calendar (not epoch-modulo) slot bounds."""
+    storage = MemStorage()
+    pyramid = make_calendar_ladder(storage, extended=True)
+    for start, end in ((FEB, MAR), (AUG, SEP)):
+        write_base_shards(pyramid, shard_dur='1d', start=start, to=end)
+    key_set = set(pyramid.storage.list('pyr/'))
+    tier = pyramid.tier('q')
+    for start, end, n_days in ((FEB, MAR, 28), (AUG, SEP, 31)):
+        picks, holes = tile_from_existing(
+            pyramid, tier, _mo_gap(pyramid, start, end), key_set, genesis=FEB,
+        )
+        assert picks == [
+            ('1d', f'pyr/q/1d/{p.label}.parquet')
+            for p in shard_periods_covering(start, end, '1d')
+        ]
+        assert len(picks) == n_days
+        assert holes == []
+
+
+def test_calendar_consolidation_byte_identical_to_engine_build():
+    """`specs/calendar-rung-consolidation.md` acceptance #2: consolidated
+    1mo shards (concat of 28/31 engine-built 1d tiles) are byte-identical
+    to the engine building each 1mo shard directly from the 1d source,
+    and re-consolidation is idempotent / RGIP."""
+    # Reference: engine builds q@1mo directly (wide→long→rebin→wide).
+    ref = make_calendar_ladder(MemStorage(), extended=True)
+    for start, end in ((FEB, MAR), (AUG, SEP)):
+        write_base_shards(ref, shard_dur='1d', start=start, to=end)
+        build_local(
+            ref, (start, end), WideShardSource(ref, shard_dur='1d'),
+            pyramid_name='test',
+        )
+
+    pyramid = make_calendar_ladder(MemStorage(), extended=True)
+    for start, end in ((FEB, MAR), (AUG, SEP)):
+        write_base_shards(pyramid, shard_dur='1d', start=start, to=end)
+    key_set = set(pyramid.storage.list('pyr/'))
+    for start, end, n_days in ((FEB, MAR, 28), (AUG, SEP, 31)):
+        gap = _mo_gap(pyramid, start, end)
+        res = materialize_extension_shard(pyramid, gap, key_set=key_set, genesis=FEB)
+        assert (res.status, res.inputs_present, res.source_desc) == (
+            'wrote', n_days, f'same-tier cover ×{n_days}',
+        )
+        assert pyramid.storage.get(gap.key) == ref.storage.get(gap.key)
+
+        # Idempotent: the fresh key short-circuits a re-run…
+        again = materialize_extension_shard(pyramid, gap, key_set=key_set, genesis=FEB)
+        assert again.status == 'exists'
+        # …and a forced rebuild regenerates the same bytes (RGIP).
+        pyramid.storage._data.pop(gap.key)
+        key_set.discard(gap.key)
+        rebuilt = materialize_extension_shard(pyramid, gap, key_set=key_set, genesis=FEB)
+        assert (rebuilt.status, rebuilt.md5) == ('wrote', res.md5)
+
+
+def test_overlap_cover_calendar_rung():
+    """A calendar-month source tile merely overlapping the interval is
+    used, clipped — the coarse-history case for a `[1d, 1mo]` source tier
+    whose dailies have been GC'd."""
+    storage = MemStorage()
+    pyramid = make_calendar_ladder(storage, extended=True)
+    key = 'pyr/q/1mo/2026-02.parquet'
+    storage.put(key, b'placeholder')
+    key_set = {key}
+    feb10 = datetime(2026, 2, 10, tzinfo=timezone.utc)
+    feb20 = datetime(2026, 2, 20, tzinfo=timezone.utc)
+    picks, uncovered = overlap_cover(pyramid, pyramid.tier('q'), feb10, feb20, key_set)
+    assert uncovered == []
+    assert picks == [(key, feb10, feb20)]
 
 
 def test_finest_tier_hole_needs_raw_fill():

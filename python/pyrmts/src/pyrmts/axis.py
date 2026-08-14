@@ -32,6 +32,19 @@ def parse_duration(s: str) -> ParsedTimeSpan:
     return ParsedTimeSpan(count=int(m.group(1)), unit=m.group(2))  # type: ignore[arg-type]
 
 
+def nominal_delta_ms(dur: str) -> int:
+    """Nominal width in ms — for ordering/eligibility comparisons only.
+    Calendar entries use nominal 30d/365d (a month has no fixed ms
+    width); fixed entries are exact. Never use for cursor arithmetic —
+    that's `add_span`/`floor_to_span`/`ceil_to_span`."""
+    span = parse_duration(dur)
+    if span.unit == 'mo':
+        return span.count * 30 * _MS['d']
+    if span.unit == 'y':
+        return span.count * 365 * _MS['d']
+    return span.count * _MS[span.unit]
+
+
 def _ensure_utc(t: datetime) -> datetime:
     if t.tzinfo is None:
         return t.replace(tzinfo=timezone.utc)

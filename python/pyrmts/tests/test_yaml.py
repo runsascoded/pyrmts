@@ -397,3 +397,26 @@ def test_pyramid_from_config_revalidates_shard_placeholder():
     )
     with pytest.raises(ValueError, match=r"tier 'm3' has a multi-rung ladder"):
         pyramid_from_config(cfg, MemStorage())
+
+
+def test_allows_mixed_fixed_calendar_chains():
+    """`specs/calendar-rung-consolidation.md`: awair's `[1d, 1mo]` shape
+    (Lambda tip 1d shards, month-close consolidation), plus the other
+    accept cases from the spec's acceptance #4."""
+    cfg = parse_pyramid_yaml(_one_tier_yaml('{ name: raw, bin: 1min, shards: [1d, 1mo] }'))
+    assert cfg.tiers[0].shards == ('1d', '1mo')
+    cfg = parse_pyramid_yaml(_one_tier_yaml('{ name: raw, bin: 1min, shards: [3d, 1mo] }'))
+    assert cfg.tiers[0].shards == ('3d', '1mo')
+    cfg = parse_pyramid_yaml(_one_tier_yaml('{ name: raw, bin: 1min, shards: [1d, 3mo] }'))
+    assert cfg.tiers[0].shards == ('1d', '3mo')
+
+
+def test_rejects_mixed_pair_not_dividing_by_nominal_width():
+    """`[7d, 1mo]`: 30d nominal % 7d ≠ 0 — 7d epoch slots can never chain
+    into calendar-month periods."""
+    with pytest.raises(ValueError) as exc:
+        parse_pyramid_yaml(_one_tier_yaml('{ name: raw, bin: 1d, shards: [7d, 1mo] }'))
+    assert str(exc.value) == (
+        "parse_pyramid_yaml: tiers[0] ('raw'): shards[0] '7d' does not divide "
+        "shards[1] '1mo' (by nominal width)"
+    )

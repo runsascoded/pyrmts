@@ -19,7 +19,7 @@ from datetime import datetime
 
 import polars as pl
 
-from pyrmts import ExpectedShard, Pyramid, list_expected_shards, parse_duration
+from pyrmts import ExpectedShard, Pyramid, list_expected_shards, nominal_delta_ms, parse_duration
 from pyrmts.types import Tier
 
 
@@ -36,13 +36,9 @@ def _bin_ms_or_none(dur: str) -> int | None:
 
 def _approx_ms(dur: str) -> int:
     """Approximate width for ordering only (calendar units use nominal
-    30d/365d)."""
-    span = parse_duration(dur)
-    if span.unit == 'mo':
-        return span.count * 30 * _DAY_MS
-    if span.unit == 'y':
-        return span.count * 365 * _DAY_MS
-    return span.count * UNIT_MS[span.unit]
+    30d/365d). Alias of `pyrmts.nominal_delta_ms` kept for its many
+    engine/ops importers."""
+    return nominal_delta_ms(dur)
 
 
 def _divides(p_bin: str, t_bin: str) -> bool:

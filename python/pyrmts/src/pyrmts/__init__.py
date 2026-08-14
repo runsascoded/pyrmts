@@ -9,6 +9,7 @@ from .axis import (
     ceil_to_span,
     floor_to_span,
     format_period,
+    nominal_delta_ms,
     parse_duration,
     shard_periods_covering,
 )
@@ -43,7 +44,7 @@ __all__ = [
     'Storage', 'Tier',
     'ParsedTimeSpan', 'ShardPeriod',
     'add_span', 'bins_in_range', 'ceil_to_span', 'floor_to_span', 'format_period',
-    'parse_duration', 'shard_periods_covering',
+    'nominal_delta_ms', 'parse_duration', 'shard_periods_covering',
     'CascadeResult', 'cascade_tiers',
     'ExpectedShard', 'list_expected_shards',
     'substitute_key',

@@ -21,8 +21,13 @@ injected strategies:
   handles every pyrmts monoid; consumers with bespoke fast paths inject
   their own.
 
-Tiling arithmetic requires fixed-width rungs (epoch-aligned slots);
-calendar-variable rungs (`mo`/`y`) raise.
+Tiling arithmetic walks each rung's aligned slot grid via the axis
+primitives (`floor_to_span`/`ceil_to_span`/`add_span`) — epoch-aligned
+for fixed-width rungs, calendar boundaries for `mo`/`y`
+(`specs/calendar-rung-consolidation.md`), so a `[1d, 1mo]` ladder
+consolidates 28–31 daily tiles per month. Rung-eligibility comparisons
+use nominal widths (`pyrmts.nominal_delta_ms`), matching the yaml
+divisibility-chain check.
 """
 from __future__ import annotations
 
@@ -30,7 +35,7 @@ import hashlib
 import io
 import sys
 import time as _time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import partial
 from typing import Callable
 
@@ -39,32 +44,29 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from pyrmts import ExpectedShard, Pyramid, parse_duration, write_tier_parquet
+from pyrmts import (
+    ExpectedShard,
+    Pyramid,
+    add_span,
+    ceil_to_span,
+    floor_to_span,
+    nominal_delta_ms,
+    parse_duration,
+    write_tier_parquet,
+)
 from pyrmts.types import Tier
 
 from .discovery import discover_gaps, list_existing_with_mtime, split_stale
 from .invalidation import load_invalidations, overlaps, prune_spent
 from .longform import empty_long, long_to_wide, rebin_long, wide_to_long
 from .materialize import MaterializeResult, buildable_at, shard_key, source_tier_for
-from .plan import UNIT_MS, bin_floor_expr
+from .plan import bin_floor_expr
 from .shard_index import ShardIndex, ShardRecord, now_ms
 
 err = partial(print, file=sys.stderr, flush=True)
 
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
 RawHoleFill = Callable[[tuple[datetime, datetime], datetime], 'pa.Table | None']
 CrossTierHoleFill = Callable[[Tier, tuple[datetime, datetime], set[str]], 'pa.Table | None']
-
-
-def _fixed_delta(dur: str) -> timedelta:
-    span = parse_duration(dur)
-    if span.unit not in UNIT_MS:
-        raise ValueError(
-            f"consolidate: calendar-variable rung {dur!r} — same-tier tiling "
-            f"needs fixed-width (epoch-aligned) rungs"
-        )
-    return timedelta(milliseconds=span.count * UNIT_MS[span.unit])
 
 
 def tile_from_existing(
@@ -82,7 +84,8 @@ def tile_from_existing(
     materialized; what's actually on storage is whatever mix of rungs
     history produced. Returns `([(rung, key)…] in period order,
     [uncovered holes])`; pre-genesis segments are dropped."""
-    rungs = [r for r in tier.shards if _fixed_delta(r) < _fixed_delta(gap.shard_dur)]
+    rungs = [r for r in tier.shards
+             if nominal_delta_ms(r) < nominal_delta_ms(gap.shard_dur)]
     picks: list[tuple[str, str]] = []
     holes: list[tuple[datetime, datetime]] = []
 
@@ -93,24 +96,27 @@ def tile_from_existing(
             holes.append((seg_start, seg_end))
             return
         rung = rungs[idx]
-        dur = _fixed_delta(rung)
-        # Epoch-aligned slots of `rung` within [seg_start, seg_end).
-        # Divisibility chaining ⇒ seg boundaries align to some rung ≤
-        # the current one; misaligned leading/trailing parts descend.
-        epoch_off = (seg_start - _EPOCH) % dur
-        first_slot = seg_start + ((dur - epoch_off) % dur)
+        span = parse_duration(rung)
+        # Aligned slots of `rung` within [seg_start, seg_end) — the epoch
+        # grid for fixed rungs, calendar boundaries for `mo`/`y` (each
+        # slot's width varies with the cursor: Feb ≠ Aug). Divisibility
+        # chaining ⇒ seg boundaries align to some rung ≤ the current one;
+        # misaligned leading/trailing parts descend.
         cur = seg_start
-        slot = first_slot
-        while slot + dur <= seg_end:
+        slot = ceil_to_span(seg_start, span)
+        while slot < seg_end:
+            nxt = add_span(slot, span)
+            if nxt > seg_end:
+                break
             if cur < slot:
                 tile(cur, slot, idx - 1)
             key = shard_key(pyramid, tier.name, rung, slot)
             if key in key_set:
                 picks.append((rung, key))
             else:
-                tile(slot, slot + dur, idx - 1)
-            cur = slot + dur
-            slot = cur
+                tile(slot, nxt, idx - 1)
+            cur = nxt
+            slot = nxt
         if cur < seg_end:
             tile(cur, seg_end, idx - 1)
 
@@ -136,20 +142,21 @@ def overlap_cover(
     uncovered = [(s, e)]
     picks: list[tuple[str, datetime, datetime]] = []
     for rung in reversed(src.shards):
-        dur = _fixed_delta(rung)
+        span = parse_duration(rung)
         remaining: list[tuple[datetime, datetime]] = []
         for a, b in uncovered:
             cur = a
-            slot = a - ((a - _EPOCH) % dur)
+            slot = floor_to_span(a, span)
             while slot < b:
+                nxt = add_span(slot, span)
                 if shard_key(pyramid, src.name, rung, slot) in key_set:
                     if cur < slot:
                         remaining.append((cur, slot))
-                    lo, hi = max(cur, slot), min(b, slot + dur)
+                    lo, hi = max(cur, slot), min(b, nxt)
                     if lo < hi:
                         picks.append((shard_key(pyramid, src.name, rung, slot), lo, hi))
                     cur = max(cur, hi)
-                slot += dur
+                slot = nxt
             if cur < b:
                 remaining.append((cur, b))
         uncovered = remaining
@@ -530,8 +537,9 @@ def run_single_gap(
 
 def encode_gap(gap: ExpectedShard) -> dict:
     """`ExpectedShard` → JSON-serializable event payload (fan-out wire
-    format; fixed-width durations only, so the driver-side key/period
-    computation is authoritative)."""
+    format; period bounds are explicit ISO instants, so calendar-variable
+    `shard_dur`s round-trip fine — the driver-side key/period computation
+    is authoritative)."""
     return {
         'tier': gap.tier,
         'shard_dur': gap.shard_dur,

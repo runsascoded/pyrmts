@@ -1,5 +1,12 @@
 # Same-tier consolidation: support calendar rungs (`mo`/`y`)
 
+> **Status (2026-08-14, pyrmts session): implemented.** Deviations/notes vs the ask:
+> - `_fixed_delta` deleted; `tile_from_existing` walks slots via `ceil_to_span`/`add_span`, eligibility via the new `pyrmts.axis.nominal_delta_ms` (promoted per §4; `yaml._nominal_ms` deleted, `plan._approx_ms` now a thin delegate kept for its many engine/ops importers).
+> - **`overlap_cover` was NOT calendar-safe** (§2's claim was off — it called `_fixed_delta` on every source rung, so a `[1d, 1mo]` source tier would raise on any cross-tier hole fill). Refactored to `floor_to_span`/`add_span` too; covered by a new clip test against a `1mo` source tile.
+> - **§3 was also off**: mixed fixed/calendar pairs only checked nominal *ascension*, not divisibility — acceptance #4's `[7d, 1mo]` reject required adding the nominal-divisibility check. Added to `pyrmts/yaml.py` `_validate_shard_ladder` **and** the JS mirror `ladder.ts` `validateLadders` (kept in lockstep, matching messages), with tests on both sides (`[1d, 1mo]`/`[3d, 1mo]`/`[1d, 3mo]` accept, `[7d, 1mo]` rejects "by nominal width").
+> - Acceptance #2 test (`test_calendar_consolidation_byte_identical_to_engine_build`): Feb 2026 (28×1d) + Aug 2026 (31×1d) consolidate byte-identical to the engine building each `1mo` shard directly from the 1d source (stronger than concat-equality — independent wide→long→rebin path), plus 'exists' short-circuit and forced-rebuild RGIP (same md5).
+> - Python 212 passed, JS 441 passed, `tsc -b` clean. Awaiting awair adoption (repin, `raw: [1d, 1mo]` flip, Lambda 1d tip writes) before moving to `done/`.
+
 Source: awair session, 2026-08-14 (spec written by awair session at pyrmts's request; ~/c/awair). Companion consumer note: awair `#32 Multi-rung raw: [1d, 1mo]` (blocked on this).
 
 ## TL;DR

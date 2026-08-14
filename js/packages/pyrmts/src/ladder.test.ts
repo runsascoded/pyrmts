@@ -1,7 +1,8 @@
 // Calendar ladder validation (`specs/calendar-units.md`): calendar-calendar
 // rung pairs divide in months (`y` ≡ `12mo`), `Nmo` entries must tile a
 // year, mixed fixed/calendar pairs assert nominal-width (30d/365d)
-// ascension. Python twin: `python/pyrmts/tests/test_yaml.py` calendar cases.
+// ascension and divisibility (`specs/calendar-rung-consolidation.md`).
+// Python twin: `python/pyrmts/tests/test_yaml.py` calendar cases.
 
 import { describe, expect, test } from 'vitest'
 
@@ -44,6 +45,17 @@ describe('validateLadders calendar rungs', () => {
   test('rejects descending mixed pair by nominal width', () => {
     expect(() => validateLadders(pyramidWith({ bin: '1d', shards: ['1mo', '14d'] })))
       .toThrow("validateLadders: tier 'mo' shards not ascending (shards[1]='14d' <= shards[0]='1mo' by nominal width)")
+  })
+
+  test('accepts mixed fixed/calendar chains (awair [1d, 1mo] shape)', () => {
+    expect(() => validateLadders(pyramidWith({ bin: '1min', shards: ['1d', '1mo'] }))).not.toThrow()
+    expect(() => validateLadders(pyramidWith({ bin: '1min', shards: ['3d', '1mo'] }))).not.toThrow()
+    expect(() => validateLadders(pyramidWith({ bin: '1min', shards: ['1d', '3mo'] }))).not.toThrow()
+  })
+
+  test('rejects non-dividing mixed pair by nominal width', () => {
+    expect(() => validateLadders(pyramidWith({ bin: '1d', shards: ['7d', '1mo'] })))
+      .toThrow("validateLadders: tier 'mo' shards[0]='7d' does not divide shards[1]='1mo' (by nominal width)")
   })
 })
 

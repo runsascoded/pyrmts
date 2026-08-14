@@ -47,7 +47,8 @@ function validateLadder(tier) {
         const ms = shardMsOrNull(shard, tier.name);
         // Calendar checks (`specs/calendar-units.md`): `Nmo` must tile a year;
         // calendar-calendar pairs divide in months (`y` ≡ `12mo`); mixed
-        // fixed/calendar pairs assert only nominal-width (30d/365d) ascension.
+        // fixed/calendar pairs assert nominal-width (30d/365d) ascension and
+        // divisibility (`specs/calendar-rung-consolidation.md`).
         const months = shard === '1run' ? null : monthsOrNull(shard);
         if (shard !== '1run') {
             validateMonthSpan(shard, tier.name);
@@ -72,6 +73,15 @@ function validateLadder(tier) {
             if (prevNominal !== null && (months !== null || prevMonths !== null) && nominal <= prevNominal) {
                 throw new Error(`validateLadders: tier '${tier.name}' shards not ascending ` +
                     `(shards[${i}]='${shard}' <= shards[${i - 1}]='${tier.shards[i - 1]}' by nominal width)`);
+            }
+            // Calendar-calendar pairs are exact-checked in months above; mixed
+            // pairs chain by nominal width so same-tier consolidation tiling
+            // stays sane.
+            if (prevNominal !== null &&
+                (months !== null) !== (prevMonths !== null) &&
+                nominal % prevNominal !== 0) {
+                throw new Error(`validateLadders: tier '${tier.name}' shards[${i - 1}]='${tier.shards[i - 1]}' ` +
+                    `does not divide shards[${i}]='${shard}' (by nominal width)`);
             }
             prevNominal = nominal;
         }

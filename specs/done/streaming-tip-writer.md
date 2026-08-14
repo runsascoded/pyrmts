@@ -8,6 +8,8 @@
 > - Awaiting awair follow-ups (#5, #8: delete its `invalidate.py` reimplementation, shrink `write_pyrmts_raw_shard`) before moving to `done/`.
 >
 > **Pushed (2026-08-14) — re-pin SHAs**: `main` = `f8bfe0c01290b02cda636fd5d759b8cb2c2fb6d4` (this spec's implementation now at `f8bfe0c` itself, after rebase onto `r/main`); `dist` = `bf6aa2e`. Note the moved module coexists with `r/main`'s `9aa7c45` JS port (`js/packages/pyrmts/src/invalidation.ts`) — both write-sides now live in their respective core packages, mirroring each other's wire format.
+>
+> **Done (2026-08-14, awair verified live)**: awair repinned (`f8bfe0c`/`bf6aa2e`), replaced its `invalidate.py` reimplementation with a thin wrapper over `pyrmts.invalidation.invalidate` (acceptance #5), redeployed all 4 device Lambdas + cfw cascade/serve — every-minute ticks green, journal appends working, package well under the 250 MB cap. Acceptance #8 (`TipWriter` adoption) explicitly deferred until multi-rung raw lands (awair #32) — the helper is implemented and tested here, ready when they are.
 
 Source: awair session, 2026-08-14 (spec written by awair session at pyrmts's request; ~/c/awair). Companion: `calendar-rung-consolidation.md` (unblocks the "1d tip + 1mo consolidation" layout this helper targets).
 

@@ -170,3 +170,8 @@ Implemented; all suites green (JS 477 vitest + tsc clean; Python 203 core+engine
 - Cross-impl parity: `fixtures/tiling-parity.json`, generated from Python `tile_from_existing` (the deployed reference) — mixed-rung `[1d, 1mo, 1y]` walk over 2026: genesis Jan 20 (pre-genesis Jan 1–19 dropped), Feb–Jun + Sep–Dec as 1mo, Jan 20–31 + Jul + Aug (minus Aug 10) as dailies ⇒ 82 picks (73×1d + 9×1mo) + 1 hole. Asserted verbatim by both suites (`test_tiling_parity_fixture` / `tileFromExisting cross-impl parity`).
 
 Stays in `specs/` until awair completes acceptance #5 (cascade rewire + `raw: [1d, 1mo]` flip + live month-close verification).
+
+### Re-pin SHAs (for awair)
+
+- `main`: `bdafada733000a731a605c16235297aa8f94e792` (Python pin, if needed — no Python changes beyond the parity test)
+- `dist`: `54cbdc9` (JS pin via `pds gh` / package.json)

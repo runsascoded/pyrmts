@@ -21,9 +21,9 @@
 // (largest-rung-first, falling back to smaller rungs). Historical
 // periods need only the max-shard; redundant smaller-rung copies aren't
 // part of the cover.
-import { addSpan, floorToSpan, formatPeriod, parseDuration } from './axis.js';
+import { addSpan, floorToSpan, parseDuration } from './axis.js';
 import { staleKeysFor } from './invalidation.js';
-import { substituteKey } from './keys.js';
+import { shardKey } from './keys.js';
 // Per-tier minimal cover of `range`. See file docstring.
 //
 // Shards whose period is entirely outside `[range.from, range.to)` are
@@ -90,7 +90,6 @@ function largestFittingRung(rungs, cur, upper) {
     return null;
 }
 function makeExpected(pyramid, tier, shardDur, start, end, from, to, filter) {
-    const span = parseDuration(shardDur);
     return {
         tier: tier.name,
         shardDur,
@@ -98,12 +97,7 @@ function makeExpected(pyramid, tier, shardDur, start, end, from, to, filter) {
         periodEnd: end,
         effectiveStart: start < from ? from : start,
         effectiveEnd: end > to ? to : end,
-        key: substituteKey(pyramid.keyTemplate, {
-            ...filter,
-            tier: tier.name,
-            shard: shardDur,
-            period: formatPeriod(start, span),
-        }),
+        key: shardKey(pyramid, tier.name, shardDur, start, filter),
     };
 }
 // Subtract `shardIndex`-recorded shards from the expected set for

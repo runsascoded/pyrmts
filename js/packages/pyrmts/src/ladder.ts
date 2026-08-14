@@ -3,7 +3,7 @@
 // `tier.bin`); `shards.at(-1)` is the largest. See
 // `specs/done/unified-shard-ladder.md`.
 
-import { fixedDurationMs, parseDuration } from './axis.js'
+import { fixedDurationMs, nominalMs, parseDuration } from './axis.js'
 import type { Duration, Pyramid, Shard, Tier } from './types.js'
 
 export interface ValidatedTierLadder {
@@ -182,13 +182,4 @@ function validateMonthSpan(dur: string, tierName: string): void {
       `year evenly (12 % ${parsed.count} !== 0)`,
     )
   }
-}
-
-// Width for ordering only — calendar entries use nominal 30d/365d.
-function nominalMs(dur: string): number {
-  const parsed = parseDuration(dur as Duration)
-  const dayMs = 24 * 60 * 60_000
-  if (parsed.unit === 'mo') return parsed.count * 30 * dayMs
-  if (parsed.unit === 'y') return parsed.count * 365 * dayMs
-  return fixedDurationMs(dur as Duration)
 }

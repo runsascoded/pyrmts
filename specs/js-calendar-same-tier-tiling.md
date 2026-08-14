@@ -156,3 +156,17 @@ Small, additive:
 4. Push `main`, run `build-dist` GHA, record new `dist` SHA. Awair repins + rewires cascade + flips `raw` config. Live migration deletes the existing `raw/1mo/2026-08.parquet` after the first month-close consolidation confirms byte-identical output (or leaves it — the consolidation overwrites).
 
 Total pyrmts-side effort estimate: ~1 hour including tests + parity fixture + push.
+
+---
+
+## Status (2026-08-14, pyrmts session)
+
+Implemented; all suites green (JS 477 vitest + tsc clean; Python 203 core+engine / 17 ops / 7 geo).
+
+- `nominalMs` promoted to `js/packages/pyrmts/src/axis.ts` (exported, docstring mirrors Python `nominal_delta_ms`); `ladder.ts`'s private copy deleted, re-imports from axis. Also exported from `index.ts`.
+- `shardKey(pyramid, tierName, shardDur, periodStart, filter={})` added to `keys.ts` — the spec sketch imported it from `./keys.js` but it didn't exist there (Python's `shard_key` lives in `pyrmts_engine.materialize`). Gap-discovery's `makeExpected` now delegates to it, so expected-shard keys and tiling keys can't drift.
+- `tile-from-existing.ts` lands per the sketch, plus one deviation: `opts.filter?: Record<string, string | number>` for extra `{dim_name}` placeholders (awair's `awair-{device_id}/…` keyTemplate would throw `substituteKey: missing value for {device_id}` without it). Python twin has no filter param — its awair-side callers substitute dims upstream; noted here in case we want symmetry later.
+- Tests (`tile-from-existing.test.ts`): fixed-width `[1d, 4d, 32d]` greedy descent with per-day holes; calendar Aug 2026 (31), Feb 2026 (28), leap Feb 2028 (29); missing sub-rung → hole (not a wrong-sized pick); pre-genesis drop; `filter` placeholder fill.
+- Cross-impl parity: `fixtures/tiling-parity.json`, generated from Python `tile_from_existing` (the deployed reference) — mixed-rung `[1d, 1mo, 1y]` walk over 2026: genesis Jan 20 (pre-genesis Jan 1–19 dropped), Feb–Jun + Sep–Dec as 1mo, Jan 20–31 + Jul + Aug (minus Aug 10) as dailies ⇒ 82 picks (73×1d + 9×1mo) + 1 hole. Asserted verbatim by both suites (`test_tiling_parity_fixture` / `tileFromExisting cross-impl parity`).
+
+Stays in `specs/` until awair completes acceptance #5 (cascade rewire + `raw: [1d, 1mo]` flip + live month-close verification).

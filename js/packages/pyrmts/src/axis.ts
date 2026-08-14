@@ -96,6 +96,17 @@ export function floorToSpan(t: Date, span: ParsedTimeSpan): Date {
   }
 }
 
+// Nominal width in ms — for ordering/eligibility comparisons only (`mo` =
+// 30d, `y` = 365d). NOT for axis arithmetic: calendar spans vary (Feb ≠
+// Aug); use `addSpan`/`floorToSpan` for actual boundaries. Twin of Python
+// `pyrmts.nominal_delta_ms`.
+export function nominalMs(dur: Duration | string): number {
+  const { count, unit } = parseDuration(dur)
+  if (unit === 'mo') return count * 30 * MS.d
+  if (unit === 'y') return count * 365 * MS.d
+  return count * MS[unit]
+}
+
 // `t` if span-aligned, else the next span boundary.
 export function ceilToSpan(t: Date, span: ParsedTimeSpan): Date {
   const floored = floorToSpan(t, span)

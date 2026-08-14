@@ -2,6 +2,9 @@
 // key template. Used by the planner (to derive shard keys for fetch
 // segments) and gap-discovery (to derive expected shard keys).
 
+import { formatPeriod, parseDuration } from './axis.js'
+import type { Pyramid, Shard } from './types.js'
+
 export function substituteKey(
   template: string,
   values: Record<string, string | number>,
@@ -11,5 +14,25 @@ export function substituteKey(
       throw new Error(`substituteKey: missing value for {${name}}`)
     }
     return String(values[name])
+  })
+}
+
+// Substitute the pyramid's `keyTemplate` for one shard. `filter` supplies
+// values for any extra `{dim_name}` placeholders (e.g. `{device_id}` in an
+// awair-style multi-tenant layout). Twin of Python
+// `pyrmts_engine.materialize.shard_key`.
+export function shardKey(
+  pyramid: Pyramid,
+  tierName: string,
+  shardDur: Shard,
+  periodStart: Date,
+  filter: Record<string, string | number> = {},
+): string {
+  const span = parseDuration(shardDur)
+  return substituteKey(pyramid.keyTemplate, {
+    ...filter,
+    tier: tierName,
+    shard: shardDur,
+    period: formatPeriod(periodStart, span),
   })
 }

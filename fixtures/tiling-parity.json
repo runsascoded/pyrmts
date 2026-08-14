@@ -1,0 +1,439 @@
+{
+  "description": "Normative same-tier tiling parity table (specs/js-calendar-same-tier-tiling.md): tile_from_existing (python/pyrmts_engine/src/pyrmts_engine/consolidate.py, the deployed reference) and tileFromExisting (js/packages/pyrmts/src/tile-from-existing.ts) must both reproduce picks + holes exactly. Scenario: [1d, 1mo, 1y] ladder, 1y gap over 2026, genesis Jan 20 (pre-genesis Jan 1-19 dropped), Feb-Jun + Sep-Dec as 1mo shards, Jan 20-31 + Jul + Aug (minus Aug 10) as dailies; Aug 10 is the sole hole.",
+  "keyTemplate": "a/{tier}/{shard}/{period}.parquet",
+  "tier": {
+    "name": "q",
+    "bin": "1d",
+    "shards": [
+      "1d",
+      "1mo",
+      "1y"
+    ]
+  },
+  "gap": {
+    "shardDur": "1y",
+    "periodStart": "2026-01-01T00:00:00.000Z",
+    "periodEnd": "2027-01-01T00:00:00.000Z"
+  },
+  "genesis": "2026-01-20T00:00:00.000Z",
+  "keySet": [
+    "a/q/1d/2026-01-20.parquet",
+    "a/q/1d/2026-01-21.parquet",
+    "a/q/1d/2026-01-22.parquet",
+    "a/q/1d/2026-01-23.parquet",
+    "a/q/1d/2026-01-24.parquet",
+    "a/q/1d/2026-01-25.parquet",
+    "a/q/1d/2026-01-26.parquet",
+    "a/q/1d/2026-01-27.parquet",
+    "a/q/1d/2026-01-28.parquet",
+    "a/q/1d/2026-01-29.parquet",
+    "a/q/1d/2026-01-30.parquet",
+    "a/q/1d/2026-01-31.parquet",
+    "a/q/1mo/2026-02.parquet",
+    "a/q/1mo/2026-03.parquet",
+    "a/q/1mo/2026-04.parquet",
+    "a/q/1mo/2026-05.parquet",
+    "a/q/1mo/2026-06.parquet",
+    "a/q/1d/2026-07-01.parquet",
+    "a/q/1d/2026-07-02.parquet",
+    "a/q/1d/2026-07-03.parquet",
+    "a/q/1d/2026-07-04.parquet",
+    "a/q/1d/2026-07-05.parquet",
+    "a/q/1d/2026-07-06.parquet",
+    "a/q/1d/2026-07-07.parquet",
+    "a/q/1d/2026-07-08.parquet",
+    "a/q/1d/2026-07-09.parquet",
+    "a/q/1d/2026-07-10.parquet",
+    "a/q/1d/2026-07-11.parquet",
+    "a/q/1d/2026-07-12.parquet",
+    "a/q/1d/2026-07-13.parquet",
+    "a/q/1d/2026-07-14.parquet",
+    "a/q/1d/2026-07-15.parquet",
+    "a/q/1d/2026-07-16.parquet",
+    "a/q/1d/2026-07-17.parquet",
+    "a/q/1d/2026-07-18.parquet",
+    "a/q/1d/2026-07-19.parquet",
+    "a/q/1d/2026-07-20.parquet",
+    "a/q/1d/2026-07-21.parquet",
+    "a/q/1d/2026-07-22.parquet",
+    "a/q/1d/2026-07-23.parquet",
+    "a/q/1d/2026-07-24.parquet",
+    "a/q/1d/2026-07-25.parquet",
+    "a/q/1d/2026-07-26.parquet",
+    "a/q/1d/2026-07-27.parquet",
+    "a/q/1d/2026-07-28.parquet",
+    "a/q/1d/2026-07-29.parquet",
+    "a/q/1d/2026-07-30.parquet",
+    "a/q/1d/2026-07-31.parquet",
+    "a/q/1d/2026-08-01.parquet",
+    "a/q/1d/2026-08-02.parquet",
+    "a/q/1d/2026-08-03.parquet",
+    "a/q/1d/2026-08-04.parquet",
+    "a/q/1d/2026-08-05.parquet",
+    "a/q/1d/2026-08-06.parquet",
+    "a/q/1d/2026-08-07.parquet",
+    "a/q/1d/2026-08-08.parquet",
+    "a/q/1d/2026-08-09.parquet",
+    "a/q/1d/2026-08-11.parquet",
+    "a/q/1d/2026-08-12.parquet",
+    "a/q/1d/2026-08-13.parquet",
+    "a/q/1d/2026-08-14.parquet",
+    "a/q/1d/2026-08-15.parquet",
+    "a/q/1d/2026-08-16.parquet",
+    "a/q/1d/2026-08-17.parquet",
+    "a/q/1d/2026-08-18.parquet",
+    "a/q/1d/2026-08-19.parquet",
+    "a/q/1d/2026-08-20.parquet",
+    "a/q/1d/2026-08-21.parquet",
+    "a/q/1d/2026-08-22.parquet",
+    "a/q/1d/2026-08-23.parquet",
+    "a/q/1d/2026-08-24.parquet",
+    "a/q/1d/2026-08-25.parquet",
+    "a/q/1d/2026-08-26.parquet",
+    "a/q/1d/2026-08-27.parquet",
+    "a/q/1d/2026-08-28.parquet",
+    "a/q/1d/2026-08-29.parquet",
+    "a/q/1d/2026-08-30.parquet",
+    "a/q/1d/2026-08-31.parquet",
+    "a/q/1mo/2026-09.parquet",
+    "a/q/1mo/2026-10.parquet",
+    "a/q/1mo/2026-11.parquet",
+    "a/q/1mo/2026-12.parquet"
+  ],
+  "picks": [
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-20.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-21.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-22.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-23.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-24.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-25.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-26.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-27.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-28.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-29.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-30.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-01-31.parquet"
+    },
+    {
+      "rung": "1mo",
+      "key": "a/q/1mo/2026-02.parquet"
+    },
+    {
+      "rung": "1mo",
+      "key": "a/q/1mo/2026-03.parquet"
+    },
+    {
+      "rung": "1mo",
+      "key": "a/q/1mo/2026-04.parquet"
+    },
+    {
+      "rung": "1mo",
+      "key": "a/q/1mo/2026-05.parquet"
+    },
+    {
+      "rung": "1mo",
+      "key": "a/q/1mo/2026-06.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-01.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-02.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-03.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-04.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-05.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-06.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-07.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-08.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-09.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-10.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-11.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-12.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-13.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-14.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-15.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-16.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-17.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-18.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-19.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-20.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-21.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-22.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-23.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-24.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-25.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-26.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-27.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-28.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-29.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-30.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-07-31.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-01.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-02.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-03.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-04.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-05.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-06.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-07.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-08.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-09.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-11.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-12.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-13.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-14.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-15.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-16.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-17.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-18.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-19.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-20.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-21.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-22.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-23.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-24.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-25.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-26.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-27.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-28.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-29.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-30.parquet"
+    },
+    {
+      "rung": "1d",
+      "key": "a/q/1d/2026-08-31.parquet"
+    },
+    {
+      "rung": "1mo",
+      "key": "a/q/1mo/2026-09.parquet"
+    },
+    {
+      "rung": "1mo",
+      "key": "a/q/1mo/2026-10.parquet"
+    },
+    {
+      "rung": "1mo",
+      "key": "a/q/1mo/2026-11.parquet"
+    },
+    {
+      "rung": "1mo",
+      "key": "a/q/1mo/2026-12.parquet"
+    }
+  ],
+  "holes": [
+    {
+      "start": "2026-08-10T00:00:00.000Z",
+      "end": "2026-08-11T00:00:00.000Z"
+    }
+  ]
+}

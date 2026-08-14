@@ -32,6 +32,7 @@ export {
   ceilToSpan,
   floorToSpan,
   formatPeriod,
+  nominalMs,
   parseDuration,
   shardPeriodsCovering,
 } from './axis.js'
@@ -95,7 +96,10 @@ export {
 } from './invalidation.js'
 export type { Invalidation } from './invalidation.js'
 
-export { substituteKey } from './keys.js'
+export { shardKey, substituteKey } from './keys.js'
+
+export { tileFromExisting } from './tile-from-existing.js'
+export type { TilingResult } from './tile-from-existing.js'
 
 export { ManifestShardIndex } from './manifest-shard-index.js'
 export type { ManifestShardIndexOptions } from './manifest-shard-index.js'

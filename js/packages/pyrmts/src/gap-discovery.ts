@@ -22,10 +22,10 @@
 // periods need only the max-shard; redundant smaller-rung copies aren't
 // part of the cover.
 
-import { addSpan, floorToSpan, formatPeriod, parseDuration } from './axis.js'
+import { addSpan, floorToSpan, parseDuration } from './axis.js'
 import type { Invalidation } from './invalidation.js'
 import { staleKeysFor } from './invalidation.js'
-import { substituteKey } from './keys.js'
+import { shardKey } from './keys.js'
 import type { Pyramid, Shard, Tier } from './types.js'
 import type { ShardIndex } from './shard-index.js'
 
@@ -141,7 +141,6 @@ function makeExpected(
   to: Date,
   filter: Record<string, string | number>,
 ): ExpectedShard {
-  const span = parseDuration(shardDur)
   return {
     tier: tier.name,
     shardDur,
@@ -149,12 +148,7 @@ function makeExpected(
     periodEnd: end,
     effectiveStart: start < from ? from : start,
     effectiveEnd: end > to ? to : end,
-    key: substituteKey(pyramid.keyTemplate, {
-      ...filter,
-      tier: tier.name,
-      shard: shardDur,
-      period: formatPeriod(start, span),
-    }),
+    key: shardKey(pyramid, tier.name, shardDur, start, filter),
   }
 }
 

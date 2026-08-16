@@ -21,7 +21,6 @@
   "license": "MIT",
   "author": "Ryan Williams <ryan@runsascoded.com>",
   "dependencies": {
-    "h3-js": "^4.4.0",
     "s2js": "^1.44.0",
     "pyrmts": "https://github.com/runsascoded/pyrmts#dist&path:/js/packages/pyrmts"
   },
@@ -32,6 +31,7 @@
   },
   "devDependencies": {
     "@types/react": "^19.2.15",
+    "h3-js": "^4.4.0",
     "hyparquet-writer": "^0.15.2",
     "react": "^19.2.6"
   },

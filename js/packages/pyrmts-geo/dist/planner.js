@@ -9,17 +9,9 @@
 // spatial filter at read time.
 //
 // The planner consumes `Pyramid.geo` via the `SpatialIndex` abstraction
-// (`spatial-index.ts`); pyramids without an explicit `index` default to
-// `h3Index` (back-compat for rides-v1 / avail-v2 / etc).
+// (`spatial-index.ts`); pyramids must set `geo.index` explicitly.
 import { planQuery, planQueryFromInventory, } from 'pyrmts';
-import { getSpatialIndex, h3Index } from './h3-index.js';
-// Standalone bbox→cells helper. Thin wrapper over `h3Index.bboxToCells`
-// for back-compat; pyramids with a non-H3 `index` should call
-// `pyramid.geo.index.bboxToCells(...)` directly (or rely on the planner,
-// which already does).
-export function bboxToCells(bbox, level) {
-    return h3Index.bboxToCells(bbox, level);
-}
+import { getSpatialIndex } from './spatial-index.js';
 export function planGeoQuery(pyramid, input) {
     if (pyramid.geo === undefined) {
         throw new Error('planGeoQuery: pyramid has no `geo` config (use planQuery for time-only)');
@@ -177,9 +169,9 @@ function pickResolution(index, bbox, resolutions, cellBudget) {
 // Filter fetched rows to a chosen geo resolution + allowed cell set. Drops
 // rows whose cell is at a different resolution (every shard has multiple)
 // or whose cell isn't in the bbox-covering set. Stitch consumes the result.
-// `index` defaults to `h3Index` for back-compat with pre-SpatialIndex
-// callers; pyrmts-geo's planner threads the pyramid's actual index through.
-export function filterCellsAndRes(rows, cellCol, outputRes, allowedCells, index = h3Index) {
+// `index` is required — it used to default to `h3Index`, which is what
+// pinned `h3-js` into every consumer bundle (see `spatial-index.ts`).
+export function filterCellsAndRes(rows, cellCol, outputRes, allowedCells, index) {
     const allowed = new Set(allowedCells);
     return rows.filter(r => {
         const cell = r[cellCol];

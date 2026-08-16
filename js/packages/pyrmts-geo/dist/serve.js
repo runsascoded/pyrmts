@@ -10,8 +10,8 @@
 //   cell_budget  max output cells (default 1024)
 //   <dim>=<v>    one per pyramid dim used in the key template
 import { stitch, } from 'pyrmts';
-import { getSpatialIndex } from './h3-index.js';
 import { filterCellsAndRes, planGeoQuery, planGeoQueryFromInventory } from './planner.js';
+import { getSpatialIndex } from './spatial-index.js';
 export async function serveGeoQuery(opts) {
     const { pyramid, request, cors } = opts;
     if (pyramid.geo === undefined) {

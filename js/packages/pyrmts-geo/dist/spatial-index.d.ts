@@ -33,4 +33,5 @@ export type GeoSpecWithIndex = GeoSpec & {
 export type GeoPyramid = Omit<Pyramid, 'geo'> & {
     geo?: GeoSpecWithIndex;
 };
+export declare function getSpatialIndex(pyramid: GeoPyramid): SpatialIndex;
 //# sourceMappingURL=spatial-index.d.ts.map

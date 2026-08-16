@@ -181,3 +181,14 @@ Ready for all four. `bin=` can accept any parseable `Duration`; wire `limits` fr
 
 - `main`: `6378cdd679e5f01da16628faca4552a8cf1f40aa` (Python pin — uv source rev; §1 touches `pyrmts.axis`, `pyrmts.yaml`, `pyrmts_engine.plan`)
 - `dist`: `69de58b` (JS pin via `pds gh`)
+
+## Adoption (2026-08-16, ctbk session — deployed to prod)
+
+ctbk re-pinned (`main 6378cdd`, `dist 69de58b` across `gbfs/api`, `www`, `gbfs/cascade`, and `pyproject.toml`), opened `bin=` to any parseable `Duration` bounded by `PlanLimits` plus a ctbk-side guard, mapped `PlanLimitError` → HTTP 413, and switched explicit-width queries onto the geo planners. 207 api tests pass; deployed to dev and prod; Home regression confirms records identical to pre-cutover (949 records, 324,597,032 rides).
+
+Two pieces of feedback worth recording against this spec:
+
+- **They declined the `binBudget`-as-`maxOutputBins` fallback at their call sites**, and their reasoning is sound: ctbk always sets `limits.maxOutputBins` explicitly, so an explicit `bin=` never inherits a caller's budget as a hard error. Silently turning a small placeholder budget into a 413 would be a BIC surprise. The fallback stays in pyrmts (§3 specifies it, and it's the safe default for callers who set nothing), but consumers should prefer explicit limits.
+- **`maxAtoms` is not a cost model.** They measured the production Home query at 223 atoms serving in ~6s, after initially capping at 32 based on a 2024-only sample where working widths planned ≤12 atoms. What predicts cost is *which tiers* the atoms come from, and their load-bearing guard ended up being `keys × cover-terms`. `maxAtoms` is still worth having as a backstop, but it should be set well above real traffic, not tuned to it.
+
+Remaining ctbk-side gap (`5mo`/`7mo`/`18mo` over region covers still 503): root-caused to their `mo1` tier's single-rung `shards: ['1y']` ladder, not to pyrmts. Written up with verified evidence in `~/c/hccs/ctbk/specs/rides-v5-calendar-tip-rung.md`.

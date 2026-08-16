@@ -425,3 +425,37 @@ def test_rejects_mixed_pair_not_dividing_by_nominal_width():
         "parse_pyramid_yaml: tiers[0] ('raw'): shards[0] '7d' does not divide "
         "shards[1] '1mo' (by nominal width)"
     )
+
+
+def _geo_yaml(geo_line: str) -> str:
+    return dedent(f"""
+        storage:
+          type: r2
+          bucket: 380nwk
+          key: 'a/{{tier}}/{{shard}}/{{period}}.parquet'
+        binCol: ts
+        dims: []
+        metrics:
+          - {{ name: n, monoid: count }}
+        tiers:
+          - {{ name: raw, bin: 1d, shards: [1y] }}
+        geo: {geo_line}
+    """).strip()
+
+
+def test_accepts_s2_levels_past_h3_max():
+    """The level bound was H3's max (15) until 2026-08-16, which rejected
+    S2 pyramids addressing levels 16-30 — e.g. ctbk's per-station LUC
+    cells, which reach level 20. Mirrors the `yaml.test.ts` case."""
+    cfg = parse_pyramid_yaml(_geo_yaml('{ cellCol: s2_cell, resolutions: [30, 20, 16, 15] }'))
+    assert cfg.geo is not None
+    assert cfg.geo.cellCol == 's2_cell'
+    assert cfg.geo.resolutions == (30, 20, 16, 15)
+
+
+def test_rejects_resolution_past_s2_max():
+    with pytest.raises(ValueError) as exc:
+        parse_pyramid_yaml(_geo_yaml('{ cellCol: s2_cell, resolutions: [31] }'))
+    assert str(exc.value) == (
+        "parse_pyramid_yaml: geo.resolutions[0] must be an int in 0-30 (got 31)"
+    )

@@ -355,6 +355,14 @@ def _months_or_none(s: str) -> int | None:
     return None
 
 
+# Sanity bound on declared levels; mirrors `MAX_GEO_LEVEL` in `yaml.ts`.
+# The backend isn't known at parse time, so this is the widest level any
+# supported backend addresses — S2's 30. It was 15 (H3's max) until
+# 2026-08-16, which would have rejected any S2 pyramid declaring levels
+# 16-30 — e.g. ctbk's per-station LUC cells, which reach level 20.
+MAX_GEO_LEVEL = 30
+
+
 def _parse_geo(raw: Any) -> GeoSpec:
     if not isinstance(raw, dict):
         raise ValueError("parse_pyramid_yaml: `geo` must be a mapping")
@@ -365,9 +373,9 @@ def _parse_geo(raw: Any) -> GeoSpec:
     if not isinstance(resolutions, list) or not resolutions:
         raise ValueError("parse_pyramid_yaml: `geo.resolutions` must be a non-empty list of ints")
     for i, r in enumerate(resolutions):
-        if not isinstance(r, int) or r < 0 or r > 15:
+        if not isinstance(r, int) or r < 0 or r > MAX_GEO_LEVEL:
             raise ValueError(
-                f"parse_pyramid_yaml: geo.resolutions[{i}] must be an int in 0-15 (got {r!r})"
+                f"parse_pyramid_yaml: geo.resolutions[{i}] must be an int in 0-{MAX_GEO_LEVEL} (got {r!r})"
             )
     for i in range(1, len(resolutions)):
         if resolutions[i] >= resolutions[i - 1]:

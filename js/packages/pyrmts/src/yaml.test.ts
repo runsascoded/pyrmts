@@ -310,8 +310,22 @@ storage: { type: r2, key: 'k/{tier}/{shard}/{period}.parquet' }
 dims: []
 metrics: []
 tiers: [{ name: raw, bin: 1d, shards: [1y] }]
-geo: { resolutions: [16] }
-`)).toThrow('parsePyramidYaml: geo.resolutions[0] must be an integer 0-15 (got 16)')
+geo: { resolutions: [31] }
+`)).toThrow('parsePyramidYaml: geo.resolutions[0] must be an integer 0-30 (got 31)')
+  })
+
+  // The bound was H3's max (15) until 2026-08-16, which rejected S2
+  // pyramids addressing levels 16-30 — e.g. ctbk's per-station LUC cells,
+  // which reach level 20.
+  test('accepts S2 levels past H3 max (16-30)', () => {
+    const cfg = parsePyramidYaml(`
+storage: { type: r2, key: 'k/{tier}/{shard}/{period}.parquet' }
+dims: []
+metrics: []
+tiers: [{ name: raw, bin: 1d, shards: [1y] }]
+geo: { cellCol: s2_cell, resolutions: [30, 20, 16, 15] }
+`)
+    expect(cfg.geo).toEqual({ cellCol: 's2_cell', resolutions: [30, 20, 16, 15] })
   })
 
   test('pyramidFromConfig propagates geo to the Pyramid', () => {

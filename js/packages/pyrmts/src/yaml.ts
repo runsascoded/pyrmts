@@ -105,6 +105,13 @@ export function validateShardPlaceholder(keyTemplate: string, tiers: Tier[]): vo
   }
 }
 
+// Sanity bound on declared levels. The backend isn't known at parse time
+// (`geo.index` is a TS object, not YAML), so this is the widest level any
+// supported backend addresses — S2's 30. It was 15 (H3's max) until
+// 2026-08-16, which would have rejected any S2 pyramid declaring levels
+// 16-30 — e.g. ctbk's per-station LUC cells, which reach level 20.
+const MAX_GEO_LEVEL = 30
+
 function parseGeo(raw: unknown): GeoSpec {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('parsePyramidYaml: `geo` must be a mapping')
@@ -115,8 +122,10 @@ function parseGeo(raw: unknown): GeoSpec {
     throw new Error('parsePyramidYaml: `geo.resolutions` must be a non-empty array of integers')
   }
   const resolutions = g.resolutions.map((r, i) => {
-    if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r > 15) {
-      throw new Error(`parsePyramidYaml: geo.resolutions[${i}] must be an integer 0-15 (got ${String(r)})`)
+    if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r > MAX_GEO_LEVEL) {
+      throw new Error(
+        `parsePyramidYaml: geo.resolutions[${i}] must be an integer 0-${MAX_GEO_LEVEL} (got ${String(r)})`,
+      )
     }
     return r
   })

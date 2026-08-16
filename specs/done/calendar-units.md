@@ -82,3 +82,12 @@ TS `gap-discovery`/`listExpectedShards` should already handle calendar rungs (JS
 1. Python multi-unit spans + validation gap (+ parity fixture) — unblocks ctbk's engine build of rides-v5 calendar tiers (Batch fill per anchor; ctbk will re-pin `main`).
 2. TS calendar-target ragged packing — unblocks live monthly tips + serving calendar bins over pyramids without materialized calendar tiers (ctbk re-pins `dist` in `gbfs/api`).
 3. Record re-pin SHAs in this spec per the usual convention; ctbk session runs downstream integration (build + API-level v3-parity compare) before `r/main` push.
+
+## Adoption confirmed (2026-08-16, pyrmts session) — moving to `done/`
+
+All three sequencing steps are complete; the status line was left at step 3's "clear to push" and never updated. Push SHAs are recorded above (`main ed50cdb` / `dist 6043922`). The two items listed as "not yet exercised from ctbk" have both since run in prod:
+
+- **Engine calendar build** — ctbk's `rides-v5-{start,end}` are built and extended monthly through the engine (`ctbk gbfs rides-v5-extend`, ctbk `59494df5`; CI cadence hook `193c226a`), over the `{1,2,3,6}mo + 1y` calendar family plus pow-2-year shards.
+- **TS calendar-target serve** — the whole `calendar-composition-and-query-limits` round-trip (`specs/done/`) was built on ctbk serving live calendar bins, and `bin=` is now open to arbitrary `Duration`s in prod.
+
+Follow-on work that grew out of this spec is tracked separately: `specs/done/calendar-composition-and-query-limits.md` (arbitrary calendar target bins + `PlanLimits`), `specs/done/js-calendar-same-tier-tiling.md` (`tileFromExisting`), and `~/c/hccs/ctbk/specs/rides-v5-calendar-tip-rung.md` (the `mo1: ['1mo','1y']` ladder fix, ctbk-side).

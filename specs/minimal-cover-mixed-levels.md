@@ -63,3 +63,10 @@ Ancestor–descendant pairs inside `system` are geometrically ill-defined for po
 
 - `www/src/pages/CellsDebug.tsx`: switch the cover system from `latLngToCell(lat, lng, 15)` to per-station LUC cells (asset `station-luc.json`), keep `coarsestLevel: 10`; dedupe `_`-alias stations (`5308.04_` etc.) whose fallback cells nest real LUC cells.
 - Audit other `minimalCover` callers for the dead `maxLevel` opt (region-cells generation, gbfs/api).
+
+### Follow-up status (audited 2026-08-16, pyrmts session) — **half adopted**
+
+- ✅ **`maxLevel` audit done.** `CellsDebug.tsx:327` now carries the note "`maxLevel` is a dead `MinimalCoverOpts` field (unread by the DP); `coarsestLevel` is the real cap" and passes `coarsestLevel: COARSEST_LEVEL` (ctbk `db95f1e5`). `www/src/query/ridesV1.ts:116` likewise passes `coarsestLevel` only.
+- ❌ **LUC switch not done.** `CellsDebug.tsx:321` still cell-ifies stations at a uniform `FINEST_LEVEL` via `s2Index.latLngToCell`, and the file carries a **now-stale comment** at line 55 — "pyrmts-geo's `minimalCover` currently requires a uniform-[level system]". That has been false since this spec landed (2026-08-14); ctbk's `www` already pins `dist 69de58b`, which contains the fix. The blocker they think exists is gone — the switch is theirs to make whenever, and the ~1100-of-2340 stations sharing an L15 cell with a neighbor stay silently over-covered until it happens.
+
+Spec stays in `specs/` until that switch lands (it's the acceptance evidence that mixed-level systems actually work on real ctbk data, which no pyrmts-side fixture can supply).

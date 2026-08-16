@@ -45,3 +45,14 @@ Implemented as `build_local(fill=True)` / `build -f/--fill` (`-F` collides with 
 Also: the range stays `-r` (required) — "genesis → now" defaulting is driver-side (ctbk knows genesis; the engine doesn't). A complete pyramid is a no-op: LIST + 0 windows, no source reads (tested). Tests: `tests/test_fill.py` (6), CLI + `build_command` coverage in `test_cli.py`/`test_batch.py`.
 
 Spec stays in `specs/` until ctbk wires the submit passthrough and burns it in on the avail-v5 hole (est. ~10 fillable-gap windows vs the Lambda fan-out's 87 min / $5.35).
+
+## Adoption confirmed (2026-08-16, pyrmts session) — moving to `done/`
+
+Both hold conditions are met in ctbk's checkout:
+
+- **Submit passthrough wired** — `ctbk gbfs engine submit -f/--fill` (`gbfs_cli.py:1473`), whose help text cites this spec by name; `pyramid_cascade/fsck.py` documents `pyrmts_engine.build_local --fill` as the mechanism it delegates bulk gap-filling to.
+- **Burned in, and now load-bearing** — fill is the production path for the rides-v5 monthly cadence: `ctbk gbfs rides-v5-extend` calls `_engine_submit(..., fill=True)` per anchor over an **uncapped** genesis→now range (ctbk `2662c347`, `49eaf98f`). That run surfaced two real refinements worth recording here:
+  - **Don't cap the fill range.** Capping at month-end leaves coarse-rung holes — shards whose spans cross the cap (a `1d/64d` covering Jun 4–Aug 7) can't build inside it, and the monthly rebin then rides on the `1d` tier at serve time. Uncapped fill + a sweep of wholly-empty pure-future shards is the correct shape.
+  - **`--max-missing` is the release valve for the in-progress period.** An uncapped fill's expected cover reaches `now`, so current-month shards want a source object that doesn't exist yet mid-month; ctbk runs `--max-missing 0.01` (1/~160 months ≈ 0.006), which tolerates exactly that while still failing on a real 2-month hole. This is the intended use of the §4 guard — the tip clamp handles the tip, the guard handles genuine holes, and `--max-missing` covers the one case that is structurally neither.
+
+Not discharged by this: `specs/engine-min-cover-source.md` stays open — ctbk's engine wrapper still pins a source rung (`-s/--source` defaults to `1m@2d`), so the min-cover default is unexercised.

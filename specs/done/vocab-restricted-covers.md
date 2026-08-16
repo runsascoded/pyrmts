@@ -51,3 +51,11 @@ Implemented in `pyrmts-geo` (`js/packages/pyrmts-geo/src/vocab-cover.ts`): `buil
 5. **Tests** (13, `vocab-cover.test.ts`): the counter-example asserts the exact 5-term `P − 4 outsiders` form (vs 8 per-child); seeded random-forest fuzz proves the DP hits the brute-force minimum over all ± (and, in positive-only mode, all +-only) term assignments under nearest-signed-ancestor semantics, 30 trials each; value-arithmetic test (station values = distinct powers of two, cell rows = Σ under) asserts `Σ include − Σ exclude ≡ Σ wanted` in both modes — the monoid form of "cover rows ≡ union of identity-row queries". The full-pyramid e2e (bbox → registry station set → cover → served rows) lives naturally in ctbk's parity harness, where the real registry/vocab/worker are; the value-arithmetic test covers the pyrmts-side exactness claim.
 
 Not pushed to GitHub yet (standing hold): ctbk consumes this via `pds l pyrmts-geo` against the local checkout for the region-cells regeneration + parity runs; the TS-pin bump / dist-branch push happens when ctbk is ready to take it to CI/prod.
+
+## Adoption confirmed (2026-08-16, pyrmts session) — moving to `done/`
+
+The standing hold above was discharged on 2026-07-30 and the status line was never updated. Pushed as part of the ops-adoption batch (`main` = `3073c60`, `dist` = `37c363f`; see `specs/pyrmts-ops-adoption.md`), which records ctbk running "P1–P4 + fill-mode + min-cover + **vocabCover**" in prod that day. Verified against ctbk's checkout today:
+
+- `gbfs/api/src/avail_geo.ts:409` — `buildVocabGraph(s2Index, stationVocab.cells, leaves)` on the frozen `station-vocab.json`, feeding the region-cover path.
+- `www/src/pages/CellsDebug.tsx` — `vocabCover` is a first-class Cover mode alongside raw-S2 `minimalCover`, with exact-selection + ⌘-drag rectangle select built on it (ctbk `84609674`).
+- ctbk pins `pyrmts-geo` at `dist 69de58b` in `gbfs/api` and `www`, well past the `37c363f` that first carried this.

@@ -43,7 +43,7 @@ jobs:
           STAGE="$RUNNER_TEMP/dist-stage"
           rm -rf "$STAGE" && mkdir -p "$STAGE"
 
-          PKGS=(pyrmts pyrmts-cfw pyrmts-geo)
+          PKGS=(pyrmts pyrmts-cfw pyrmts-geo pyrmts-react)
 
           # Pack each package via `pnpm pack` (resolves workspace:* to literal
           # versions in the tarball's package.json) and extract under
@@ -130,7 +130,7 @@ jobs:
             exit 0
           fi
 
-          MSG="dist: pyrmts + pyrmts-cfw + pyrmts-geo @ $SHORT_SHA"
+          MSG="dist: pyrmts + pyrmts-cfw + pyrmts-geo + pyrmts-react @ $SHORT_SHA"
           TREE=$(git write-tree)
           if [ "$HAS_PARENT" = "1" ]; then
             DIST_TIP=$(git rev-parse HEAD)
@@ -147,5 +147,6 @@ jobs:
           echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
           echo "\"pyrmts\": \"https://github.com/$REPO#$COMMIT&path:/js/packages/pyrmts\"," >> "$GITHUB_STEP_SUMMARY"
           echo "\"pyrmts-cfw\": \"https://github.com/$REPO#$COMMIT&path:/js/packages/pyrmts-cfw\"," >> "$GITHUB_STEP_SUMMARY"
-          echo "\"pyrmts-geo\": \"https://github.com/$REPO#$COMMIT&path:/js/packages/pyrmts-geo\"" >> "$GITHUB_STEP_SUMMARY"
+          echo "\"pyrmts-geo\": \"https://github.com/$REPO#$COMMIT&path:/js/packages/pyrmts-geo\"," >> "$GITHUB_STEP_SUMMARY"
+          echo "\"pyrmts-react\": \"https://github.com/$REPO#$COMMIT&path:/js/packages/pyrmts-react\"" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"

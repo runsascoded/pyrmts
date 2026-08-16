@@ -40,3 +40,19 @@ Out of scope: `@rdub/file-tree` stays an independent generic package (it has no 
 1. Implement `pyrmts-react`, port awair's components into it ≈verbatim (they were written prop-injected for this).
 2. awair: replace local `TierTimeline` + `useShardSearch` with the package; keep `ShardOmnibar`/`FilesPage` as thin app wiring.
 3. ctbk: swap the hand-rolled Health.tsx cover bar for `<CoverTimeline>`; add `useShardOmnibarEndpoint` (net-new capability there).
+
+---
+
+## Status (2026-08-16, pyrmts session)
+
+Implemented; JS suite green (486 vitest, +9 for this package; `tsc -b` clean across all 4 packages).
+
+- **Types**: took the spec's preferred option — pure cover-status shapes (`PyramidCoverRung`/`Segment`/`TierCoverStatus`/`CoverStatus`) moved to `pyrmts` core (`cover-status.ts`), exported from its index; `pyrmts-cfw/health.ts` imports + re-exports them (no BC break for existing importers). `pyrmts-react` depends only on `pyrmts` — worker-free.
+- **`js/packages/pyrmts-react`**: peer deps `react >=18` + `@floating-ui/react >=0.27`; `use-kbd >=0.12` optional peer used only by the `pyrmts-react/kbd` subpath. Exports `.`, `./kbd`, `./styles.css`.
+- **`<CoverTimeline>`** (`cover-timeline.tsx`): awair's `TierTimeline` ported ≈verbatim, generalized per spec — `rawTip` → `extraTips?: ExtraTip[]` (each targets a `tier` row, optional `label` defaults to `'live tip'`); hard-coded `/files/` → `hrefFor?` (adds `cursor: pointer` + `location.assign` navigation + "click to browse" hint only when set); `onShardClick?` overrides the navigation. `coverageWindow` + a newly-extracted pure `monthGridlines` exported alongside.
+- **`pyrmts-react/kbd`**: `useShardOmnibarEndpoint(covers, {hrefFor, pyramidLabel?, extraEntries?, group?, id?})` — sync filter endpoint, multi-term AND, `pagination: 'scroll'`, per the awair reference. Deviation: spec's `deviceName?` opt is named **`pyramidLabel`** (device naming is awair-specific; it maps registry pyramid name → display label, same call shape). Live-tip entries arrive via `extraEntries` (the cover doesn't know about unregistered tips). Pure helpers `shardSearchEntries`/`filterShardEntries` live in `shard-search.ts` (React- and use-kbd-free), re-exported from both `.` and `./kbd`, and unit-tested directly.
+- **`styles.css`**: awair's SCSS flattened; status colors via `--pyrmts-present`/`--pyrmts-pending`/`--pyrmts-missing`/`--pyrmts-tip` (+ `--pyrmts-now` and neutral `--pyrmts-*` theme vars), all with awair's values as fallbacks. Class names kept (`tier-timeline`, `tt-*`) so awair's swap is a drop-in.
+- **build-dist**: workflow now packs `pyrmts-react` alongside the other three.
+- Tests are pure-logic only (`coverageWindow`, `monthGridlines`, `shardSearchEntries`, `filterShardEntries`) — the repo has no DOM test infra; component rendering gets verified visually at adoption (steps 2–3, awair/ctbk side).
+
+Stays in `specs/` until awair (step 2) and ctbk (step 3) adopt.

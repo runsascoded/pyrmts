@@ -26,6 +26,13 @@ export type {
 
 export { EtagConflict, NotSupported } from './types.js'
 
+export type {
+  PyramidCoverRung,
+  PyramidCoverSegment,
+  PyramidCoverStatus,
+  PyramidTierCoverStatus,
+} from './cover-status.js'
+
 export {
   addSpan,
   binsInRange,

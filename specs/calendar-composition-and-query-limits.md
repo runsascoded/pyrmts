@@ -136,3 +136,43 @@ ctbk integration (separate session, `ctbk/specs/`): after §1+§3, relax `serveR
 - `consolidate.py`'s fixed-width wall (unchanged; calendar tiers are Batch/fill-owned).
 - `NICE_WIDTHS` / smoothing semantics — `resolveSmoothing` already handles calendar output bins.
 - `_validate_window` (ingest windows are fixed-width and unrelated to tier bins).
+
+---
+
+## Status (2026-08-16, pyrmts session)
+
+All four sections implemented in spec order, one commit each. JS 507 vitest + `tsc -b --force` clean; Python 203 core+engine / 17 ops / 7 geo.
+
+### §1 anchoring (`ee6fa32`)
+
+Landed as specified. `floorToSpan`/`floor_to_span` floor months-since-year-0; the tile-a-year validation is gone from `ladder.ts`, `yaml.py`, and both floor implementations. `plan.py`'s `bin_floor_expr` no longer calls `dt.truncate('Nmo')` (epoch-anchored, wrong for non-year-dividing N) — it computes the year-0 month index directly, the same treatment `Ny` already had.
+
+`fixtures/calendar-floors.json` keeps its 77 cases verbatim and gains 55 for `5mo`/`7mo`/`8mo`/`18mo`/`48mo`, generated from the JS reference. Both parity suites sweep every span, so the polars anchoring hazard the spec flagged is pinned in Python (`bin_floor_expr`) and in JS. The `Ny ≡ (12N)mo` identity is verified directly: `4y` and `48mo` agree on all 11 shared fixture instants.
+
+The `5mo`-rejection pins in `axis`/`ladder`/`planner`/`yaml`/`plan` tests were replaced (not deleted) with assertions on the grids those spans now produce — e.g. from 2026-01 the 5mo grid is 2025-11, 2026-04, 2026-09.
+
+### §3 limits (`9eca867`)
+
+`PlanLimits` + `PlanLimitError` live in `types.ts` alongside `EtagConflict`; `PlanQueryInput.limits` overrides `Pyramid.limits` wholesale (not merged field-by-field). All six planner return sites route through one `finalize` choke point; `maxOutputBins` is additionally checked pre-plan so oversized requests fail before packing.
+
+**Deviation**: the spec didn't say where the atom count lives, and it can't be recovered from a finished plan (coalescing merges adjacent same-tier atoms, including across bin boundaries). Every plan now carries `atomCount` — the pre-coalesce count. It's what `maxAtoms` bounds and is useful cost metadata in its own right.
+
+**Back-compat hazard, please read before re-pinning**: per §3, `binBudget` now stands in for `maxOutputBins` when that's unset. Callers passing a small placeholder `binBudget` alongside `targetBin` — relying on the old "ignored" contract — will now get `PlanLimitError` instead. This is not hypothetical: two tests in this repo used exactly that idiom (`binBudget: 1` + `targetBin: '1mo'`) and had to be updated. Audit ctbk's `targetBin` call sites for placeholder budgets.
+
+### §2 calendar composition (`f6be464`)
+
+`calendarEligibleTiers` returns `PackGrid[]` (the spec's abstraction) instead of `{tier, ms}[]`; both packers walk grids rather than doing ms division, so calendar sources stride correctly. No divisibility filter, per the spec — containment decides.
+
+Measured on the spec's `{1d, 7d, 1mo, 3mo}` pyramid: `4mo` → 5 atoms (`3mo` + 3×`1mo` + `3mo`), `6mo` → 2 (2×`3mo` per bin), `5mo` → 4 (mixed `3mo`/`1mo`), `2y` → 2 (8×`3mo` per bin). All four stitch exactly equal to the brute-force day→calendar groupby, and each test pins the tiers the plan reads so a regression to day-tiling fails rather than silently costing more.
+
+One acceptance-list correction: the spec's fifth case ("day tiers still serve the residue") doesn't exist as described — calendar target bins are always whole, so a mid-month query start still packs the full containing bin from calendar sources. Replaced with a watermark-demotion test that does exercise the fallback: one `3mo` bin walking `mo3` → `mo1` → `d7` → clipped `d1` as each watermark runs out.
+
+### §4 geo `targetBin` (`ff17960`)
+
+`targetBin` and `limits` thread through both geo entry points. Explicit-width geo queries now resolve `outputRes` and per-segment cells, so ctbk can retire the post-hoc cell filter once it re-pins.
+
+This commit also **fixes a build break introduced by §3**: `GeoQueryPlan extends Omit<QueryPlan, 'segments'>`, so `atomCount` became required in three places in `pyrmts-geo`. Incremental `tsc -b` was skipping the package on stale buildinfo and reporting success; only `tsc -b --force` surfaced it. Worth knowing for anyone verifying this repo — plain `tsc -b` can lie after a cross-package type change.
+
+### ctbk integration
+
+Ready for all four. `bin=` can accept any parseable `Duration`; wire `limits` from config (and audit placeholder `binBudget`s per §3 above); explicit-width queries can go straight through `planGeoQuery*` now rather than waiting on §4.

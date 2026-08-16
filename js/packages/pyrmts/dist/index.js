@@ -1,6 +1,6 @@
 // pyrmts — multi-scale timeseries pyramids.
 // See ../../../../SPEC.md.
-export { EtagConflict, NotSupported } from './types.js';
+export { EtagConflict, NotSupported, PlanLimitError } from './types.js';
 export { addSpan, binsInRange, ceilToSpan, floorToSpan, formatPeriod, nominalMs, parseDuration, shardPeriodsCovering, } from './axis.js';
 export { shardBuildableAt, sourceTierFor } from './cascade-source.js';
 export { DEFAULT_AUTO_MULTIPLIER, planQuery, planQueryFromInventory } from './planner.js';

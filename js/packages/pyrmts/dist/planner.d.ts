@@ -1,5 +1,5 @@
 import { type RecordedShard } from './shard-index.js';
-import type { Bin, Duration, Pyramid, Shard, Tier } from './types.js';
+import { type Bin, type Duration, type PlanLimits, type Pyramid, type Shard, type Tier } from './types.js';
 export type SmoothMode = 'centered' | 'trailing';
 export type SmoothingSpec = Duration | {
     auto: true;
@@ -12,6 +12,7 @@ export interface PlanQueryInput {
     };
     binBudget: number;
     targetBin?: Duration;
+    limits?: PlanLimits;
     watermarks?: Record<string, Date>;
     earliestWatermarks?: Record<string, Date>;
     earliestPerShard?: Record<string, Date>;
@@ -43,6 +44,7 @@ export interface QueryPlan {
         smoothMode: SmoothMode;
         smoothSourceTier: string;
     } | null;
+    atomCount: number;
 }
 export declare function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan;
 export declare function planQueryFromInventory(pyramid: Pyramid, input: PlanQueryInput, registeredShards: RecordedShard[]): QueryPlan;

@@ -35,9 +35,6 @@ export function validateLadders(pyramid) {
 function validateLadder(tier) {
     const binMs = binMsOrThrow(tier);
     const binMonths = isStepBin(tier.bin) ? null : monthsOrNull(tier.bin);
-    if (!isStepBin(tier.bin)) {
-        validateMonthSpan(tier.bin, tier.name);
-    }
     const shardsMs = [];
     let prevMs = null;
     let prevMonths = null;
@@ -45,13 +42,14 @@ function validateLadder(tier) {
     for (let i = 0; i < tier.shards.length; i++) {
         const shard = tier.shards[i];
         const ms = shardMsOrNull(shard, tier.name);
-        // Calendar checks (`specs/calendar-units.md`): `Nmo` must tile a year;
-        // calendar-calendar pairs divide in months (`y` ≡ `12mo`); mixed
-        // fixed/calendar pairs assert nominal-width (30d/365d) ascension and
-        // divisibility (`specs/calendar-rung-consolidation.md`).
+        // Calendar checks (`specs/calendar-units.md`): calendar-calendar pairs
+        // divide in months (`y` ≡ `12mo`); mixed fixed/calendar pairs assert
+        // nominal-width (30d/365d) ascension and divisibility
+        // (`specs/calendar-rung-consolidation.md`). Any `Nmo` width is legal —
+        // year-0 anchoring needs no tile-a-year restriction
+        // (`specs/calendar-composition-and-query-limits.md` §1).
         const months = shard === '1run' ? null : monthsOrNull(shard);
         if (shard !== '1run') {
-            validateMonthSpan(shard, tier.name);
             if (months !== null) {
                 if (i === 0 && binMonths !== null) {
                     if (months < binMonths) {
@@ -141,12 +139,5 @@ function monthsOrNull(dur) {
     if (parsed.unit === 'y')
         return 12 * parsed.count;
     return null;
-}
-function validateMonthSpan(dur, tierName) {
-    const parsed = parseDuration(dur);
-    if (parsed.unit === 'mo' && 12 % parsed.count !== 0) {
-        throw new Error(`validateLadders: tier '${tierName}' month-span '${dur}' doesn't tile a ` +
-            `year evenly (12 % ${parsed.count} !== 0)`);
-    }
 }
 //# sourceMappingURL=ladder.js.map

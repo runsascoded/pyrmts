@@ -79,6 +79,18 @@ export interface Pyramid {
     metrics: Metric[];
     tiers: Tier[];
     geo?: GeoSpec;
+    limits?: PlanLimits;
+}
+export interface PlanLimits {
+    maxOutputBins?: number;
+    maxAtoms?: number;
+    maxKeys?: number;
+}
+export declare class PlanLimitError extends Error {
+    readonly limit: 'bins' | 'atoms' | 'keys';
+    readonly requested: number;
+    readonly allowed: number;
+    constructor(limit: 'bins' | 'atoms' | 'keys', requested: number, allowed: number);
 }
 export interface GeoSpec {
     cellCol: string;

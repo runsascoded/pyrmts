@@ -108,6 +108,7 @@ export async function serveGeoQuery(opts) {
             authoritativeEnd: plan.authoritativeEnd,
             visibleRange: plan.visibleRange,
             smoothing: plan.smoothing,
+            atomCount: plan.atomCount,
         };
         const records = stitch({ pyramid, plan: timePlan, shardRows: filteredRows });
         result = {

@@ -1,4 +1,4 @@
-import { type PlanSegment, type QueryPlan, type RecordedShard, type Tier } from 'pyrmts';
+import { type Duration, type PlanLimits, type PlanSegment, type QueryPlan, type RecordedShard, type Tier } from 'pyrmts';
 import type { BBox, GeoPyramid, SpatialIndex } from './spatial-index.js';
 export type { BBox } from './spatial-index.js';
 export declare function bboxToCells(bbox: BBox, level: number): string[];
@@ -18,6 +18,8 @@ export interface PlanGeoQueryInput {
     earliestWatermarks?: Record<string, Date>;
     earliestPerShard?: Record<string, Date>;
     filter?: Record<string, string | number>;
+    targetBin?: Duration;
+    limits?: PlanLimits;
     smoothing?: import('pyrmts').SmoothingSpec;
     smoothMode?: import('pyrmts').SmoothMode;
 }

@@ -48,6 +48,8 @@ export function planGeoQuery(pyramid, input) {
         ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
         ...(input.earliestPerShard !== undefined ? { earliestPerShard: input.earliestPerShard } : {}),
         ...(input.filter !== undefined ? { filter: input.filter } : {}),
+        ...(input.targetBin !== undefined ? { targetBin: input.targetBin } : {}),
+        ...(input.limits !== undefined ? { limits: input.limits } : {}),
         ...(input.smoothing !== undefined ? { smoothing: input.smoothing } : {}),
         ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),
     });
@@ -78,6 +80,7 @@ export function planGeoQuery(pyramid, input) {
         authoritativeEnd: timePlan.authoritativeEnd,
         visibleRange: timePlan.visibleRange,
         smoothing: timePlan.smoothing,
+        atomCount: timePlan.atomCount,
     };
 }
 // Min-cover-aware variant: takes a snapshot of registered shards
@@ -112,6 +115,8 @@ export function planGeoQueryFromInventory(pyramid, input, registeredShards) {
         ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
         ...(input.earliestPerShard !== undefined ? { earliestPerShard: input.earliestPerShard } : {}),
         ...(input.filter !== undefined ? { filter: input.filter } : {}),
+        ...(input.targetBin !== undefined ? { targetBin: input.targetBin } : {}),
+        ...(input.limits !== undefined ? { limits: input.limits } : {}),
         ...(input.smoothing !== undefined ? { smoothing: input.smoothing } : {}),
         ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),
     }, registeredShards);
@@ -136,6 +141,7 @@ export function planGeoQueryFromInventory(pyramid, input, registeredShards) {
         authoritativeEnd: timePlan.authoritativeEnd,
         visibleRange: timePlan.visibleRange,
         smoothing: timePlan.smoothing,
+        atomCount: timePlan.atomCount,
     };
 }
 function pickResolution(index, bbox, resolutions, cellBudget) {

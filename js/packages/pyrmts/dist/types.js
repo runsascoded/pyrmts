@@ -18,4 +18,18 @@ export class NotSupported extends Error {
         this.name = 'NotSupported';
     }
 }
+// Raised when a plan would exceed a `PlanLimits` ceiling. Callers map this
+// to 400/413 rather than discovering the problem as an OOM.
+export class PlanLimitError extends Error {
+    limit;
+    requested;
+    allowed;
+    constructor(limit, requested, allowed) {
+        super(`planQuery: ${limit} limit exceeded (${requested} > ${allowed})`);
+        this.name = 'PlanLimitError';
+        this.limit = limit;
+        this.requested = requested;
+        this.allowed = allowed;
+    }
+}
 //# sourceMappingURL=types.js.map

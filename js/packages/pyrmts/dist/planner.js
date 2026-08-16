@@ -1,11 +1,45 @@
 // Pure query planner. Given a pyramid + viewport, choose an output tier and
 // emit a segmented plan describing which shards to read and where to
 // re-aggregate. No I/O.
-import { addSpan, binsInRange, fixedDurationMs, floorToSpan, parseDuration, shardPeriodsCovering } from './axis.js';
+import { addSpan, binsInRange, fixedDurationMs, floorToSpan, nominalMs, parseDuration, shardPeriodsCovering } from './axis.js';
 import { substituteKey } from './keys.js';
 import { validateLadders } from './ladder.js';
 import { encodeWatermarkKey } from './shard-index.js';
+import { PlanLimitError } from './types.js';
 export const DEFAULT_AUTO_MULTIPLIER = 50;
+// Cost enforcement (`specs/calendar-composition-and-query-limits.md` §3).
+// `bins` is checked pre-plan where possible (fail before packing); `atoms`
+// and `keys` are only knowable after packing, so they're checked here at
+// assembly. `binBudget` stands in for `maxOutputBins` when unset.
+function resolveLimits(pyramid, input) {
+    const limits = input.limits ?? pyramid.limits ?? {};
+    if (limits.maxOutputBins !== undefined)
+        return limits;
+    return { ...limits, maxOutputBins: input.binBudget };
+}
+function checkBins(outputBins, limits) {
+    const max = limits.maxOutputBins;
+    if (max !== undefined && outputBins > max) {
+        throw new PlanLimitError('bins', outputBins, max);
+    }
+}
+// Single choke point for every planner return: stamps `atomCount` and
+// enforces the atom/key ceilings on the assembled plan.
+function finalize(plan, atomCount, limits) {
+    if (limits.maxAtoms !== undefined && atomCount > limits.maxAtoms) {
+        throw new PlanLimitError('atoms', atomCount, limits.maxAtoms);
+    }
+    if (limits.maxKeys !== undefined) {
+        const keys = new Set();
+        for (const seg of plan.segments)
+            for (const k of seg.keys)
+                keys.add(k);
+        if (keys.size > limits.maxKeys) {
+            throw new PlanLimitError('keys', keys.size, limits.maxKeys);
+        }
+    }
+    return { ...plan, atomCount };
+}
 export function planQuery(pyramid, input) {
     if (pyramid.axis !== 'time') {
         throw new Error(`planQuery: axis '${pyramid.axis}' not yet implemented (only 'time')`);
@@ -19,6 +53,7 @@ export function planQuery(pyramid, input) {
     }
     // Validate per-tier shard ladders.
     validateLadders(pyramid);
+    const limits = resolveLimits(pyramid, input);
     if (input.targetBin !== undefined) {
         return planRagged(pyramid, input, input.targetBin);
     }
@@ -127,7 +162,7 @@ export function planQuery(pyramid, input) {
     }
     const rawWm = new Date(rawMaxMs);
     const authoritativeEnd = rawWm < to ? rawWm : null;
-    return {
+    return finalize({
         outputTier,
         outputBin: outputTier.bin,
         segments,
@@ -141,7 +176,7 @@ export function planQuery(pyramid, input) {
                 smoothSourceTier: outputTier.name,
             }
             : null,
-    };
+    }, rawSegments.length, limits);
 }
 // Ragged-decomposition planner: caller specifies the exact output bin width
 // (`targetBin`); planner packs each output bin with a minimum-item set of
@@ -163,6 +198,8 @@ function planRagged(pyramid, input, targetBin) {
     if (tParsed.unit === 'mo' || tParsed.unit === 'y') {
         return planRaggedCalendar(pyramid, input, targetBin, tParsed);
     }
+    const limits = resolveLimits(pyramid, input);
+    checkBins(binsInRange(from, to, targetBin), limits);
     const targetBinMs = fixedDurationMs(targetBin);
     const eligibleTiers = [];
     for (const tier of pyramid.tiers) {
@@ -261,7 +298,7 @@ function planRagged(pyramid, input, targetBin) {
     }
     const rawWm = effective[pyramid.tiers[0].name];
     const authoritativeEnd = rawWm < to ? rawWm : null;
-    return {
+    return finalize({
         ...(outputTier !== undefined ? { outputTier } : {}),
         outputBin: targetBin,
         segments,
@@ -275,7 +312,7 @@ function planRagged(pyramid, input, targetBin) {
                 smoothSourceTier: outputTier?.name ?? `<ragged:${targetBin}>`,
             }
             : null,
-    };
+    }, atoms.length, limits);
 }
 function decomposeBin(eligibleTiers, targetBinMs, binStartMs) {
     const binEndMs = binStartMs + targetBinMs;
@@ -332,16 +369,34 @@ function spanWidthEquals(a, b) {
         return am === bm;
     return fixedDurationMs(a) === fixedDurationMs(b);
 }
-// Source-tier selection for a calendar `targetBin` (`specs/calendar-units.md`):
-//   - `exactTier`: a materialized calendar tier whose bin width equals the
-//     target's (months-normalized) — preferred per-bin when covered.
-//   - `eligible`: fixed-width tiers usable for het-tiling, coarsest-first.
-//     Calendar bin boundaries are day-aligned, so whole-day multiples plus
-//     day-divisor base tiers (`1d` or finer) qualify; a base tier is what
-//     makes packing exact, so without one (and without `exactTier`) the
-//     target is unservable and we throw. With `exactTier` but no base,
-//     het-tiling is disabled (partial multi-day covers with dropped residue
-//     would silently misreport bins) — uncovered bins are simply omitted.
+function fixedGrid(tier, ms) {
+    return {
+        tier,
+        floor: t => Math.floor(t / ms) * ms,
+        next: t => t + ms,
+        nominalMs: ms,
+        isBase: DAY_MS % ms === 0,
+    };
+}
+function calendarGrid(tier, span) {
+    return {
+        tier,
+        floor: t => floorToSpan(new Date(t), span).getTime(),
+        next: t => addSpan(new Date(t), span).getTime(),
+        nominalMs: nominalMs(tier.bin),
+        isBase: false,
+    };
+}
+// `ceil` on a grid: `t` if already aligned, else the next boundary.
+function gridCeil(g, t) {
+    const f = g.floor(t);
+    return f === t ? f : g.next(f);
+}
+// Packing sources for a calendar target, coarsest-first by nominal width.
+// Calendar tiers finer than the target join the fixed day tiers as sources
+// — greedy containment decides what actually fits, so no divisibility
+// filter is applied (a `5mo` target takes 2×`2mo` + 1×`1mo`); divisibility
+// only guarantees that an exact whole-bin cover exists.
 function calendarEligibleTiers(pyramid, targetBin, caller) {
     const t = parseDuration(targetBin);
     const targetMonths = t.unit === 'mo' ? t.count : t.count * 12;
@@ -351,16 +406,22 @@ function calendarEligibleTiers(pyramid, targetBin, caller) {
         const p = parseDuration(tier.bin);
         if (p.unit === 'mo' || p.unit === 'y') {
             const months = p.unit === 'mo' ? p.count : p.count * 12;
-            if (months === targetMonths && exactTier === undefined)
-                exactTier = tier;
+            if (months === targetMonths) {
+                if (exactTier === undefined)
+                    exactTier = tier;
+                continue;
+            }
+            if (months > targetMonths)
+                continue;
+            eligible.push(calendarGrid(tier, p));
             continue;
         }
         const ms = fixedDurationMs(tier.bin);
         if (ms % DAY_MS !== 0 && DAY_MS % ms !== 0)
             continue;
-        eligible.push({ tier, ms });
+        eligible.push(fixedGrid(tier, ms));
     }
-    const hasBase = eligible.some(e => DAY_MS % e.ms === 0);
+    const hasBase = eligible.some(e => e.isBase);
     if (!hasBase) {
         if (exactTier === undefined) {
             throw new Error(`${caller}: calendar targetBin '${targetBin}' needs a base tier whose bin divides 1d ` +
@@ -368,7 +429,9 @@ function calendarEligibleTiers(pyramid, targetBin, caller) {
         }
         eligible.length = 0;
     }
-    eligible.sort((x, y) => y.ms - x.ms);
+    // Coarsest-first; at equal nominal width a calendar source outranks a
+    // fixed one (its bins land on the target's own boundaries).
+    eligible.sort((x, y) => (y.nominalMs - x.nominalMs) || (Number(y.isBase) - Number(x.isBase)));
     return { ...(exactTier !== undefined ? { exactTier } : {}), eligible };
 }
 // Calendar-target ragged planner, watermark flavor (`specs/calendar-units.md`
@@ -380,6 +443,8 @@ function calendarEligibleTiers(pyramid, targetBin, caller) {
 function planRaggedCalendar(pyramid, input, targetBin, targetSpan) {
     const { from, to } = input.range;
     const { exactTier, eligible } = calendarEligibleTiers(pyramid, targetBin, 'planQuery');
+    const limits = resolveLimits(pyramid, input);
+    checkBins(binsInRange(from, to, targetBin), limits);
     const smoothMode = input.smoothMode ?? 'centered';
     const smoothing = input.smoothing !== undefined
         ? resolveSmoothing(input.smoothing, targetBin, from, to, smoothMode)
@@ -426,7 +491,7 @@ function planRaggedCalendar(pyramid, input, targetBin, targetSpan) {
     }
     const rawWm = effective[pyramid.tiers[0].name];
     const authoritativeEnd = rawWm < to ? rawWm : null;
-    return {
+    return finalize({
         ...(exactTier !== undefined ? { outputTier: exactTier } : {}),
         outputBin: targetBin,
         segments,
@@ -440,7 +505,7 @@ function planRaggedCalendar(pyramid, input, targetBin, targetSpan) {
                 smoothSourceTier: exactTier?.name ?? `<ragged:${targetBin}>`,
             }
             : null,
-    };
+    }, atoms.length, limits);
 }
 // Greedy segment-tree pack of `[startMs, endMs)`, watermark flavor: at the
 // coarsest tier, take the run of grid-aligned atoms fully inside the
@@ -456,20 +521,25 @@ function planRaggedCalendar(pyramid, input, targetBin, targetSpan) {
 function packCalendarWatermark(tiers, effective, earliest, startMs, endMs, tierIdx, out) {
     if (startMs >= endMs || tierIdx >= tiers.length)
         return;
-    const { tier, ms } = tiers[tierIdx];
+    const g = tiers[tierIdx];
+    const { tier } = g;
     const eff = effective[tier.name].getTime();
     const earlyDate = earliest[tier.name];
     const early = earlyDate === undefined ? -Infinity : earlyDate.getTime();
-    const runStart = Math.ceil(Math.max(startMs, early) / ms) * ms;
-    const runEnd = Math.floor(Math.min(endMs, eff) / ms) * ms;
+    // Whole sealed source bins fully inside [start, end): a mid-period row
+    // could pull cross-boundary data into the target bin, so only sealed
+    // whole bins may be emitted here (calendar tiers included — their bins
+    // vary in width, hence the grid walk rather than ms division).
+    const runStart = gridCeil(g, Math.max(startMs, early));
+    const runEnd = g.floor(Math.min(endMs, eff));
     let covered = null;
     if (runStart < runEnd) {
         out.push({ tier, absStartMs: runStart, absEndMs: runEnd });
         covered = { start: runStart, end: runEnd };
     }
-    if (DAY_MS % ms === 0) {
+    if (g.isBase) {
         const clipTo = Math.min(endMs, eff);
-        const pStart = Math.floor(clipTo / ms) * ms;
+        const pStart = g.floor(clipTo);
         if (pStart < clipTo && pStart >= startMs && early <= pStart
             && (covered === null || pStart >= covered.end)) {
             out.push({ tier, absStartMs: pStart, absEndMs: clipTo });
@@ -795,6 +865,7 @@ export function planQueryFromInventory(pyramid, input, registeredShards) {
         throw new Error(`planQueryFromInventory: empty range (${from.toISOString()} → ${to.toISOString()})`);
     }
     validateLadders(pyramid);
+    const limits = resolveLimits(pyramid, input);
     const tierInventory = buildTierInventory(registeredShards);
     if (input.targetBin !== undefined) {
         return planRaggedFromInventory(pyramid, input, input.targetBin, tierInventory);
@@ -861,7 +932,7 @@ export function planQueryFromInventory(pyramid, input, registeredShards) {
     }
     const rawWm = new Date(rawMaxMs);
     const authoritativeEnd = rawWm < to ? rawWm : null;
-    return {
+    return finalize({
         outputTier,
         outputBin: outputTier.bin,
         segments,
@@ -875,7 +946,7 @@ export function planQueryFromInventory(pyramid, input, registeredShards) {
                 smoothSourceTier: outputTier.name,
             }
             : null,
-    };
+    }, segments.length, limits);
 }
 // Ragged-decomposition variant. Same shape as `planRagged` but the DP
 // only considers a tier-T atom `[cursor, cursor + tier.bin)` if a
@@ -888,6 +959,8 @@ function planRaggedFromInventory(pyramid, input, targetBin, tierInventory) {
     if (tParsed.unit === 'mo' || tParsed.unit === 'y') {
         return planRaggedCalendarFromInventory(pyramid, input, targetBin, tParsed, tierInventory);
     }
+    const limits = resolveLimits(pyramid, input);
+    checkBins(binsInRange(from, to, targetBin), limits);
     const targetBinMs = fixedDurationMs(targetBin);
     const eligibleTiers = [];
     for (const tier of pyramid.tiers) {
@@ -999,7 +1072,7 @@ function planRaggedFromInventory(pyramid, input, targetBin, tierInventory) {
     const effective = effectiveLargestShardWatermarks(pyramid.tiers, input.watermarks ?? {}, plannedTo);
     const rawWm = effective[pyramid.tiers[0].name];
     const authoritativeEnd = rawWm < to ? rawWm : null;
-    return {
+    return finalize({
         ...(outputTier !== undefined ? { outputTier } : {}),
         outputBin: targetBin,
         segments,
@@ -1013,7 +1086,7 @@ function planRaggedFromInventory(pyramid, input, targetBin, tierInventory) {
                 smoothSourceTier: outputTier?.name ?? `<ragged:${targetBin}>`,
             }
             : null,
-    };
+    }, atoms.length, limits);
 }
 // Materialize a coalesced ragged range against inventory: walk period
 // order picking one covering tile per stretch. Under min-cover a single
@@ -1064,6 +1137,8 @@ function inventoryRaggedSegment(tierInventory, range, targetBin) {
 function planRaggedCalendarFromInventory(pyramid, input, targetBin, targetSpan, tierInventory) {
     const { from, to } = input.range;
     const { exactTier, eligible } = calendarEligibleTiers(pyramid, targetBin, 'planQueryFromInventory');
+    const limits = resolveLimits(pyramid, input);
+    checkBins(binsInRange(from, to, targetBin), limits);
     const smoothMode = input.smoothMode ?? 'centered';
     const smoothing = input.smoothing !== undefined
         ? resolveSmoothing(input.smoothing, targetBin, from, to, smoothMode)
@@ -1111,7 +1186,7 @@ function planRaggedCalendarFromInventory(pyramid, input, targetBin, targetSpan, 
     }
     const rawWm = effective[pyramid.tiers[0].name];
     const authoritativeEnd = rawWm < to ? rawWm : null;
-    return {
+    return finalize({
         ...(exactTier !== undefined ? { outputTier: exactTier } : {}),
         outputBin: targetBin,
         segments,
@@ -1125,7 +1200,7 @@ function planRaggedCalendarFromInventory(pyramid, input, targetBin, targetSpan, 
                 smoothSourceTier: exactTier?.name ?? `<ragged:${targetBin}>`,
             }
             : null,
-    };
+    }, atoms.length, limits);
 }
 // Greedy pack of `[startMs, endMs)`, inventory flavor: at the coarsest
 // tier, take every grid-aligned atom fully inside the interval that a
@@ -1136,20 +1211,22 @@ function planRaggedCalendarFromInventory(pyramid, input, targetBin, targetSpan, 
 function packCalendarInventory(tiers, tierInventory, startMs, endMs, tierIdx, out) {
     if (startMs >= endMs || tierIdx >= tiers.length)
         return;
-    const { tier, ms } = tiers[tierIdx];
+    const g = tiers[tierIdx];
+    const { tier } = g;
     const rows = tierInventory.get(tier.name);
     if (rows === undefined || rows.length === 0) {
         packCalendarInventory(tiers, tierInventory, startMs, endMs, tierIdx + 1, out);
         return;
     }
     let gapStart = startMs;
-    for (let c = Math.ceil(startMs / ms) * ms; c + ms <= endMs; c += ms) {
-        if (fullyContainingRows(rows, c, c + ms).length === 0)
+    for (let c = gridCeil(g, startMs); g.next(c) <= endMs; c = g.next(c)) {
+        const cEnd = g.next(c);
+        if (fullyContainingRows(rows, c, cEnd).length === 0)
             continue;
-        out.push({ tier, absStartMs: c, absEndMs: c + ms });
+        out.push({ tier, absStartMs: c, absEndMs: cEnd });
         if (gapStart < c)
             packCalendarInventory(tiers, tierInventory, gapStart, c, tierIdx + 1, out);
-        gapStart = c + ms;
+        gapStart = cEnd;
     }
     if (gapStart < endMs)
         packCalendarInventory(tiers, tierInventory, gapStart, endMs, tierIdx + 1, out);

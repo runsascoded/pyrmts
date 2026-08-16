@@ -2,7 +2,7 @@
 // emit a segmented plan describing which shards to read and where to
 // re-aggregate. No I/O.
 
-import { addSpan, binsInRange, fixedDurationMs, floorToSpan, parseDuration, shardPeriodsCovering, type ParsedTimeSpan } from './axis.js'
+import { addSpan, binsInRange, fixedDurationMs, floorToSpan, nominalMs, parseDuration, shardPeriodsCovering, type ParsedTimeSpan } from './axis.js'
 import { substituteKey } from './keys.js'
 import { validateLadders } from './ladder.js'
 import { encodeWatermarkKey, type RecordedShard } from './shard-index.js'
@@ -566,27 +566,77 @@ function spanWidthEquals(a: Duration, b: Duration): boolean {
 //     target is unservable and we throw. With `exactTier` but no base,
 //     het-tiling is disabled (partial multi-day covers with dropped residue
 //     would silently misreport bins) — uncovered bins are simply omitted.
+// A packing source: one tier plus the grid its bins live on. Fixed tiers
+// floor/step by ms; calendar tiers by `floorToSpan`/`addSpan`
+// (`specs/calendar-composition-and-query-limits.md` §2). Ordering uses
+// nominal widths (mo = 30d, y = 365d) — comparisons only, never arithmetic.
+interface PackGrid {
+  tier: Tier
+  floor: (ms: number) => number
+  next: (ms: number) => number
+  nominalMs: number
+  // Bin divides 1d, so this tier can serve an arbitrary sub-day residue and
+  // emit a clipped trailing atom. Calendar tiers are never base.
+  isBase: boolean
+}
+
+function fixedGrid(tier: Tier, ms: number): PackGrid {
+  return {
+    tier,
+    floor: t => Math.floor(t / ms) * ms,
+    next: t => t + ms,
+    nominalMs: ms,
+    isBase: DAY_MS % ms === 0,
+  }
+}
+
+function calendarGrid(tier: Tier, span: ParsedTimeSpan): PackGrid {
+  return {
+    tier,
+    floor: t => floorToSpan(new Date(t), span).getTime(),
+    next: t => addSpan(new Date(t), span).getTime(),
+    nominalMs: nominalMs(tier.bin as Duration),
+    isBase: false,
+  }
+}
+
+// `ceil` on a grid: `t` if already aligned, else the next boundary.
+function gridCeil(g: PackGrid, t: number): number {
+  const f = g.floor(t)
+  return f === t ? f : g.next(f)
+}
+
+// Packing sources for a calendar target, coarsest-first by nominal width.
+// Calendar tiers finer than the target join the fixed day tiers as sources
+// — greedy containment decides what actually fits, so no divisibility
+// filter is applied (a `5mo` target takes 2×`2mo` + 1×`1mo`); divisibility
+// only guarantees that an exact whole-bin cover exists.
 function calendarEligibleTiers(
   pyramid: Pyramid,
   targetBin: Duration,
   caller: string,
-): { exactTier?: Tier; eligible: { tier: Tier; ms: number }[] } {
+): { exactTier?: Tier; eligible: PackGrid[] } {
   const t = parseDuration(targetBin)
   const targetMonths = t.unit === 'mo' ? t.count : t.count * 12
   let exactTier: Tier | undefined
-  const eligible: { tier: Tier; ms: number }[] = []
+  const eligible: PackGrid[] = []
   for (const tier of pyramid.tiers) {
     const p = parseDuration(tier.bin as Duration)
     if (p.unit === 'mo' || p.unit === 'y') {
       const months = p.unit === 'mo' ? p.count : p.count * 12
-      if (months === targetMonths && exactTier === undefined) exactTier = tier
+      if (months === targetMonths) {
+        if (exactTier === undefined) exactTier = tier
+        continue
+      }
+      if (months > targetMonths) continue
+      eligible.push(calendarGrid(tier, p))
       continue
     }
     const ms = fixedDurationMs(tier.bin as Duration)
     if (ms % DAY_MS !== 0 && DAY_MS % ms !== 0) continue
-    eligible.push({ tier, ms })
+    eligible.push(fixedGrid(tier, ms))
   }
-  const hasBase = eligible.some(e => DAY_MS % e.ms === 0)
+  const hasBase = eligible.some(e => e.isBase)
   if (!hasBase) {
     if (exactTier === undefined) {
       throw new Error(
@@ -596,7 +646,9 @@ function calendarEligibleTiers(
     }
     eligible.length = 0
   }
-  eligible.sort((x, y) => y.ms - x.ms)
+  // Coarsest-first; at equal nominal width a calendar source outranks a
+  // fixed one (its bins land on the target's own boundaries).
+  eligible.sort((x, y) => (y.nominalMs - x.nominalMs) || (Number(y.isBase) - Number(x.isBase)))
   return { ...(exactTier !== undefined ? { exactTier } : {}), eligible }
 }
 
@@ -696,7 +748,7 @@ function planRaggedCalendar(
 // dropped — watermark coverage is edge-monotone, so residues only occur at
 // the genesis/tip edges.
 function packCalendarWatermark(
-  tiers: { tier: Tier; ms: number }[],
+  tiers: PackGrid[],
   effective: Record<string, Date>,
   earliest: Record<string, Date | undefined>,
   startMs: number,
@@ -705,20 +757,25 @@ function packCalendarWatermark(
   out: RaggedAtom[],
 ): void {
   if (startMs >= endMs || tierIdx >= tiers.length) return
-  const { tier, ms } = tiers[tierIdx]!
+  const g = tiers[tierIdx]!
+  const { tier } = g
   const eff = effective[tier.name]!.getTime()
   const earlyDate = earliest[tier.name]
   const early = earlyDate === undefined ? -Infinity : earlyDate.getTime()
-  const runStart = Math.ceil(Math.max(startMs, early) / ms) * ms
-  const runEnd = Math.floor(Math.min(endMs, eff) / ms) * ms
+  // Whole sealed source bins fully inside [start, end): a mid-period row
+  // could pull cross-boundary data into the target bin, so only sealed
+  // whole bins may be emitted here (calendar tiers included — their bins
+  // vary in width, hence the grid walk rather than ms division).
+  const runStart = gridCeil(g, Math.max(startMs, early))
+  const runEnd = g.floor(Math.min(endMs, eff))
   let covered: { start: number; end: number } | null = null
   if (runStart < runEnd) {
     out.push({ tier, absStartMs: runStart, absEndMs: runEnd })
     covered = { start: runStart, end: runEnd }
   }
-  if (DAY_MS % ms === 0) {
+  if (g.isBase) {
     const clipTo = Math.min(endMs, eff)
-    const pStart = Math.floor(clipTo / ms) * ms
+    const pStart = g.floor(clipTo)
     if (
       pStart < clipTo && pStart >= startMs && early <= pStart
       && (covered === null || pStart >= covered.end)
@@ -1491,7 +1548,7 @@ function planRaggedCalendarFromInventory(
 // coverage here isn't interval-monotone, so atoms are tested one by one
 // and interior gaps recurse too.
 function packCalendarInventory(
-  tiers: { tier: Tier; ms: number }[],
+  tiers: PackGrid[],
   tierInventory: TierInventory,
   startMs: number,
   endMs: number,
@@ -1499,18 +1556,20 @@ function packCalendarInventory(
   out: RaggedAtom[],
 ): void {
   if (startMs >= endMs || tierIdx >= tiers.length) return
-  const { tier, ms } = tiers[tierIdx]!
+  const g = tiers[tierIdx]!
+  const { tier } = g
   const rows = tierInventory.get(tier.name)
   if (rows === undefined || rows.length === 0) {
     packCalendarInventory(tiers, tierInventory, startMs, endMs, tierIdx + 1, out)
     return
   }
   let gapStart = startMs
-  for (let c = Math.ceil(startMs / ms) * ms; c + ms <= endMs; c += ms) {
-    if (fullyContainingRows(rows, c, c + ms).length === 0) continue
-    out.push({ tier, absStartMs: c, absEndMs: c + ms })
+  for (let c = gridCeil(g, startMs); g.next(c) <= endMs; c = g.next(c)) {
+    const cEnd = g.next(c)
+    if (fullyContainingRows(rows, c, cEnd).length === 0) continue
+    out.push({ tier, absStartMs: c, absEndMs: cEnd })
     if (gapStart < c) packCalendarInventory(tiers, tierInventory, gapStart, c, tierIdx + 1, out)
-    gapStart = c + ms
+    gapStart = cEnd
   }
   if (gapStart < endMs) packCalendarInventory(tiers, tierInventory, gapStart, endMs, tierIdx + 1, out)
 }

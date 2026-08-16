@@ -936,12 +936,25 @@ describe('planQuery: calendar targetBin (het-tiling)', () => {
     )
   })
 
-  test('rejects month spans that do not tile a year', () => {
-    expect(() => planQuery(days, {
-      range: { from: d('2026-01-01T00:00:00Z'), to: d('2027-01-01T00:00:00Z') },
+  test('packs a month span that does not tile a year (year-0 grid)', () => {
+    // `5mo` is legal under year-0 anchoring
+    // (`specs/calendar-composition-and-query-limits.md` §1). The requested
+    // range is exactly one 5mo bin — [2026-04, 2026-09) is grid-aligned
+    // since 12*2026 + 3 = 24315 = 5 × 4863 — so the whole pack is that
+    // bin's het-tiling from the day tiers.
+    const plan = planQuery(days, {
+      range: { from: d('2026-04-01T00:00:00Z'), to: d('2026-09-01T00:00:00Z') },
       binBudget: 1000,
       targetBin: '5mo',
-    })).toThrow("Month-span 5mo doesn't tile a year evenly (12 % 5 !== 0)")
+    })
+    expect(plan.outputBin).toBe('5mo')
+    expect(segments(plan)).toEqual([
+      { from: '2026-04-01T00:00:00.000Z', to: '2026-04-02T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-04-02T00:00:00.000Z', to: '2026-04-09T00:00:00.000Z', tier: 'd7', keys: ['toy/d7/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-04-09T00:00:00.000Z', to: '2026-08-27T00:00:00.000Z', tier: 'd14', keys: ['toy/d14/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-08-27T00:00:00.000Z', to: '2026-08-29T00:00:00.000Z', tier: 'd1', keys: ['toy/d1/1y/2026.parquet'], reaggregate: true },
+      { from: '2026-08-29T00:00:00.000Z', to: '2026-09-01T00:00:00.000Z', tier: 'd3', keys: ['toy/d3/1y/2026.parquet'], reaggregate: true },
+    ])
   })
 })
 

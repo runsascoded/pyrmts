@@ -51,22 +51,22 @@ export function addSpan(t: Date, span: ParsedTimeSpan): Date {
 
 // Floor a UTC instant to the start of its span. Supports count=1 for all
 // units, and count>1 for fixed-width units (min/h/d) via ms division.
-// Multi-unit calendar bins (`Nmo`, `Ny`) anchor at year-0 boundaries:
+// Multi-unit calendar bins (`Nmo`, `Ny`) anchor at year 0: `Nmo` floors
+// months-since-year-0 (`M = 12*yyyy + mm`) to a multiple of N, so
 //   3mo  → Jan, Apr, Jul, Oct       (Gregorian quarters)
 //   6mo  → Jan, Jul                  (semesters)
 //   2y   → year aligned to floor(yyyy / 2) * 2
-//   etc.
-// 12 must be divisible by `count` for month spans (only 1, 2, 3, 4, 6, 12
-// are valid `Nmo` widths — others don't tile a year evenly).
+//   5mo  → …, 2025-11, 2026-04, 2026-09, …  (drifts across years — inherent
+//          to any width that doesn't divide 12, not a defect)
+// Year-0 anchoring makes `Ny ≡ (12N)mo` an identity for all N, and reduces
+// calendar-grid containment to count divisibility
+// (`specs/calendar-composition-and-query-limits.md` §1).
 export function floorToSpan(t: Date, span: ParsedTimeSpan): Date {
   const { count, unit } = span
   if (count !== 1) {
     if (unit === 'mo') {
-      if (12 % count !== 0) {
-        throw new Error(`Month-span ${count}mo doesn't tile a year evenly (12 % ${count} !== 0)`)
-      }
-      const flooredMo = Math.floor(t.getUTCMonth() / count) * count
-      return new Date(Date.UTC(t.getUTCFullYear(), flooredMo))
+      const m = Math.floor((12 * t.getUTCFullYear() + t.getUTCMonth()) / count) * count
+      return new Date(Date.UTC(Math.floor(m / 12), ((m % 12) + 12) % 12))
     }
     if (unit === 'y') {
       return new Date(Date.UTC(Math.floor(t.getUTCFullYear() / count) * count, 0))

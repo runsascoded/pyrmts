@@ -137,9 +137,15 @@ def test_multi_unit_calendar_spans():
     ]
 
 
-def test_month_span_must_tile_year():
-    import pytest
-
-    with pytest.raises(ValueError) as exc:
-        floor_to_span(datetime(2026, 5, 10, tzinfo=UTC), parse_duration('5mo'))
-    assert str(exc.value) == "Month-span 5mo doesn't tile a year evenly (12 % 5 !== 0)"
+def test_month_spans_drift_on_year0_grid():
+    """`Nmo` widths that don't divide 12 are legal and drift across years
+    (`specs/calendar-composition-and-query-limits.md` §1): from 2026-01 the
+    5mo grid is …, 2025-11, 2026-04, 2026-09, …"""
+    span5 = parse_duration('5mo')
+    assert floor_to_span(datetime(2026, 1, 15, 12, tzinfo=UTC), span5) == datetime(2025, 11, 1, tzinfo=UTC)
+    assert floor_to_span(datetime(2026, 5, 10, tzinfo=UTC), span5) == datetime(2026, 4, 1, tzinfo=UTC)
+    assert floor_to_span(datetime(2026, 4, 1, tzinfo=UTC), span5) == datetime(2026, 4, 1, tzinfo=UTC)
+    assert floor_to_span(datetime(2026, 5, 10, tzinfo=UTC), parse_duration('7mo')) == datetime(2025, 12, 1, tzinfo=UTC)
+    # `Ny ≡ (12N)mo` identity under year-0 anchoring.
+    assert floor_to_span(datetime(2026, 5, 10, tzinfo=UTC), parse_duration('48mo')) == datetime(2024, 1, 1, tzinfo=UTC)
+    assert floor_to_span(datetime(2026, 5, 10, tzinfo=UTC), parse_duration('4y')) == datetime(2024, 1, 1, tzinfo=UTC)

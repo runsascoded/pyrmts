@@ -68,17 +68,15 @@ def floor_to_span(t: datetime, span: ParsedTimeSpan) -> datetime:
     t = _ensure_utc(t)
     count, unit = span.count, span.unit
     if count != 1:
-        # Multi-unit calendar spans (`specs/calendar-units.md`; JS
-        # `floorToSpan` is the deployed reference):
-        # `Nmo` floors month-of-year to a multiple of N (year-anchored ≡
-        # epoch-anchored since 12 % N == 0); `Ny` is year-0 anchored.
+        # Multi-unit calendar spans (`specs/calendar-units.md`,
+        # `specs/calendar-composition-and-query-limits.md` §1; JS
+        # `floorToSpan` is the deployed reference): `Nmo` floors
+        # months-since-year-0 (`M = 12*yyyy + (mm-1)`) to a multiple of N —
+        # any N is legal, widths that don't divide 12 drift across years;
+        # `Ny` is year-0 anchored, so `Ny ≡ (12N)mo` for all N.
         if unit == 'mo':
-            if 12 % count != 0:
-                raise ValueError(
-                    f"Month-span {count}mo doesn't tile a year evenly (12 % {count} !== 0)"
-                )
-            floored_mo = (t.month - 1) // count * count
-            return t.replace(month=floored_mo + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+            m = (12 * t.year + t.month - 1) // count * count
+            return t.replace(year=m // 12, month=m % 12 + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
         if unit == 'y':
             return t.replace(year=t.year // count * count, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
         bin_ms = count * _MS[unit]

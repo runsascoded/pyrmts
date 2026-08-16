@@ -250,20 +250,15 @@ def _validate_shard_ladder(
     """`shards` must be ascending; each fixed-width rung must divide the next
     fixed-width rung. `bin_` (if fixed-width) must divide `shards[0]` (if
     fixed-width). Calendar durations (`mo`/`y`) divide in *months* (`y` ≡
-    `12mo`) against calendar neighbors, and `Nmo` must tile a year
-    (`12 % N == 0`); mixed fixed/calendar pairs check nominal-width
-    (30d/365d) ascension and divisibility — month-length variation makes
-    exact integer-ms comparisons meaningless there, but the nominal chain
-    keeps consolidation tiling sane (`specs/calendar-units.md`,
+    `12mo`) against calendar neighbors — any `Nmo` width is legal, since
+    year-0 anchoring needs no tile-a-year restriction
+    (`specs/calendar-composition-and-query-limits.md` §1); mixed
+    fixed/calendar pairs check nominal-width (30d/365d) ascension and
+    divisibility — month-length variation makes exact integer-ms
+    comparisons meaningless there, but the nominal chain keeps
+    consolidation tiling sane (`specs/calendar-units.md`,
     `specs/calendar-rung-consolidation.md`).
     Mirrors JS `validateLadders` (`js/.../ladder.ts`)."""
-    for dur in [bin_] + shards:
-        span = parse_duration(dur)
-        if span.unit == 'mo' and 12 % span.count != 0:
-            raise ValueError(
-                f"parse_pyramid_yaml: tiers[{tier_idx}] ({tier_name!r}): "
-                f"month-span {dur!r} doesn't tile a year evenly (12 % {span.count} !== 0)"
-            )
     bin_months = _months_or_none(bin_)
     shard_months = [_months_or_none(s) for s in shards]
     if bin_months is not None and shard_months[0] is not None:

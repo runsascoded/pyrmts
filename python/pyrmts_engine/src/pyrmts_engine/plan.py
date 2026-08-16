@@ -66,17 +66,14 @@ def bin_floor_expr(col: str, bin_dur: str) -> pl.Expr:
     """Polars expression flooring an epoch-ms column to `bin_dur` starts."""
     span = parse_duration(bin_dur)
     if span.unit == 'mo':
-        if 12 % span.count != 0:
-            raise ValueError(
-                f"Month-span {span.count}mo doesn't tile a year evenly (12 % {span.count} !== 0)"
-            )
-        # truncate('Nmo') is epoch-anchored, which matches the contract's
-        # year-anchoring exactly when 12 % N == 0 (1970-01 is a January).
-        return (
-            pl.col(col).cast(pl.Datetime('ms'))
-            .dt.truncate(f"{span.count}mo")
-            .cast(pl.Int64)
-        )
+        # NOT truncate('Nmo'): polars anchors multi-month at the epoch
+        # (1970-01), the contract (JS `floorToSpan`) is year-0 anchored —
+        # they agree only when 12 % N == 0. Floor months-since-year-0
+        # (`M = 12*year + (month-1)`) instead, which is correct for every N
+        # (`specs/calendar-composition-and-query-limits.md` §1).
+        dt = pl.col(col).cast(pl.Datetime('ms'))
+        m = (dt.dt.year() * 12 + dt.dt.month() - 1) // span.count * span.count
+        return pl.datetime(m // 12, m % 12 + 1, 1, time_unit='ms').cast(pl.Int64)
     if span.unit == 'y':
         # NOT truncate('Ny'): polars anchors multi-year at the epoch (1970),
         # the contract (JS `floorToSpan`) is year-0 anchored — `4y` → 2024,

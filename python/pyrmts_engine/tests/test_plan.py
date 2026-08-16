@@ -138,9 +138,23 @@ def test_bin_floor_expr_calendar_parity():
         assert (span, floored) == (span, expected)
 
 
-def test_bin_floor_expr_month_span_must_tile_year():
+def test_bin_floor_expr_non_year_dividing_months():
+    """`Nmo` widths that don't divide 12 floor on the year-0 month grid —
+    the regression pin for the polars `Nmo` anchor divergence
+    (`dt.truncate('7mo')` is epoch-anchored: 2026-05-10 would floor to
+    2026-01, the contract says 2025-12;
+    `specs/calendar-composition-and-query-limits.md` §1)."""
+    from datetime import datetime, timezone
+
+    import polars as pl
+
     from pyrmts_engine.plan import bin_floor_expr
 
-    with pytest.raises(ValueError) as exc:
-        bin_floor_expr('dt', '5mo')
-    assert str(exc.value) == "Month-span 5mo doesn't tile a year evenly (12 % 5 !== 0)"
+    ts = lambda *args: int(datetime(*args, tzinfo=timezone.utc).timestamp() * 1000)
+    df = pl.DataFrame({'dt': [ts(2026, 1, 15), ts(2026, 5, 10), ts(2026, 9, 30)]})
+    assert df.select(bin_floor_expr('dt', '5mo').alias('f'))['f'].to_list() == [
+        ts(2025, 11, 1), ts(2026, 4, 1), ts(2026, 9, 1),
+    ]
+    assert df.select(bin_floor_expr('dt', '7mo').alias('f'))['f'].to_list() == [
+        ts(2025, 12, 1), ts(2025, 12, 1), ts(2026, 7, 1),
+    ]

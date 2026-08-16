@@ -32,9 +32,11 @@ describe('validateLadders calendar rungs', () => {
       .toThrow("validateLadders: tier 'mo' shards[0]='2mo' does not divide shards[1]='3mo' (in months)")
   })
 
-  test('rejects month spans that do not tile a year', () => {
+  test('accepts month spans that do not tile a year (year-0 anchoring)', () => {
+    expect(() => validateLadders(pyramidWith({ bin: '5mo', shards: ['5mo', '10mo'] }))).not.toThrow()
+    // Divisibility-in-months still applies: 12 (1y) is not a multiple of 5.
     expect(() => validateLadders(pyramidWith({ bin: '5mo', shards: ['1y'] })))
-      .toThrow("validateLadders: tier 'mo' month-span '5mo' doesn't tile a year evenly (12 % 5 !== 0)")
+      .toThrow("validateLadders: tier 'mo' bin '5mo' does not divide shards[0]='1y' (in months)")
   })
 
   test('rejects calendar shard smaller than calendar bin', () => {

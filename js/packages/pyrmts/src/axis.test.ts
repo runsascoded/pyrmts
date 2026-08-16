@@ -24,8 +24,21 @@ describe('floorToSpan calendar parity', () => {
     expect(got).toEqual(fixture.cases)
   })
 
-  test('Nmo spans must tile a year evenly', () => {
-    expect(() => floorToSpan(new Date('2026-05-10T00:00:00Z'), { count: 5, unit: 'mo' }))
-      .toThrow("Month-span 5mo doesn't tile a year evenly (12 % 5 !== 0)")
+  test('Nmo spans that do not divide 12 drift on the year-0 month grid', () => {
+    // From 2026-01 the 5mo grid is …, 2025-11, 2026-04, 2026-09, … —
+    // year-crossing drift is inherent to widths that don't divide 12
+    // (`specs/calendar-composition-and-query-limits.md` §1).
+    const span5 = { count: 5, unit: 'mo' } as const
+    expect(floorToSpan(new Date('2026-01-15T12:00:00Z'), span5).toISOString()).toBe('2025-11-01T00:00:00.000Z')
+    expect(floorToSpan(new Date('2026-05-10T00:00:00Z'), span5).toISOString()).toBe('2026-04-01T00:00:00.000Z')
+    expect(floorToSpan(new Date('2026-04-01T00:00:00Z'), span5).toISOString()).toBe('2026-04-01T00:00:00.000Z')
+    expect(floorToSpan(new Date('2026-09-30T23:59:59Z'), span5).toISOString()).toBe('2026-09-01T00:00:00.000Z')
+    expect(floorToSpan(new Date('2026-05-10T00:00:00Z'), { count: 7, unit: 'mo' }).toISOString()).toBe('2025-12-01T00:00:00.000Z')
+  })
+
+  test('Ny ≡ (12N)mo identity under year-0 anchoring', () => {
+    const t = new Date('2026-05-10T00:00:00Z')
+    expect(floorToSpan(t, { count: 48, unit: 'mo' }).toISOString()).toBe('2024-01-01T00:00:00.000Z')
+    expect(floorToSpan(t, { count: 4, unit: 'y' }).toISOString()).toBe('2024-01-01T00:00:00.000Z')
   })
 })

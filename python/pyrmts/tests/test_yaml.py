@@ -244,12 +244,17 @@ def test_rejects_non_dividing_calendar_rungs():
     )
 
 
-def test_rejects_month_span_not_tiling_year():
+def test_accepts_month_span_not_tiling_year():
+    """Any `Nmo` width is legal under year-0 anchoring
+    (`specs/calendar-composition-and-query-limits.md` §1); divisibility in
+    months still applies."""
+    p = parse_pyramid_yaml(_one_tier_yaml('{ name: mo, bin: 5mo, shards: [5mo, 10mo] }'))
+    assert [(t.name, t.bin, t.shards) for t in p.tiers] == [('mo', '5mo', ('5mo', '10mo'))]
     with pytest.raises(ValueError) as exc:
         parse_pyramid_yaml(_one_tier_yaml('{ name: mo, bin: 5mo, shards: [1y] }'))
     assert str(exc.value) == (
-        "parse_pyramid_yaml: tiers[0] ('mo'): month-span '5mo' doesn't tile a "
-        "year evenly (12 % 5 !== 0)"
+        "parse_pyramid_yaml: tiers[0] ('mo'): bin '5mo' does not divide "
+        "shards[0] '1y' (in months)"
     )
 
 

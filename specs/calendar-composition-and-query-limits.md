@@ -176,3 +176,8 @@ This commit also **fixes a build break introduced by §3**: `GeoQueryPlan extend
 ### ctbk integration
 
 Ready for all four. `bin=` can accept any parseable `Duration`; wire `limits` from config (and audit placeholder `binBudget`s per §3 above); explicit-width queries can go straight through `planGeoQuery*` now rather than waiting on §4.
+
+### Re-pin SHAs (for ctbk)
+
+- `main`: `6378cdd679e5f01da16628faca4552a8cf1f40aa` (Python pin — uv source rev; §1 touches `pyrmts.axis`, `pyrmts.yaml`, `pyrmts_engine.plan`)
+- `dist`: `69de58b` (JS pin via `pds gh`)

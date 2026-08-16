@@ -56,3 +56,8 @@ Implemented; JS suite green (486 vitest, +9 for this package; `tsc -b` clean acr
 - Tests are pure-logic only (`coverageWindow`, `monthGridlines`, `shardSearchEntries`, `filterShardEntries`) — the repo has no DOM test infra; component rendering gets verified visually at adoption (steps 2–3, awair/ctbk side).
 
 Stays in `specs/` until awair (step 2) and ctbk (step 3) adopt.
+
+### Re-pin SHAs (for awair + ctbk)
+
+- `main`: `b518d855db435e862f227458fae56d37a18c3328`
+- `dist`: `a4aa2d2` — now packs 4 packages; `pyrmts-react` at `https://github.com/runsascoded/pyrmts#a4aa2d2&path:/js/packages/pyrmts-react`

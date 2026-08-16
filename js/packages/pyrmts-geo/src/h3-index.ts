@@ -1,12 +1,23 @@
-// H3 `SpatialIndex` implementation. Wraps `h3-js`. Default for pyramids
-// without an explicit `geo.index` (preserves existing rides-v1 / avail-v2
-// / etc behavior).
+// H3 `SpatialIndex` implementation. Wraps `h3-js`.
 //
-// **Recommended for**: fixed-level queries (single-resolution pyramids).
-// **Mixed-resolution caveats**: H3 lineage walks have BT mismatches at
+// **TEST-ONLY — not exported from the package index, and no shipped code
+// path may import this module.** `h3-js` declares no `sideEffects`, so any
+// reachable reference to `h3Index` pins ~195 KB (minified) of it into every
+// consumer bundle; keeping this module a leaf is what lets it shake out.
+// `h3-js` is a devDependency for the same reason.
+//
+// It survives as the *second* `SpatialIndex` implementation: the
+// conformance suite (`spatial-index-conformance.ts`) runs the same contract
+// against both this and `s2Index`, which is the only thing keeping the
+// interface from silently collapsing into "whatever S2 happens to do".
+// H13/T4 are deferred indefinitely (H13's recursive boundary-triangle
+// geometry doesn't decompose cleanly), so there is no other candidate.
+//
+// It is *not* a serving backend. H3 lineage walks have BT mismatches at
 // every level transition for ~7% of points, so multi-level covers via
-// `minimalCover` here are approximate. For exact mixed-resolution work,
-// use `s2Index`.
+// `minimalCover` here are approximate — exact multi-resolution aggregation
+// is unachievable on H3, which is why the last H3-keyed pyramids were
+// retired downstream. Use `s2Index`.
 
 import {
   cellToParent as h3CellToParent,
@@ -15,13 +26,7 @@ import {
   polygonToCells,
 } from 'h3-js'
 import { isCellInCover, minimalCover as runMinimalCover } from './spatial-index-cover.js'
-import type {
-  BBox,
-  GeoPyramid,
-  MinimalCoverOpts,
-  SpatialIndex,
-  SpatialSet,
-} from './spatial-index.js'
+import type { BBox, MinimalCoverOpts, SpatialIndex, SpatialSet } from './spatial-index.js'
 
 export const h3Index: SpatialIndex<string> = {
   name: 'h3',
@@ -71,13 +76,4 @@ export const h3Index: SpatialIndex<string> = {
     // s2Index for exact mixed-resolution covers.
     return runMinimalCover(h3Index, include, system, opts)
   },
-}
-
-// Resolve the SpatialIndex for a pyramid. Pyramids without an explicit
-// `geo.index` get the H3 default.
-export function getSpatialIndex(pyramid: GeoPyramid): SpatialIndex {
-  if (pyramid.geo === undefined) {
-    throw new Error('getSpatialIndex: pyramid has no `geo` config')
-  }
-  return pyramid.geo.index ?? h3Index
 }

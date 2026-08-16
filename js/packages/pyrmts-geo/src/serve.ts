@@ -18,8 +18,8 @@ import {
   type SmoothingSpec,
   type SmoothMode,
 } from 'pyrmts'
-import { getSpatialIndex } from './h3-index.js'
 import { filterCellsAndRes, planGeoQuery, planGeoQueryFromInventory, type BBox } from './planner.js'
+import { getSpatialIndex } from './spatial-index.js'
 import type { GeoPyramid } from './spatial-index.js'
 
 export interface ServeGeoOptions {

@@ -2,6 +2,7 @@ import { latLngToCell } from 'h3-js'
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { memStorage, parquetBackend, type Pyramid } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
+import { h3Index } from './h3-index.js'
 import { serveGeoQuery } from './serve.js'
 
 const ms = (iso: string): number => new Date(iso).getTime()
@@ -61,7 +62,7 @@ function buildPyramid(): Pyramid {
       { name: 'h1', bin: '1h', shards: ['1d'] },
       { name: 'd1', bin: '1d', shards: ['1y'] },
     ],
-    geo: { cellCol: 'h3_cell', resolutions: [9, 7, 5] },
+    geo: { cellCol: 'h3_cell', resolutions: [9, 7, 5], index: h3Index },
   }
 }
 

@@ -2,7 +2,7 @@ import { getResolution, latLngToCell } from 'h3-js'
 import { memStorage, type Pyramid, type RecordedShard } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
 import { h3Index } from './h3-index.js'
-import { bboxToCells, filterCellsAndRes, planGeoQuery, planGeoQueryFromInventory } from './planner.js'
+import { filterCellsAndRes, planGeoQuery, planGeoQueryFromInventory } from './planner.js'
 import { s2Index } from './s2-index.js'
 import type { GeoPyramid, SpatialIndex } from './spatial-index.js'
 
@@ -17,7 +17,9 @@ const NYC: { minLat: number; maxLat: number; minLng: number; maxLng: number } = 
   maxLng: -73.96,
 }
 
-function ctbkPyramid(geoResolutions: number[]): Pyramid {
+// H3-flavored fixture: these tests pin H3 cell tokens/resolutions, so they
+// pass `h3Index` explicitly (there is no default backend any more).
+function ctbkPyramid(geoResolutions: number[]): GeoPyramid {
   return {
     storage: mockStorage,
     keyTemplate: 'trips/{tier}/{period}.parquet',
@@ -33,26 +35,30 @@ function ctbkPyramid(geoResolutions: number[]): Pyramid {
       { name: 'd1', bin: '1d', shards: ['1y'] },
       { name: 'mo1', bin: '1mo', shards: ['1y'] },
     ],
-    geo: { cellCol: 'h3_cell', resolutions: geoResolutions },
+    geo: { cellCol: 'h3_cell', resolutions: geoResolutions, index: h3Index },
   }
 }
 
-describe('bboxToCells', () => {
+// The standalone `bboxToCells(bbox, level)` helper was deleted along with
+// the H3 default — it was an H3-only wrapper with no callers. Backends
+// expose `bboxToCells` on the `SpatialIndex` itself; these cases now
+// exercise it there.
+describe('h3Index.bboxToCells', () => {
   test('returns cells at the requested resolution when bbox is large enough', () => {
-    const cells = bboxToCells(NYC, 7)
+    const cells = h3Index.bboxToCells(NYC, 7)
     expect(cells.length).toBeGreaterThan(0)
     expect(cells.every(c => getResolution(c) === 7)).toBe(true)
   })
 
   test('returns more cells at finer resolution', () => {
-    const coarse = bboxToCells(NYC, 7)
-    const fine = bboxToCells(NYC, 9)
+    const coarse = h3Index.bboxToCells(NYC, 7)
+    const fine = h3Index.bboxToCells(NYC, 9)
     expect(fine.length).toBeGreaterThan(coarse.length)
   })
 
   test('returns empty when bbox is smaller than the resolution\'s centroid spacing', () => {
     // NYC bbox is ~6×9 km; res 4 hexes average ~1770 km². No centroid lands inside.
-    expect(bboxToCells(NYC, 4)).toEqual([])
+    expect(h3Index.bboxToCells(NYC, 4)).toEqual([])
   })
 })
 
@@ -114,7 +120,7 @@ describe('planGeoQuery: segment shape', () => {
   // Pyramid with 1d shards so a 1-day query aligns with the shard period
   // boundary (the planner's seal check requires `effective ≥ periodEnd`,
   // and `effective` gets clamped to `rangeTo`).
-  function ctbkPyramid1d(geoResolutions: number[]): Pyramid {
+  function ctbkPyramid1d(geoResolutions: number[]): GeoPyramid {
     return {
       storage: mockStorage,
       keyTemplate: 'trips/{tier}/{period}.parquet',
@@ -130,7 +136,7 @@ describe('planGeoQuery: segment shape', () => {
         { name: 'd1', bin: '1d', shards: ['1y'] },
         { name: 'mo1', bin: '1mo', shards: ['1y'] },
       ],
-      geo: { cellCol: 'h3_cell', resolutions: geoResolutions },
+      geo: { cellCol: 'h3_cell', resolutions: geoResolutions, index: h3Index },
     }
   }
 
@@ -179,7 +185,7 @@ describe('filterCellsAndRes', () => {
       { h3_cell: cell9, ts: 1, count: 5 },
       { h3_cell: cell9Other, ts: 1, count: 3 },
     ]
-    expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell9])).toEqual([
+    expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell9], h3Index)).toEqual([
       { h3_cell: cell9, ts: 1, count: 5 },
     ])
   })
@@ -190,7 +196,7 @@ describe('filterCellsAndRes', () => {
       { h3_cell: cell9, ts: 1, count: 5 },
     ]
     // outputRes=9, only cell9 should survive
-    expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell7, cell9])).toEqual([
+    expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell7, cell9], h3Index)).toEqual([
       { h3_cell: cell9, ts: 1, count: 5 },
     ])
   })
@@ -201,7 +207,7 @@ describe('filterCellsAndRes', () => {
       { h3_cell: 42, ts: 1, count: 10 },
       { h3_cell: cell9, ts: 1, count: 5 },
     ]
-    expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell9])).toEqual([
+    expect(filterCellsAndRes(rows, 'h3_cell', 9, [cell9], h3Index)).toEqual([
       { h3_cell: cell9, ts: 1, count: 5 },
     ])
   })

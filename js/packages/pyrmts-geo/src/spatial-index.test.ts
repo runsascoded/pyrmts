@@ -5,8 +5,9 @@
 
 import { memStorage, parquetBackend, type Pyramid } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
-import { getSpatialIndex, h3Index } from './h3-index.js'
+import { h3Index } from './h3-index.js'
 import { assertSpatialIndex } from './spatial-index-conformance.js'
+import { getSpatialIndex } from './spatial-index.js'
 import type { BBox, GeoPyramid, SpatialIndex } from './spatial-index.js'
 
 const NYC: BBox = {
@@ -43,9 +44,15 @@ describe('getSpatialIndex: pyramid resolution', () => {
     }
   }
 
-  test('returns h3Index when geo.index is unset (back-compat)', () => {
+  // There is no default backend: an unset `geo.index` is a config error,
+  // not an implicit H3 pyramid. The old fallback is what pinned `h3-js`
+  // into every consumer bundle.
+  test('throws when geo.index is unset', () => {
     const p = pyramid({ cellCol: 'h3_cell', resolutions: [9, 7, 5] })
-    expect(getSpatialIndex(p)).toBe(h3Index)
+    expect(() => getSpatialIndex(p)).toThrow(
+      'getSpatialIndex: pyramid `geo.index` is unset — set it explicitly ' +
+        '(e.g. `index: s2Index`); there is no default backend',
+    )
   })
 
   test('returns the explicit index when set', () => {
@@ -65,13 +72,14 @@ describe('getSpatialIndex: pyramid resolution', () => {
 
   test('throws when pyramid has no geo config', () => {
     const p = pyramid(undefined)
-    expect(() => getSpatialIndex(p)).toThrow(/no `geo` config/)
+    expect(() => getSpatialIndex(p)).toThrow('getSpatialIndex: pyramid has no `geo` config')
   })
 })
 
 // Equivalence test: pyramids declared with `Pyramid` from core (no
-// `index`) still satisfy `GeoPyramid` structurally — the refactor is
-// back-compatible at the type level.
+// `index`) still satisfy `GeoPyramid` structurally — the widening is
+// back-compatible at the type level. (Resolving one still throws at
+// runtime; `index` is optional for assignability, required to serve.)
 describe('GeoPyramid structural compatibility with core Pyramid', () => {
   test('Pyramid without geo.index is assignable to GeoPyramid', () => {
     const core: Pyramid = {
@@ -85,6 +93,7 @@ describe('GeoPyramid structural compatibility with core Pyramid', () => {
       geo: { cellCol: 'h3_cell', resolutions: [9, 7, 5] },
     }
     const geo: GeoPyramid = core
-    expect(getSpatialIndex(geo)).toBe(h3Index)
+    expect(geo.geo).toEqual({ cellCol: 'h3_cell', resolutions: [9, 7, 5] })
+    expect(getSpatialIndex({ ...geo, geo: { ...geo.geo!, index: h3Index } })).toBe(h3Index)
   })
 })

@@ -11,6 +11,7 @@ import {
   type Pyramid,
 } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
+import { h3Index } from './h3-index.js'
 import { filterCellsAndRes, planGeoQuery } from './planner.js'
 
 const ms = (iso: string): number => new Date(iso).getTime()
@@ -81,7 +82,7 @@ function buildPyramid(): Pyramid {
       { name: 'h1', bin: '1h', shards: ['1d'] },
       { name: 'd1', bin: '1d', shards: ['1y'] },
     ],
-    geo: { cellCol: 'h3_cell', resolutions: [9, 7, 5] },
+    geo: { cellCol: 'h3_cell', resolutions: [9, 7, 5], index: h3Index },
   }
 }
 
@@ -103,7 +104,7 @@ describe('pyrmts-geo end-to-end', () => {
     expect(plan.outputTier.name).toBe('h1')
 
     const rows = await pyramid.storage.fetchSegment(plan.segments[0]!)
-    const filtered = filterCellsAndRes(rows, 'h3_cell', plan.outputRes, plan.outputCells)
+    const filtered = filterCellsAndRes(rows, 'h3_cell', plan.outputRes, plan.outputCells, h3Index)
 
     // The shard contains all 3 stations' cells at res 9 — they should all
     // pass the filter (assuming they're in BBOX, which they are).
@@ -150,7 +151,7 @@ describe('pyrmts-geo end-to-end', () => {
     expect(plan.outputRes).toBe(7)
 
     const rows = await pyramid.storage.fetchSegment(plan.segments[0]!)
-    const filtered = filterCellsAndRes(rows, 'h3_cell', plan.outputRes, plan.outputCells)
+    const filtered = filterCellsAndRes(rows, 'h3_cell', plan.outputRes, plan.outputCells, h3Index)
 
     const stitched = stitch({
       pyramid: { ...pyramid, dims: [{ name: 'h3_cell', type: 'h3' }] },

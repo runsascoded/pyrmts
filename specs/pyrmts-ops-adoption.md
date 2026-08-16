@@ -106,6 +106,12 @@ Original plan:
 ## Cross-cutting
 
 - **Genesis**: consumers pass it explicitly everywhere (already the convention; kill `AVAIL_GENESIS` imports from moved code).
-- **Minor reverse-direction items** (audit): `DimType` lacks `'s2'` (S2 rides via `geo.cellCol` — confirm intentional or add for symmetry); `pyrmts_engine/cli.py` `--source-shard` help references "ctbk-style" (cosmetic; the min-cover default largely mooted the flag).
+- ~~**Minor reverse-direction items** (audit): `DimType` lacks `'s2'` (S2 rides via `geo.cellCol` — confirm intentional or add for symmetry); `pyrmts_engine/cli.py` `--source-shard` help references "ctbk-style" (cosmetic; the min-cover default largely mooted the flag).~~ **Both done (verified 2026-08-16):** `DimType` is `'int' | 'string' | 'h3' | 'geohash' | 's2'` in both languages, and the "ctbk-style" help string is gone.
 - **Acceptance per phase**: ctbk's copy deleted, imports flipped, existing ctbk behavior byte/content-identical (the compare harness — itself moving in phase 3 — is the tool); pyrmts tests cover the moved logic with a non-ctbk fixture pyramid (proving no residual avail-shape assumptions).
-- End state check: stand up a **toy second consumer** in pyrmts' test suite (tiny synthetic "weather" pyramid: config + 20-line ingester) exercising ingest → cascade → fill → GC → health-cover end-to-end. That fixture is the SDK-cleanliness regression test.
+- ~~End state check: stand up a **toy second consumer** in pyrmts' test suite (tiny synthetic "weather" pyramid: config + 20-line ingester) exercising ingest → cascade → fill → GC → health-cover end-to-end. That fixture is the SDK-cleanliness regression test.~~ **Dropped (2026-08-16) — discharged by awair, which is a real second consumer.**
+
+  awair runs a non-geo pyrmts pyramid in prod (raw ingest → CFW cascade → serve), supplying exactly the four things this spec's goal state names: a config YAML, one ingester, storage/D1 bindings, and thin handler shims. That's stronger evidence than a synthetic fixture, and it earned its keep: it surfaced coupling a fixture wouldn't have (the `pds`/pin dance across Python-`main` vs JS-`dist` SHAs, and the multi-rung calendar tip that became `specs/done/streaming-tip-writer.md` + `specs/done/js-calendar-same-tier-tiling.md`).
+
+  The residual value was never the stage coverage — `pyrmts_ops/tests/fixture_pyramid.py` and `pyrmts_engine/tests/conftest.py` are both deliberately non-ctbk ladders already exercised by `test_gc`/`test_rebuild`/`test_lambda_entry` — it was the *seams*. And the one seam a single test can't span is the language boundary: ingest/cascade/fill/GC are Python, health-cover is TS, so "end-to-end" would mean building a cross-language harness and then mostly testing the harness.
+
+  If the knowledge wants capturing, the cheap artifact is a "what a consumer must supply" doc distilled from what awair actually provided — not a fixture.

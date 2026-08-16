@@ -1,8 +1,8 @@
 import { getResolution, latLngToCell } from 'h3-js'
-import { memStorage, type Pyramid } from 'pyrmts'
+import { memStorage, type Pyramid, type RecordedShard } from 'pyrmts'
 import { describe, expect, test } from 'vitest'
 import { h3Index } from './h3-index.js'
-import { bboxToCells, filterCellsAndRes, planGeoQuery } from './planner.js'
+import { bboxToCells, filterCellsAndRes, planGeoQuery, planGeoQueryFromInventory } from './planner.js'
 import { s2Index } from './s2-index.js'
 import type { GeoPyramid, SpatialIndex } from './spatial-index.js'
 
@@ -378,5 +378,78 @@ describe('planGeoQuery: pre-computed outputCells', () => {
       binBudget: 100,
       bbox: NYC,
     })).toThrow('`cellBudget` required when `bbox` is provided')
+  })
+})
+
+describe('planGeoQuery: targetBin', () => {
+  // `specs/calendar-composition-and-query-limits.md` §4: explicit widths
+  // reach the core planner from the geo entry points, and geo metadata
+  // (`outputRes`, per-segment cells) resolves on that path too — before
+  // this, calendar queries had to route through the time-only planner and
+  // filter cells post-hoc, so `outputRes` was unavailable.
+  test('exact tier-bin match makes that tier the output tier', () => {
+    const pyramid = ctbkPyramid([9, 7, 5])
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-04-01T00:00:00Z') },
+      binBudget: 10_000,
+      targetBin: '1mo',
+      bbox: NYC,
+      cellBudget: 500,
+    })
+    expect(plan.outputBin).toBe('1mo')
+    expect(plan.outputTier?.name).toBe('mo1')
+    expect(plan.outputRes).toBe(9)
+    expect(plan.outputCells.length).toBeGreaterThan(0)
+    // Geo metadata rides on every segment, same as the budget-driven path.
+    expect(plan.segments.every(s => s.cells === plan.outputCells)).toBe(true)
+  })
+
+  test('non-materialized calendar width decomposes raggedly, keeping geo metadata', () => {
+    const pyramid = ctbkPyramid([9, 7, 5])
+    const plan = planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-07-01T00:00:00Z') },
+      binBudget: 10_000,
+      targetBin: '2mo',
+      bbox: NYC,
+      cellBudget: 500,
+    })
+    expect(plan.outputBin).toBe('2mo')
+    // Ragged path: no single stored tier is "the" output tier...
+    expect(plan.outputTier).toBeUndefined()
+    // ...but `outputRes` is resolved, which is what §4 buys over the
+    // time-only workaround (that path reports `outputRes: -1`).
+    expect(plan.outputRes).toBe(9)
+    expect(plan.segments.every(s => s.cells === plan.outputCells)).toBe(true)
+    // 2mo bins pack from the materialized 1mo tier (calendar composition).
+    expect([...new Set(plan.segments.map(s => s.shardTier.name))]).toEqual(['mo1'])
+  })
+
+  test('limits are delegated too', () => {
+    const pyramid = ctbkPyramid([9, 7, 5])
+    expect(() => planGeoQuery(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-07-01T00:00:00Z') },
+      binBudget: 10_000,
+      targetBin: '1d',
+      limits: { maxOutputBins: 30 },
+      bbox: NYC,
+      cellBudget: 500,
+    })).toThrow('planQuery: bins limit exceeded (181 > 30)')
+  })
+
+  test('planGeoQueryFromInventory threads targetBin as well', () => {
+    const pyramid = ctbkPyramid([9, 7, 5])
+    const shards: RecordedShard[] = [
+      { tier: 'mo1', shardDur: '1y', periodStart: d('2026-01-01T00:00:00Z'), periodEnd: d('2027-01-01T00:00:00Z'), key: 'trips/mo1/2026.parquet' },
+    ]
+    const plan = planGeoQueryFromInventory(pyramid, {
+      range: { from: d('2026-01-01T00:00:00Z'), to: d('2026-04-01T00:00:00Z') },
+      binBudget: 10_000,
+      targetBin: '1mo',
+      bbox: NYC,
+      cellBudget: 500,
+    }, shards)
+    expect(plan.outputBin).toBe('1mo')
+    expect(plan.outputRes).toBe(9)
+    expect(plan.segments.map(s => s.shardTier.name)).toEqual(['mo1'])
   })
 })

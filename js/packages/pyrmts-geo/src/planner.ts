@@ -15,6 +15,8 @@
 import {
   planQuery,
   planQueryFromInventory,
+  type Duration,
+  type PlanLimits,
   type PlanSegment,
   type QueryPlan,
   type RecordedShard,
@@ -66,6 +68,16 @@ export interface PlanGeoQueryInput {
   // `(tier, shardDur)` (e.g. `'1m@5min'`). Per-entry gate, no propagation.
   earliestPerShard?: Record<string, Date>
   filter?: Record<string, string | number>
+  // Caller-requested output bin width, delegated to the core planner
+  // (`specs/calendar-composition-and-query-limits.md` §4). Same semantics
+  // as `pyrmts.PlanQueryInput.targetBin`: an exact tier-bin match makes
+  // that tier the output tier, anything else decomposes raggedly. Geo
+  // metadata (`outputRes`, per-segment cells) is resolved the same way on
+  // either path.
+  targetBin?: Duration
+  // Query cost ceilings, delegated to the core planner. See
+  // `pyrmts.PlanLimits`; violations throw `PlanLimitError`.
+  limits?: PlanLimits
   // Server-side rolling-window smoothing (see `pyrmts` `PlanQueryInput`).
   smoothing?: import('pyrmts').SmoothingSpec
   smoothMode?: import('pyrmts').SmoothMode
@@ -121,6 +133,8 @@ export function planGeoQuery(
     ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
     ...(input.earliestPerShard !== undefined ? { earliestPerShard: input.earliestPerShard } : {}),
     ...(input.filter !== undefined ? { filter: input.filter } : {}),
+    ...(input.targetBin !== undefined ? { targetBin: input.targetBin } : {}),
+    ...(input.limits !== undefined ? { limits: input.limits } : {}),
     ...(input.smoothing !== undefined ? { smoothing: input.smoothing } : {}),
     ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),
   })
@@ -154,6 +168,7 @@ export function planGeoQuery(
     authoritativeEnd: timePlan.authoritativeEnd,
     visibleRange: timePlan.visibleRange,
     smoothing: timePlan.smoothing,
+    atomCount: timePlan.atomCount,
   }
 }
 
@@ -196,6 +211,8 @@ export function planGeoQueryFromInventory(
       ...(input.earliestWatermarks !== undefined ? { earliestWatermarks: input.earliestWatermarks } : {}),
       ...(input.earliestPerShard !== undefined ? { earliestPerShard: input.earliestPerShard } : {}),
       ...(input.filter !== undefined ? { filter: input.filter } : {}),
+      ...(input.targetBin !== undefined ? { targetBin: input.targetBin } : {}),
+      ...(input.limits !== undefined ? { limits: input.limits } : {}),
       ...(input.smoothing !== undefined ? { smoothing: input.smoothing } : {}),
       ...(input.smoothMode !== undefined ? { smoothMode: input.smoothMode } : {}),
     },
@@ -225,6 +242,7 @@ export function planGeoQueryFromInventory(
     authoritativeEnd: timePlan.authoritativeEnd,
     visibleRange: timePlan.visibleRange,
     smoothing: timePlan.smoothing,
+    atomCount: timePlan.atomCount,
   }
 }
 

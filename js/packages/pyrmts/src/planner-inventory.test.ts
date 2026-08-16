@@ -334,7 +334,10 @@ describe('planQueryFromInventory: calendar targetBin', () => {
       availLike,
       {
         range: { from: d('2026-07-01T00:00:00Z'), to: d('2026-09-01T00:00:00Z') },
-        binBudget: 1,
+        // With `targetBin` set, `binBudget` no longer picks the width but
+        // still caps output bins (`limits.maxOutputBins` fallback,
+        // `specs/calendar-composition-and-query-limits.md` §3) — 2 months here.
+        binBudget: 1000,
         targetBin: '1mo',
       },
       dayTiles,
@@ -373,7 +376,7 @@ describe('planQueryFromInventory: calendar targetBin', () => {
       availCal,
       {
         range: { from: d('2026-06-01T00:00:00Z'), to: d('2026-09-01T00:00:00Z') },
-        binBudget: 1,
+        binBudget: 1000,  // caps output bins under `targetBin`; 3 months here
         targetBin: '1mo',
         watermarks: { 'mo@1y': d('2026-08-01T00:00:00Z') },
       },

@@ -172,6 +172,42 @@ export interface Pyramid {
   // at all materialized resolutions; the geo planner (in `pyrmts-geo`)
   // picks a resolution at query time + filters by cell list.
   geo?: GeoSpec
+  // Per-pyramid default query cost ceilings. `PlanQueryInput.limits`
+  // overrides this wholesale (not merged field-by-field) when supplied.
+  limits?: PlanLimits
+}
+
+// Query cost ceilings (`specs/calendar-composition-and-query-limits.md`
+// §3). Unset fields are unlimited, so the default (no `limits` anywhere)
+// preserves historical behavior. Honored under both `targetBin` and
+// `binBudget` — the three axes are independent:
+//
+// - `maxOutputBins`: response size / client render cost. `1h` over 13y is
+//   ~115k bins but only ~150 keys.
+// - `maxAtoms`: source rows fetched and stitched. A poorly-packed calendar
+//   target is few bins but many atoms per bin.
+// - `maxKeys`: R2 GETs and manifest lookups — the axis that costs money and
+//   drives tail latency, uncorrelated with the other two.
+export interface PlanLimits {
+  maxOutputBins?: number
+  maxAtoms?: number
+  maxKeys?: number
+}
+
+// Raised when a plan would exceed a `PlanLimits` ceiling. Callers map this
+// to 400/413 rather than discovering the problem as an OOM.
+export class PlanLimitError extends Error {
+  readonly limit: 'bins' | 'atoms' | 'keys'
+  readonly requested: number
+  readonly allowed: number
+
+  constructor(limit: 'bins' | 'atoms' | 'keys', requested: number, allowed: number) {
+    super(`planQuery: ${limit} limit exceeded (${requested} > ${allowed})`)
+    this.name = 'PlanLimitError'
+    this.limit = limit
+    this.requested = requested
+    this.allowed = allowed
+  }
 }
 
 export interface GeoSpec {

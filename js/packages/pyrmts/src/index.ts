@@ -24,7 +24,8 @@ export type {
   TimeUnit,
 } from './types.js'
 
-export { EtagConflict, NotSupported } from './types.js'
+export { EtagConflict, NotSupported, PlanLimitError } from './types.js'
+export type { PlanLimits } from './types.js'
 
 export type {
   PyramidCoverRung,

@@ -6,7 +6,7 @@ import { addSpan, binsInRange, fixedDurationMs, floorToSpan, parseDuration, shar
 import { substituteKey } from './keys.js'
 import { validateLadders } from './ladder.js'
 import { encodeWatermarkKey, type RecordedShard } from './shard-index.js'
-import type { Bin, Duration, Pyramid, Shard, Tier } from './types.js'
+import { PlanLimitError, type Bin, type Duration, type PlanLimits, type Pyramid, type Shard, type Tier } from './types.js'
 
 export type SmoothMode = 'centered' | 'trailing'
 
@@ -43,10 +43,14 @@ export interface PlanQueryInput {
   // day-aligned); the un-closed tip bin is served partially from the base
   // tiers by construction.
   //
-  // `binBudget` is ignored when `targetBin` is set (caller asserts the bin
-  // width they want); restoring budget enforcement is left to the caller
-  // (compute `binsInRange(range, targetBin)` beforehand).
+  // `binBudget` does not select the width when `targetBin` is set (caller
+  // asserts the width they want), but it still bounds cost: it is treated
+  // as `maxOutputBins` when `limits.maxOutputBins` is unset
+  // (`specs/calendar-composition-and-query-limits.md` §3).
   targetBin?: Duration
+  // Cost ceilings for this query; overrides `pyramid.limits` wholesale.
+  // Violations throw `PlanLimitError`. Unset ⇒ `pyramid.limits` ⇒ unlimited.
+  limits?: PlanLimits
   // Watermark grid: `${tier}@${shardDur}` → latest sealed bin instant for
   // that (tier, shardDur) cell. Undeclared cells default to FAR_FUTURE
   // ("complete through `plannedTo`"). Within-tier `min` propagation walks
@@ -126,6 +130,49 @@ export interface QueryPlan {
     smoothMode: SmoothMode
     smoothSourceTier: string
   } | null
+  // Packing atoms before same-tier coalescing — the count `limits.maxAtoms`
+  // bounds. Distinct from `segments.length`: coalescing merges adjacent
+  // same-tier atoms (including across output-bin boundaries), but the
+  // stitcher still re-aggregates per atom. On the non-ragged path this is
+  // the pre-coalesce walk-segment count.
+  atomCount: number
+}
+
+// Cost enforcement (`specs/calendar-composition-and-query-limits.md` §3).
+// `bins` is checked pre-plan where possible (fail before packing); `atoms`
+// and `keys` are only knowable after packing, so they're checked here at
+// assembly. `binBudget` stands in for `maxOutputBins` when unset.
+function resolveLimits(pyramid: Pyramid, input: PlanQueryInput): PlanLimits {
+  const limits = input.limits ?? pyramid.limits ?? {}
+  if (limits.maxOutputBins !== undefined) return limits
+  return { ...limits, maxOutputBins: input.binBudget }
+}
+
+function checkBins(outputBins: number, limits: PlanLimits): void {
+  const max = limits.maxOutputBins
+  if (max !== undefined && outputBins > max) {
+    throw new PlanLimitError('bins', outputBins, max)
+  }
+}
+
+// Single choke point for every planner return: stamps `atomCount` and
+// enforces the atom/key ceilings on the assembled plan.
+function finalize(
+  plan: Omit<QueryPlan, 'atomCount'>,
+  atomCount: number,
+  limits: PlanLimits,
+): QueryPlan {
+  if (limits.maxAtoms !== undefined && atomCount > limits.maxAtoms) {
+    throw new PlanLimitError('atoms', atomCount, limits.maxAtoms)
+  }
+  if (limits.maxKeys !== undefined) {
+    const keys = new Set<string>()
+    for (const seg of plan.segments) for (const k of seg.keys) keys.add(k)
+    if (keys.size > limits.maxKeys) {
+      throw new PlanLimitError('keys', keys.size, limits.maxKeys)
+    }
+  }
+  return { ...plan, atomCount }
 }
 
 export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
@@ -142,6 +189,8 @@ export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
 
   // Validate per-tier shard ladders.
   validateLadders(pyramid)
+
+  const limits = resolveLimits(pyramid, input)
 
   if (input.targetBin !== undefined) {
     return planRagged(pyramid, input, input.targetBin)
@@ -263,7 +312,7 @@ export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
   const rawWm = new Date(rawMaxMs)
   const authoritativeEnd = rawWm < to ? rawWm : null
 
-  return {
+  return finalize({
     outputTier,
     outputBin: outputTier.bin,
     segments,
@@ -277,7 +326,7 @@ export function planQuery(pyramid: Pyramid, input: PlanQueryInput): QueryPlan {
           smoothSourceTier: outputTier.name,
         }
       : null,
-  }
+  }, rawSegments.length, limits)
 }
 
 // Ragged-decomposition planner: caller specifies the exact output bin width
@@ -304,6 +353,8 @@ function planRagged(
   if (tParsed.unit === 'mo' || tParsed.unit === 'y') {
     return planRaggedCalendar(pyramid, input, targetBin, tParsed)
   }
+  const limits = resolveLimits(pyramid, input)
+  checkBins(binsInRange(from, to, targetBin), limits)
   const targetBinMs = fixedDurationMs(targetBin)
   const eligibleTiers: { tier: Tier; ms: number }[] = []
   for (const tier of pyramid.tiers) {
@@ -413,7 +464,7 @@ function planRagged(
   const rawWm = effective[pyramid.tiers[0]!.name]!
   const authoritativeEnd = rawWm < to ? rawWm : null
 
-  return {
+  return finalize({
     ...(outputTier !== undefined ? { outputTier } : {}),
     outputBin: targetBin,
     segments,
@@ -427,7 +478,7 @@ function planRagged(
           smoothSourceTier: outputTier?.name ?? `<ragged:${targetBin}>`,
         }
       : null,
-  }
+  }, atoms.length, limits)
 }
 
 interface PackedAtom {
@@ -564,6 +615,9 @@ function planRaggedCalendar(
   const { from, to } = input.range
   const { exactTier, eligible } = calendarEligibleTiers(pyramid, targetBin, 'planQuery')
 
+  const limits = resolveLimits(pyramid, input)
+  checkBins(binsInRange(from, to, targetBin), limits)
+
   const smoothMode: SmoothMode = input.smoothMode ?? 'centered'
   const smoothing = input.smoothing !== undefined
     ? resolveSmoothing(input.smoothing, targetBin, from, to, smoothMode)
@@ -613,7 +667,7 @@ function planRaggedCalendar(
   const rawWm = effective[pyramid.tiers[0]!.name]!
   const authoritativeEnd = rawWm < to ? rawWm : null
 
-  return {
+  return finalize({
     ...(exactTier !== undefined ? { outputTier: exactTier } : {}),
     outputBin: targetBin,
     segments,
@@ -627,7 +681,7 @@ function planRaggedCalendar(
           smoothSourceTier: exactTier?.name ?? `<ragged:${targetBin}>`,
         }
       : null,
-  }
+  }, atoms.length, limits)
 }
 
 // Greedy segment-tree pack of `[startMs, endMs)`, watermark flavor: at the
@@ -1067,6 +1121,7 @@ export function planQueryFromInventory(
   }
   validateLadders(pyramid)
 
+  const limits = resolveLimits(pyramid, input)
   const tierInventory = buildTierInventory(registeredShards)
 
   if (input.targetBin !== undefined) {
@@ -1135,7 +1190,7 @@ export function planQueryFromInventory(
   const rawWm = new Date(rawMaxMs)
   const authoritativeEnd = rawWm < to ? rawWm : null
 
-  return {
+  return finalize({
     outputTier,
     outputBin: outputTier.bin,
     segments,
@@ -1149,7 +1204,7 @@ export function planQueryFromInventory(
           smoothSourceTier: outputTier.name,
         }
       : null,
-  }
+  }, segments.length, limits)
 }
 
 // Ragged-decomposition variant. Same shape as `planRagged` but the DP
@@ -1168,6 +1223,8 @@ function planRaggedFromInventory(
   if (tParsed.unit === 'mo' || tParsed.unit === 'y') {
     return planRaggedCalendarFromInventory(pyramid, input, targetBin, tParsed, tierInventory)
   }
+  const limits = resolveLimits(pyramid, input)
+  checkBins(binsInRange(from, to, targetBin), limits)
   const targetBinMs = fixedDurationMs(targetBin)
   const eligibleTiers: { tier: Tier; ms: number }[] = []
   for (const tier of pyramid.tiers) {
@@ -1281,7 +1338,7 @@ function planRaggedFromInventory(
   const rawWm = effective[pyramid.tiers[0]!.name]!
   const authoritativeEnd = rawWm < to ? rawWm : null
 
-  return {
+  return finalize({
     ...(outputTier !== undefined ? { outputTier } : {}),
     outputBin: targetBin,
     segments,
@@ -1295,7 +1352,7 @@ function planRaggedFromInventory(
           smoothSourceTier: outputTier?.name ?? `<ragged:${targetBin}>`,
         }
       : null,
-  }
+  }, atoms.length, limits)
 }
 
 // Materialize a coalesced ragged range against inventory: walk period
@@ -1357,6 +1414,9 @@ function planRaggedCalendarFromInventory(
   const { from, to } = input.range
   const { exactTier, eligible } = calendarEligibleTiers(pyramid, targetBin, 'planQueryFromInventory')
 
+  const limits = resolveLimits(pyramid, input)
+  checkBins(binsInRange(from, to, targetBin), limits)
+
   const smoothMode: SmoothMode = input.smoothMode ?? 'centered'
   const smoothing = input.smoothing !== undefined
     ? resolveSmoothing(input.smoothing, targetBin, from, to, smoothMode)
@@ -1407,7 +1467,7 @@ function planRaggedCalendarFromInventory(
   const rawWm = effective[pyramid.tiers[0]!.name]!
   const authoritativeEnd = rawWm < to ? rawWm : null
 
-  return {
+  return finalize({
     ...(exactTier !== undefined ? { outputTier: exactTier } : {}),
     outputBin: targetBin,
     segments,
@@ -1421,7 +1481,7 @@ function planRaggedCalendarFromInventory(
           smoothSourceTier: exactTier?.name ?? `<ragged:${targetBin}>`,
         }
       : null,
-  }
+  }, atoms.length, limits)
 }
 
 // Greedy pack of `[startMs, endMs)`, inventory flavor: at the coarsest

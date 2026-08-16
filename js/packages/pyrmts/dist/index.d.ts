@@ -1,5 +1,6 @@
 export type { Axis, Bin, ColumnFilter, Dim, Duration, FetchOptionsBase, FetchSegment, GeoSpec, Metric, MonoidName, Pyramid, Row, RunBoundary, Shard, StepCount, StepUnit, Storage, StorageBackend, Tier, TimeUnit, } from './types.js';
 export { EtagConflict, NotSupported } from './types.js';
+export type { PyramidCoverRung, PyramidCoverSegment, PyramidCoverStatus, PyramidTierCoverStatus, } from './cover-status.js';
 export { addSpan, binsInRange, ceilToSpan, floorToSpan, formatPeriod, nominalMs, parseDuration, shardPeriodsCovering, } from './axis.js';
 export { shardBuildableAt, sourceTierFor } from './cascade-source.js';
 export type { ParsedTimeSpan } from './axis.js';

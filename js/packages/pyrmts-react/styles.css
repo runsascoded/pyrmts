@@ -1,0 +1,137 @@
+/* pyrmts-react default styles. Status colors are CSS vars — override
+ * `--pyrmts-present` / `--pyrmts-pending` / `--pyrmts-missing` /
+ * `--pyrmts-tip` (and the neutral `--pyrmts-*` theme vars below) on any
+ * ancestor to retheme. */
+
+.tier-timeline {
+  margin: 0.25rem 0 0.75rem;
+}
+
+.tier-timeline .tier-timeline-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+.tier-timeline .tt-bg {
+  fill: var(--pyrmts-timeline-bg, rgba(128, 128, 128, 0.15));
+}
+
+/* Segments are per cover slot, so the stroke makes rung/tile boundaries
+ * visible. */
+.tier-timeline .tt-seg-present {
+  fill: var(--pyrmts-present, #22c55e);
+  stroke: var(--pyrmts-seg-stroke, rgba(0, 0, 0, 0.25));
+  stroke-width: 0.5;
+}
+.tier-timeline .tt-seg-pending {
+  fill: var(--pyrmts-pending, #f1c40f);
+  stroke: var(--pyrmts-seg-stroke, rgba(0, 0, 0, 0.25));
+  stroke-width: 0.5;
+}
+.tier-timeline .tt-seg-missing {
+  fill: var(--pyrmts-missing, #e74c3c);
+  stroke: var(--pyrmts-seg-stroke, rgba(0, 0, 0, 0.25));
+  stroke-width: 0.5;
+}
+/* Present-but-unregistered extra tips (e.g. today's live raw tip) —
+ * dimmer than registered cover slots. */
+.tier-timeline .tt-seg-tip {
+  fill: var(--pyrmts-tip, rgba(34, 197, 94, 0.45));
+}
+
+.tier-timeline .tt-clickable {
+  cursor: pointer;
+}
+
+/* Bright/contrasting so it reads against the shard green. */
+.tier-timeline .tt-now {
+  stroke: var(--pyrmts-now, #ef4444);
+  stroke-width: 2;
+  fill: none;
+}
+
+.tier-timeline .tt-grid-major {
+  stroke: var(--pyrmts-grid-major, rgba(128, 128, 128, 0.6));
+  stroke-width: 0.6;
+}
+.tier-timeline .tt-grid-minor {
+  stroke: var(--pyrmts-grid-minor, rgba(128, 128, 128, 0.4));
+  stroke-width: 0.4;
+  opacity: 0.5;
+}
+
+.tier-timeline .tt-label {
+  fill: var(--pyrmts-text-secondary, currentColor);
+  font-size: 10px;
+}
+.tier-timeline .tt-axis-major {
+  fill: var(--pyrmts-text-primary, currentColor);
+  font-size: 9px;
+  font-weight: 600;
+}
+.tier-timeline .tt-axis-minor {
+  fill: var(--pyrmts-text-secondary, currentColor);
+  font-size: 9px;
+}
+
+.tier-timeline .tt-legend {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.7rem;
+  color: var(--pyrmts-text-secondary, inherit);
+  margin-top: 0.15rem;
+  flex-wrap: wrap;
+}
+.tier-timeline .tt-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tier-timeline .tt-legend-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 10px;
+  border-radius: 1px;
+}
+.tier-timeline .tt-present-swatch { background: var(--pyrmts-present, #22c55e); }
+.tier-timeline .tt-pending-swatch { background: var(--pyrmts-pending, #f1c40f); }
+.tier-timeline .tt-missing-swatch { background: var(--pyrmts-missing, #e74c3c); }
+.tier-timeline .tt-tip-swatch { background: var(--pyrmts-tip, rgba(34, 197, 94, 0.45)); }
+.tier-timeline .tt-now-swatch {
+  background: transparent;
+  border-left: 2px solid var(--pyrmts-now, #ef4444);
+  width: 8px;
+}
+
+/* Shard-rect tooltip — rendered via FloatingPortal at document.body, so
+ * it must NOT be nested under the timeline's container selector. */
+.tt-tooltip {
+  background: var(--pyrmts-tooltip-bg, rgba(0, 0, 0, 0.92));
+  color: var(--pyrmts-tooltip-fg, #fff);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  max-width: 420px;
+  z-index: 10000;
+  pointer-events: none;
+}
+.tt-tooltip .tt-tooltip-title { font-weight: 600; }
+.tt-tooltip .tt-status-present { color: var(--pyrmts-present, #22c55e); }
+.tt-tooltip .tt-status-pending { color: var(--pyrmts-pending, #f1c40f); }
+.tt-tooltip .tt-status-missing { color: var(--pyrmts-missing, #e74c3c); }
+.tt-tooltip .tt-status-live-tip { color: var(--pyrmts-tip-text, #86efac); }
+.tt-tooltip .tt-tooltip-key {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: #cbd5e1;
+  margin-top: 2px;
+  word-break: break-all;
+}
+.tt-tooltip .tt-tooltip-hint {
+  color: #94a3b8;
+  font-size: 10px;
+  margin-top: 1px;
+}

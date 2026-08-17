@@ -12,8 +12,10 @@ Polyglot: Python for the build side (`python/`), TypeScript for the serve + fron
 |---|---|---|
 | **`pyrmts`** core | TS + Python | shipping — used by [awair](https://github.com/runsascoded/awair), [ctbk](https://github.com/ryan-williams/ctbk) |
 | **`pyrmts-cfw`** | TS | shipping — CFW serve handler |
-| **`pyrmts-geo`** | TS | shipping — `s2Index` primary, `h3Index` fixed-level legacy; see [`js/packages/pyrmts-geo/README.md`](./js/packages/pyrmts-geo/README.md) |
-| **`pyrmts_geo`** Python | Python | not yet implemented (TS side is the active path) |
+| **`pyrmts-geo`** | TS | shipping — `s2Index` is the backend; see [`js/packages/pyrmts-geo/README.md`](./js/packages/pyrmts-geo/README.md) |
+| **`pyrmts-engine`** | Python | shipping — build/fill engine, parallel window executor, Batch packaging |
+| **`pyrmts-ops`** | Python | shipping — fan-out rebuild driver, GC, Lambda deployer |
+| **`pyrmts-react`** | TS | built, unadopted — health/cover React components |
 
 See [`SPEC.md`](./SPEC.md) for the original design + the four consumer projects.
 
@@ -21,26 +23,28 @@ See [`SPEC.md`](./SPEC.md) for the original design + the four consumer projects.
 
 ```
 python/         # uv workspace
-├── pyrmts/         PyPI: pyrmts        — build, CLI, core types
-└── pyrmts_geo/     PyPI: pyrmts-geo    — spatial extension (placeholder)
+├── pyrmts/         PyPI: pyrmts         — writer, CLI, core types
+├── pyrmts_engine/  PyPI: pyrmts-engine  — build/fill engine, window executor
+└── pyrmts_ops/     PyPI: pyrmts-ops     — rebuild driver, GC, deployers
 
 js/             # pnpm workspace
 └── packages/
     ├── pyrmts/         npm: pyrmts         — planner, types, FE hook
     ├── pyrmts-cfw/     npm: pyrmts-cfw     — CFW serving helpers
-    └── pyrmts-geo/     npm: pyrmts-geo     — spatial extension (h3 + s2)
+    ├── pyrmts-geo/     npm: pyrmts-geo     — spatial extension (S2)
+    └── pyrmts-react/   npm: pyrmts-react   — health/cover components
 ```
 
 ## Spatial backends (`pyrmts-geo`)
 
-- **`s2Index`** — recommended primary. S2 quadtree (branching 4), exact lineage, optimal `minimalCover` DP. Built on [`s2js`](https://github.com/missinglink/s2js); Cloudflare-Workers compatible.
-- **`h3Index`** — default for back-compat with H3-based pyramids. Recommended for **fixed-level** queries; mixed-resolution `minimalCover` is approximate (H3 Boundary-Triangle mismatches affect ~7% of points at each level transition).
+- **`s2Index`** — the backend. S2 quadtree (branching 4), exact lineage, optimal `minimalCover` DP. Built on [`s2js`](https://github.com/missinglink/s2js); Cloudflare-Workers compatible.
+- **`h3Index`** — **test-only**, not exported. It survives as the second implementation the conformance suite runs the `SpatialIndex` contract against, which is what keeps the interface from collapsing into "whatever S2 does". H3 is not a serving backend: Boundary-Triangle mismatches affect ~7% of points at each level transition, so exact multi-resolution aggregation is unachievable on it.
 
-Used by [ctbk](https://github.com/ryan-williams/ctbk) (S2 multi-resolution rides); [nj-crashes](https://github.com/hudcostreets/nj-crashes) is a planned consumer (uses H3 directly today via its own `h3cover.ts`).
+Used by [ctbk](https://github.com/ryan-williams/ctbk) (S2 multi-resolution rides). [nj-crashes](https://github.com/hudcostreets/nj-crashes) uses H3 directly today via its own `h3cover.ts`; adopting `pyrmts-geo` would mean moving to S2, since `h3Index` is no longer shipped.
 
 ## Consume from npm dist branch
 
-`pyrmts`, `pyrmts-cfw`, and `pyrmts-geo` publish to the `dist` branch via a [GHA workflow](./.github/workflows/build-dist.yml) on every push to `main`. Add to your `package.json`:
+`pyrmts`, `pyrmts-cfw`, `pyrmts-geo`, and `pyrmts-react` publish to the `dist` branch via a [GHA workflow](./.github/workflows/build-dist.yml) on every push to `main`. Add to your `package.json`:
 
 ```json
 {

@@ -12,7 +12,7 @@ package READMEs, which travel with the code as it changes:
 
 - [`js/packages/pyrmts/README.md`](./js/packages/pyrmts/README.md) — core (planner, stitcher, types, FE hook)
 - [`js/packages/pyrmts-cfw/README.md`](./js/packages/pyrmts-cfw/README.md) — CFW serving helpers + D1 / R2 backends
-- [`js/packages/pyrmts-geo/README.md`](./js/packages/pyrmts-geo/README.md) — spatial extension (H3 + S2)
+- [`js/packages/pyrmts-geo/README.md`](./js/packages/pyrmts-geo/README.md) — spatial extension (S2)
 - [`specs/done/`](./specs/done/) — per-feature architectural specs
 
 ---
@@ -71,8 +71,8 @@ Captured here so future sessions don't re-litigate:
 - **Lib-first over copy-first.** With 4 imminent consumers (ctbk live, awair next, tomat + crashes following), the rule-of-three threshold is met. Copy-first risks the extraction never landing.
 - **Greenfield over extract-from-ctbk.** Extractions usually require greenfield-shaped work anyway, while also constraining the design to not break the source. Cleaner to design fresh with ctbk as reference.
 - **Polyglot monorepo over split repos.** YAML schema + data model must evolve atomically between Python (build) and TS (serve). uv + pnpm workspaces side-by-side.
-- **Geo as separate package.** H3/S2 are non-trivial deps; time-only consumers (awair, tomat) shouldn't carry them. `pyrmts-geo` depends on `pyrmts`.
-- **S2 over H3 for new geo pyramids.** S2's exact lineage (`cellToParent(cellAt(L,r), r-1) === cellAt(L,r-1)` for every L) and clean 4-way quadtree make multi-resolution covers exact and `minimalCover` optimal. H3 stays supported for fixed-level / legacy use. See [`specs/done/pluggable-spatial-backend.md`](./specs/done/pluggable-spatial-backend.md) for the H3 → H13 → T4 → S2 pivot rationale.
+- **Geo as separate package.** S2 is a non-trivial dep; time-only consumers (awair, tomat) shouldn't carry it. `pyrmts-geo` depends on `pyrmts`.
+- **S2, not H3.** S2's exact lineage (`cellToParent(cellAt(L,r), r-1) === cellAt(L,r-1)` for every L) and clean 4-way quadtree make multi-resolution covers exact and `minimalCover` optimal. H3 was the original backend and stayed supported for fixed-level use until 2026-08-16, when it was demoted to a test-only conformance backend (unexported, `h3-js` devDependency) — exact multi-resolution aggregation is unachievable on it, and shipping it cost every consumer ~195 KB of bundle. See [`specs/done/pluggable-spatial-backend.md`](./specs/done/pluggable-spatial-backend.md) for the H3 → H13 → T4 → S2 pivot rationale.
 - **Name.** `pyrmts` chosen over `mts` (npm-taken), `pyramts` (more pronounceable but `pyrmts` is shorter and the tagline carries explanation), `pyrami.ts` (cute but biases against Python sibling).
 - **Generalized bin/shard axis.** `bin: Duration` → `bin: Bin = Duration | StepCount`; `shard` similarly. tomat needs step-based bins (`100steps`, `1run`); baking time in at the type level forces a retrofit later. Each pyramid commits to one axis.
 - **Watermark over end-to-end ingest.** pyrmts owns coarser-tier in-progress stitching (re-aggregate from finer tier when the shard isn't built yet) but *not* raw-tier live tail. Each consumer supplies a raw-tier watermark; everything past it is the consumer's hot-path problem (their CFW, D1, KV — pyrmts doesn't see it). Keeps ctbk's per-station-per-minute consolidation out of the lib.

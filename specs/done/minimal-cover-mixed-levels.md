@@ -64,9 +64,19 @@ Ancestor–descendant pairs inside `system` are geometrically ill-defined for po
 - `www/src/pages/CellsDebug.tsx`: switch the cover system from `latLngToCell(lat, lng, 15)` to per-station LUC cells (asset `station-luc.json`), keep `coarsestLevel: 10`; dedupe `_`-alias stations (`5308.04_` etc.) whose fallback cells nest real LUC cells.
 - Audit other `minimalCover` callers for the dead `maxLevel` opt (region-cells generation, gbfs/api).
 
-### Follow-up status (audited 2026-08-16, pyrmts session) — **half adopted**
+### Follow-up status: **both adopted (2026-08-16, ctbk)** — moving to `done/`
 
-- ✅ **`maxLevel` audit done.** `CellsDebug.tsx:327` now carries the note "`maxLevel` is a dead `MinimalCoverOpts` field (unread by the DP); `coarsestLevel` is the real cap" and passes `coarsestLevel: COARSEST_LEVEL` (ctbk `db95f1e5`). `www/src/query/ridesV1.ts:116` likewise passes `coarsestLevel` only.
-- ❌ **LUC switch not done.** `CellsDebug.tsx:321` still cell-ifies stations at a uniform `FINEST_LEVEL` via `s2Index.latLngToCell`, and the file carries a **now-stale comment** at line 55 — "pyrmts-geo's `minimalCover` currently requires a uniform-[level system]". That has been false since this spec landed (2026-08-14); ctbk's `www` already pins `dist 69de58b`, which contains the fix. The blocker they think exists is gone — the switch is theirs to make whenever, and the ~1100-of-2340 stations sharing an L15 cell with a neighbor stay silently over-covered until it happens.
+Audited mid-day as half-done (the `maxLevel` caller sweep had landed in ctbk `db95f1e5`, the LUC switch hadn't, and `CellsDebug.tsx:55` still carried a stale "requires a uniform-level system" comment that had been false since 2026-08-14). Flagged to ctbk via `~/c/hccs/ctbk/specs/pyrmts-geo-h3-removal.md`; they landed the switch the same day.
 
-Spec stays in `specs/` until that switch lands (it's the acceptance evidence that mixed-level systems actually work on real ctbk data, which no pyrmts-side fixture can supply).
+**Acceptance on real data** (their `specs/done/pyrmts-geo-h3-removal.md`), which is what no pyrmts-side fixture could supply:
+
+- The pinned counter-example reproduces and is now resolved: `JC081` Brunswick & 6th (`luc=89c2574b3`, L16) and `JC075` Monmouth & 6th (`luc=89c2574b5`, L16) are sibling L16 LUC cells sharing L15 `89c2574b4` — indistinguishable under the old uniform-L15 system, distinct now.
+- At scale: the NYC preset (2,232 stations) yields a **12-term cover (+9 −3)** where the pre-fix `buildTree` produced an empty one. That's the defect-1 count-propagation bug and the defect-2 stall-exit both cleared on a 2,340-cell mixed-level (L10–L20) system.
+
+**One correction to this spec's prescription.** The follow-up above said to "dedupe the `_`-alias stations". ctbk found that's the wrong operation — the aliases must be *mapped to the base station's cell*, not dropped, and the reason traces back to acceptance #6 (ancestor-in-system throws):
+
+> a lat/lng fallback would insert an L15 cell into a system containing L16-20 cells nested inside it, and an ancestor in the system is exactly the lineage conflict the DP can't represent.
+
+Three of the four aliases (`6569.09_`, `5308.04_`, `6517.08_`) have no LUC entry because LUC resolved them onto their base station; the fourth (`5303.06_`) does. Mapping all of them to the base station's cell is both semantically right (same physical dock) and *required* by the disjointness contract. Verified over all 2,340 stations: every one resolves, 2,337 distinct cells, zero ancestor/descendant pairs.
+
+Worth keeping in view for future consumers: the disjointness throw is doing real work as a design constraint, not just a guardrail — it rules out the obvious "fall back to a point cell" handling of any station missing from a mixed-level vocabulary.

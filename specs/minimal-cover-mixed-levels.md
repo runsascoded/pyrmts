@@ -64,7 +64,13 @@ Ancestor–descendant pairs inside `system` are geometrically ill-defined for po
 - `www/src/pages/CellsDebug.tsx`: switch the cover system from `latLngToCell(lat, lng, 15)` to per-station LUC cells (asset `station-luc.json`), keep `coarsestLevel: 10`; dedupe `_`-alias stations (`5308.04_` etc.) whose fallback cells nest real LUC cells.
 - Audit other `minimalCover` callers for the dead `maxLevel` opt (region-cells generation, gbfs/api).
 
-### Follow-up status: **both adopted (2026-08-16, ctbk)** — moving to `done/`
+### ⚠️ Reopened 2026-08-17 — the ctbk acceptance evidence below was withdrawn
+
+Closed on 2026-08-16 (`6f21c01`) on the strength of ctbk's LUC switch; they reverted that change about an hour later and asked us to reopen (`specs/mixed-level-cover-evidence-withdrawn.md`, since moved to `done/`). The note below was accurate when written — recording it verbatim because the *measurements* in it are real and were taken against this implementation — but it is no longer live evidence. See "Where the acceptance now stands" at the bottom.
+
+<details><summary>Withdrawn adoption note (2026-08-16)</summary>
+
+#### Follow-up status: **both adopted (2026-08-16, ctbk)** — moving to `done/`
 
 Audited mid-day as half-done (the `maxLevel` caller sweep had landed in ctbk `db95f1e5`, the LUC switch hadn't, and `CellsDebug.tsx:55` still carried a stale "requires a uniform-level system" comment that had been false since 2026-08-14). Flagged to ctbk via `~/c/hccs/ctbk/specs/pyrmts-geo-h3-removal.md`; they landed the switch the same day.
 
@@ -80,3 +86,30 @@ Audited mid-day as half-done (the `maxLevel` caller sweep had landed in ctbk `db
 Three of the four aliases (`6569.09_`, `5308.04_`, `6517.08_`) have no LUC entry because LUC resolved them onto their base station; the fourth (`5303.06_`) does. Mapping all of them to the base station's cell is both semantically right (same physical dock) and *required* by the disjointness contract. Verified over all 2,340 stations: every one resolves, 2,337 distinct cells, zero ancestor/descendant pairs.
 
 Worth keeping in view for future consumers: the disjointness throw is doing real work as a design constraint, not just a guardrail — it rules out the obvious "fall back to a point cell" handling of any station missing from a mixed-level vocabulary.
+
+</details>
+
+### Where the acceptance now stands (2026-08-17)
+
+**ctbk exercises this code path nowhere, and can't be the acceptance evidence.** Verified their claim directly: `buildTree` is referenced only by `minimalCover` inside `spatial-index-cover.ts`, and `vocab-cover.ts` imports nothing from that module (`import type { SpatialIndex, SpatialSet } from './spatial-index.js'` is its only local import). `vocabCover` walks its own `VocabGraph` — a genuinely separate DP. So the mixed-level `buildTree` rewrite is not on ctbk's serving path even though their vocabulary spans levels 10–16, and their revert note's hope that `vocabCover` still exercised it was mistaken.
+
+Their three reasons for reverting are all sound and none of them is about this implementation:
+
+1. **LUC is relational** — a station's LUC cell is defined against every other station, so adding one churns existing anchors (166 moved in their 2026-07 re-key without physically moving). Their `drop-luc-station-keys.md` deliberately replaced LUC anchoring with fixed coarse cells + `s:<short_name>` identity keys and says "No `station-luc.json` denorm anywhere" — the switch walked that back.
+2. **An exact LUC cover is unservable** — LUC reaches L20 while their pyramids materialize `[15..10]`; `coarsestLevel` caps the rollup but nothing caps *depth*, so an exact cover names cells no tier can answer. Worth noting as a general contract point: `minimalCover` guarantees minimality over the system it's given, not servability against a materialized ladder. A consumer whose vocabulary is finer than its finest tier has to coarsen the *system*, not the cover.
+3. **The CellsDebug row has to mirror the FE, not improve on it** — it runs the same uniform-L15 `minimalCover` as `useRegionCoversV3`, whose output the worker uses only as a point-in-set test before re-deriving served terms via `vocabCover`. Its value is showing what the FE actually emits.
+
+The L15 lossiness this spec's counter-example describes is real and now documented in place rather than fixed; ctbk absorbs it downstream (a fat L15 cell's extra stations are co-located neighbours, in the same region anyway). The latent edge case is a region boundary splitting an L15 cell — and they're clear LUC isn't the fix for it.
+
+**Correction to this spec's own text**, per their note: the follow-up said to "dedupe the `_`-alias stations", and dedup is precisely the operation that doesn't work. The withdrawn note above already records the right handling (map aliases onto the entry they alias) and the reason (a lat/lng fallback inserts an ancestor into the system, which the disjointness check rejects). That lesson survives the revert — it's a property of ragged vocabularies generally, not of ctbk's code.
+
+**Closure path.** No consumer exercises mixed-level systems today, so waiting on one is waiting indefinitely; ctbk's note sanctions closing "on pyrmts-side fixtures or a different consumer". Taking the first: a scale fixture lands alongside this note in `spatial-index-cover.test.ts`, `describe('minimalCover: ragged vocabulary at scale')`. It models the shape the seven unit cases don't — 2,340 deterministically-generated cells, each at whatever level makes it unique, ragged across **L11–L19** in one call, which is exactly where both defects bit.
+
+Four cases, and two of them surfaced things worth keeping:
+
+- **Fixture sanity** — level span, distinctness, and lineage-disjointness pinned, so a fixture-generation change can't silently weaken the test.
+- **A 2,200-member subset covers in 139 terms** — `1` include + `138` exclude. The DP names the root and subtracts rather than enumerating, which is the ± reasoning the cover exists for and a far sharper demonstration than the hand cases. Membership is then verified exhaustively: `isCellInCover` agrees with the include set for all 2,340 members.
+- **`coarsestLevel` bounds one direction only.** Setting it to 15 caps what the walk *rolls up to*, but system members already coarser than 15 pass through untouched — the walk stops at them and can't invent finer cells absent from the vocabulary. This is the general form of ctbk's reason #2 above: a vocabulary misaligned with the materialized ladder has to be fixed in the *system*, not with this knob. Now asserted in both directions.
+- **The alias constraint, as a test.** A vocabulary entry with no member of its own can't be back-filled with a fixed-level cell from lat/lng: that cell lands as an ancestor of the finer members nested inside it, and the disjointness check rejects it. Pinned with the exact throw message, so the constraint ctbk discovered the hard way is now a regression test rather than a paragraph.
+
+JS 513 passed, `tsc -b --force` clean.

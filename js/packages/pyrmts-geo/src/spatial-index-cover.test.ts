@@ -368,6 +368,133 @@ describe('minimalCover: mixed-level systems (LUC cells)', () => {
   })
 })
 
+describe('minimalCover: ragged vocabulary at scale', () => {
+  // The unit cases above pin the DP on hand-built systems of a handful of
+  // cells. This one models the *shape* real consumers have and those cases
+  // don't: a station vocabulary of a couple thousand cells, each at
+  // whatever level makes it unique — ragged across L11-L19 in a single
+  // call. That's where both original defects bit (counts stranded below an
+  // already-linked ancestor → empty cover; stall-exit firing on the first
+  // zero-merge round → no coarsening).
+  //
+  // It exists because no consumer exercises mixed-level systems today, so
+  // this is the acceptance evidence for `specs/minimal-cover-mixed-levels.md`
+  // rather than a downstream adoption. Generated deterministically (LCG,
+  // fixed seed) so the pinned counts are stable.
+
+  const N = 2340          // ctbk's station count, for shape realism
+  const FINEST = 20
+  const COARSEST_UNIQUE = 10
+
+  // Deterministic points over an NYC-sized box.
+  function points(n: number): Array<{ lat: number; lng: number }> {
+    let x = 20260817
+    const next = (): number => {
+      x = (x * 1103515245 + 12345) % 2147483648
+      return x / 2147483648
+    }
+    return Array.from({ length: n }, () => ({
+      lat: 40.55 + next() * 0.40,
+      lng: -74.10 + next() * 0.36,
+    }))
+  }
+
+  // "LUC"-style vocabulary: each point gets its shallowest ancestor (from
+  // L10 down) that no other point shares. Lineage-disjoint by construction.
+  const leaves = points(N).map(p => cellid.fromLatLng(LatLng.fromDegrees(p.lat, p.lng)))
+  const cellOf: string[] = new Array(N)
+  for (let level = COARSEST_UNIQUE; level <= FINEST; level++) {
+    const byToken = new Map<string, number[]>()
+    leaves.forEach((leaf, i) => {
+      if (cellOf[i] !== undefined) return
+      const tok = cellid.toToken(cellid.parent(leaf, level))
+      const bucket = byToken.get(tok)
+      if (bucket === undefined) byToken.set(tok, [i])
+      else bucket.push(i)
+    })
+    for (const [tok, idxs] of byToken) {
+      if (idxs.length === 1 || level === FINEST) for (const i of idxs) cellOf[i] = tok
+    }
+  }
+  const system = [...new Set(cellOf)]
+
+  test('the fixture is a genuinely ragged, lineage-disjoint vocabulary', () => {
+    const levels = system.map(t => cellid.level(cellid.fromToken(t)))
+    expect([Math.min(...levels), Math.max(...levels)]).toEqual([11, 19])
+    expect([system.length, new Set(system).size]).toEqual([2340, 2340])
+    // Disjointness: no member is an ancestor of another. (`minimalCover`
+    // throws on violations, so this pins the fixture, not the DP.)
+    const members = new Set(system)
+    const nested = system.filter(t => {
+      let cur = cellid.fromToken(t)
+      while (cellid.level(cur) > 0) {
+        cur = cellid.parent(cur, cellid.level(cur) - 1)
+        if (members.has(cellid.toToken(cur))) return true
+      }
+      return false
+    })
+    expect(nested).toEqual([])
+  })
+
+  // A contiguous slice of the vocabulary stands in for "everything except
+  // these" — the shape a region query takes once most of the map is wanted.
+  const omitted = new Set(system.slice(0, 140))
+  const include = system.filter(t => !omitted.has(t))
+
+  test('a large subset covers compactly, and every membership decision is right', () => {
+    const cover = minimalCover(s2Index, include, system, { allowSubtraction: true })
+
+    // Defect 1 produced an *empty* cover for a non-empty include; defect 2
+    // left a forest of near-leaf roots. Both would show up as term count.
+    // 2200 wanted members collapse to 1 include + 138 excludes — the DP
+    // finds it cheaper to name the root and subtract, which is exactly the
+    // ± reasoning the whole cover exists for.
+    expect([include.length, cover.include.length, cover.exclude.length]).toEqual([2200, 1, 138])
+
+    // The actual contract: cover membership matches the include set
+    // exactly, for every member of the vocabulary.
+    const wanted = new Set(include)
+    const misclassified = system.filter(t => isCellInCover(s2Index, t, cover) !== wanted.has(t))
+    expect(misclassified).toEqual([])
+  })
+
+  test('coarsestLevel caps the roll-up, but cannot lift a system finer than the ladder', () => {
+    const cover = minimalCover(s2Index, include, system, {
+      allowSubtraction: true,
+      coarsestLevel: 15,
+    })
+
+    // Terms the DP *rolled up to* respect the cap. Terms that are system
+    // members already coarser than it pass through untouched — the walk
+    // stops at them, it can't invent finer cells that aren't in the
+    // vocabulary. Consumers whose vocabulary is finer or coarser than their
+    // materialized ladder have to fix the system, not the cover: this knob
+    // bounds one direction only.
+    const passthrough = cover.include.concat(cover.exclude).filter(t => system.includes(t))
+    const rolledUp = cover.include.concat(cover.exclude).filter(t => !system.includes(t))
+    expect(rolledUp.every(t => cellid.level(cellid.fromToken(t)) >= 15)).toBe(true)
+    expect(passthrough.some(t => cellid.level(cellid.fromToken(t)) < 15)).toBe(true)
+
+    const wanted = new Set(include)
+    const misclassified = system.filter(t => isCellInCover(s2Index, t, cover) !== wanted.has(t))
+    expect(misclassified).toEqual([])
+  })
+
+  test('a member missing from the vocabulary cannot be back-filled with a fixed-level cell', () => {
+    // The lesson from ctbk's `_`-alias stations: an entry with no
+    // vocabulary member of its own looks like it wants a lat/lng fallback
+    // cell. It can't have one — a fixed-level cell lands as an *ancestor*
+    // of the finer members nested inside it, which is precisely what the
+    // disjointness check rejects. The only correct handling is mapping the
+    // entry onto the member it aliases.
+    const deep = system.find(t => cellid.level(cellid.fromToken(t)) >= 17)!
+    const fallback = cellid.toToken(cellid.parent(cellid.fromToken(deep), 15))
+    expect(() => minimalCover(s2Index, [deep], [...system, fallback])).toThrow(
+      `minimalCover: system cells must be mutually disjoint; '${fallback}' is an ancestor of '${deep}'`,
+    )
+  })
+})
+
 describe('minimalCover: brute-force optimality (small trees)', () => {
   // Lineage descendant check (same as cellid.contains on S2 tokens).
   function isDescendantOf(leaf: string, ancestor: string): boolean {

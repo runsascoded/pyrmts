@@ -151,6 +151,15 @@ isCellInCover(s2Index, '89c2594c4', cover)  // true if cover.include covers the 
 - `planGeoQuery(pyramid, input)` — joint time × space planner.
 - `serveGeoQuery(opts)` — HTTP handler (CFW-compatible).
 
+### S2 range predicates (`s2-range.ts`)
+
+Pure-bigint S2 cell-id math (no `s2js` dep at runtime): the base-level descendants of any S2 cell form one contiguous numeric id range, so a cover becomes a handful of `[lo, hi]` predicates for parquet row-group pruning or SQL `cellid BETWEEN lo AND hi` (works on TEXT token columns too — trailing-zero-stripped tokens preserve numeric order under lex compare). Upstreamed from [nj-crashes](https://github.com/hudcostreets/nj-crashes) `cells-api`, where it drives both consumers in prod.
+
+- `s2RangesForCells(cells, baseLevel)` — cover tokens (mixed levels OK) → merged disjoint `S2CellRange[]`.
+- `s2RangeForCell(id, baseLevel)` / `s2RangeForCellToken(token, baseLevel)` — single-cell range, bigint or token flavored.
+- `mergeRanges(ranges)` / `intersectRanges(a, b)` — grid-agnostic `{lo, hi}` bigint set ops.
+- `s2TokenToId` / `s2IdToToken` / `s2LevelOf` / `s2Parent` / `s2LsbForLevel` / `S2_LEAF_LEVEL` — token ↔ id, level extraction, ancestor walk, marker-bit math.
+
 ### Conformance suite
 
 - `assertSpatialIndex(index, opts)` (exported from `spatial-index-conformance.ts` for tests) — every backend must pass this.
@@ -158,7 +167,7 @@ isCellInCover(s2Index, '89c2594c4', cover)  // true if cover.include covers the 
 ## Consumers
 
 - **[`ctbk`](https://github.com/ryan-williams/ctbk)** — bike-share rides + station availability. Uses `s2Index` for multi-resolution station-set covers.
-- **[`nj-crashes`](https://github.com/hudcostreets/nj-crashes)** — NJ State Police fatal + NJDOT crash data, with a Hudson County map view. Uses H3 directly today (own `h3cover.ts`); adopting `pyrmts-geo` would mean moving to S2, since `h3Index` is no longer shipped.
+- **[`nj-crashes`](https://github.com/hudcostreets/nj-crashes)** — NJ State Police fatal + NJDOT crash data, with a Hudson County map view. On S2 since 2026-08-23 (own H3→S2 migration; prod serves S2 `l4..l21`, worker speaks only S2). Its cell-id range math (`cells-api/src/s2-range.ts`) is upstreamed here as `s2-range.ts`; adoption of the cover/planner half is specced in nj-crashes `specs/pyrmts-geo-adoption.md`.
 
 ## See also
 

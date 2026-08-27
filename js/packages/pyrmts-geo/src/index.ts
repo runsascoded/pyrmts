@@ -28,6 +28,20 @@ export type {
 // and exporting it pins `h3-js` into every consumer bundle. See
 // `h3-index.ts`.
 export { s2Index } from './s2-index.js'
+export {
+  S2_LEAF_LEVEL,
+  intersectRanges,
+  mergeRanges,
+  s2IdToToken,
+  s2LevelOf,
+  s2LsbForLevel,
+  s2Parent,
+  s2RangeForCell,
+  s2RangeForCellToken,
+  s2RangesForCells,
+  s2TokenToId,
+} from './s2-range.js'
+export type { S2CellRange } from './s2-range.js'
 export { isCellInCover, minimalCover } from './spatial-index-cover.js'
 export { buildVocabGraph, vocabCover } from './vocab-cover.js'
 export type {

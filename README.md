@@ -40,7 +40,7 @@ js/             # pnpm workspace
 - **`s2Index`** — the backend. S2 quadtree (branching 4), exact lineage, optimal `minimalCover` DP. Built on [`s2js`](https://github.com/missinglink/s2js); Cloudflare-Workers compatible.
 - **`h3Index`** — **test-only**, not exported. It survives as the second implementation the conformance suite runs the `SpatialIndex` contract against, which is what keeps the interface from collapsing into "whatever S2 does". H3 is not a serving backend: Boundary-Triangle mismatches affect ~7% of points at each level transition, so exact multi-resolution aggregation is unachievable on it.
 
-Used by [ctbk](https://github.com/ryan-williams/ctbk) (S2 multi-resolution rides). [nj-crashes](https://github.com/hudcostreets/nj-crashes) uses H3 directly today via its own `h3cover.ts`; adopting `pyrmts-geo` would mean moving to S2, since `h3Index` is no longer shipped.
+Used by [ctbk](https://github.com/ryan-williams/ctbk) (S2 multi-resolution rides). [nj-crashes](https://github.com/hudcostreets/nj-crashes) completed its own H3→S2 migration (2026-08-23); its S2 cell-id range math is upstreamed here (`pyrmts-geo` `s2-range.ts`), and adoption of the cover/planner half is specced in its `specs/pyrmts-geo-adoption.md`.
 
 ## Consume from npm dist branch
 

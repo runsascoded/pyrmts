@@ -14,6 +14,7 @@ import * as pkg from './index.js'
 describe('pyrmts-geo public exports', () => {
   test('exports exactly the intended surface (no `h3Index`)', () => {
     expect(Object.keys(pkg).sort()).toEqual([
+      'S2_LEAF_LEVEL',
       'VERSION',
       'buildGeoQueryUrl',
       'buildVocabGraph',
@@ -21,11 +22,21 @@ describe('pyrmts-geo public exports', () => {
       'filterCellsAndRes',
       'filterCellsByCover',
       'getSpatialIndex',
+      'intersectRanges',
       'isCellInCover',
+      'mergeRanges',
       'minimalCover',
       'planGeoQuery',
       'planGeoQueryFromInventory',
+      's2IdToToken',
       's2Index',
+      's2LevelOf',
+      's2LsbForLevel',
+      's2Parent',
+      's2RangeForCell',
+      's2RangeForCellToken',
+      's2RangesForCells',
+      's2TokenToId',
       'serveGeoQuery',
       'vocabCover',
     ])

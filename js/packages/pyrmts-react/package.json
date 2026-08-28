@@ -39,12 +39,17 @@
     "use-kbd": ">=0.12"
   },
   "peerDependenciesMeta": {
-    "use-kbd": { "optional": true }
+    "use-kbd": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@floating-ui/react": "^0.27.13",
     "@types/react": "^19.2.15",
     "react": "^19.2.6",
     "use-kbd": "^0.12.0"
-  }
+  },
+  "sideEffects": [
+    "*.css"
+  ]
 }

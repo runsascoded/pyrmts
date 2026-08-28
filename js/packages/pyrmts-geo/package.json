@@ -45,5 +45,6 @@
     "react": {
       "optional": true
     }
-  }
+  },
+  "sideEffects": false
 }

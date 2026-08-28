@@ -24,5 +24,6 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260524.1",
     "hyparquet-writer": "^0.15.2"
-  }
+  },
+  "sideEffects": false
 }

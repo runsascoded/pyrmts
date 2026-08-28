@@ -45,6 +45,9 @@
     "react": ">=18"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true }
-  }
+    "react": {
+      "optional": true
+    }
+  },
+  "sideEffects": false
 }

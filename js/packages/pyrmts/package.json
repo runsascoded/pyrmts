@@ -46,6 +46,7 @@
       "optional": true
     }
   },
+  "sideEffects": false,
   "scripts": {
     "build": "tsc -b"
   }

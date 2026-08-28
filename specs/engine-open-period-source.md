@@ -1,6 +1,8 @@
 # Engine missing-source: classify by period, not by ratio
 
-Status: **proposed**. Written by the ctbk session (2026-08-28).
+Status: **implemented pyrmts-side (2026-08-28)**; awaiting ctbk validation (editable install) before push. Written by the ctbk session (2026-08-28).
+
+Implementation notes: `TiledSource` now records absent *tiles* (key + period) — `coverage()` keeps its keys-only shape, and a new `missing_tiles()` exposes the periods. `build_local` classifies before applying the ratio: absent tiles with `period.end > to` are excluded from both sides, reported as `expected-absent (open period): <key> [<start>, <end>)` on stderr, and counted in a new `BuildResult.expected_absent`; `strict_open_periods=False` is the `build_local` kwarg (the spec's flag, inverted-default as specced), surfaced as `build -o/--strict-open-periods` and forwarded through `batch submit --strict-open-periods` / `build_command_args`. The clock is literally the range's `to` — no wall-clock enters the engine, so builds stay deterministic and a capped rebuild over closed history gets strict behavior for free (every absent period then satisfies `end <= to`). All four contract tests landed in `test_engine.py` (forgiven open tile; open-excluded 1/24 alongside a closed hole; denominator-0 single-source shape; `--strict` restoring 1/25), each also asserting outputs/registrations are unchanged by classification.
 
 `build_local`'s `max_missing_source` is a **fraction**, and no value of it can express the one rule a maintained pyramid actually wants: *a source period that hasn't happened yet (or is still open) may be absent; any other absence is a real hole.* The ratio conflates the two, and because its denominator is the sources **this fill reads** — not all history — the same legitimate absence lands anywhere between 1% and 100% depending on how big the gap set happens to be.
 

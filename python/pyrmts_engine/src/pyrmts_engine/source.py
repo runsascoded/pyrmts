@@ -96,7 +96,7 @@ class TiledSource:
         self.pyramid = pyramid
         self._cache: dict[str, _CacheEntry] = {}
         self._n_tiles = 0
-        self._missing: list[str] = []
+        self._missing: list[Tile] = []
         self._lock = threading.Lock()
         self._ra_pool: ThreadPoolExecutor | None = None
 
@@ -128,7 +128,7 @@ class TiledSource:
         blob = self.fetch(tile.key)
         if blob is None:
             with self._lock:
-                self._missing.append(tile.key)
+                self._missing.append(tile)
             return empty_long(self.pyramid)
         return self.parse(blob, tile)
 
@@ -166,7 +166,16 @@ class TiledSource:
         Affirmatively-EMPTY tiles (outage windows) are present zero-row
         objects and do NOT count as missing."""
         with self._lock:
-            return self._n_tiles, sorted(self._missing)
+            return self._n_tiles, sorted(t.key for t in self._missing)
+
+    def missing_tiles(self) -> list[Tile]:
+        """Absent tiles with their periods, key-sorted. The engine's
+        open-period classification consumes this — an absent tile whose
+        period extends past the build range's end hasn't finished
+        happening, so its object may legitimately not exist yet
+        (`coverage()` keeps the keys-only shape)."""
+        with self._lock:
+            return sorted(self._missing, key=lambda t: t.key)
 
     def cache_bytes(self) -> int:
         """Estimated bytes of resident parsed tile frames — feeds the

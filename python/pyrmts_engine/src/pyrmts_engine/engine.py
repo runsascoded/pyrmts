@@ -144,6 +144,9 @@ class BuildResult:
     unfillable: int = 0
     source_rows: int = 0
     missing_source: int = 0
+    # Absent source shards whose period extends past the range's `to` —
+    # excluded from the `max_missing_source` ratio (see `build_local`).
+    expected_absent: int = 0
     windows: int = 0
     wall_seconds: float = 0.0
 
@@ -304,6 +307,7 @@ def build_local(
     resume: bool = False,
     allow_empty: bool = False,
     max_missing_source: float = 0.0,
+    strict_open_periods: bool = False,
     verbose: bool = False,
 ) -> BuildResult:
     """Build every expected shard of `pyramid` over `time_range` from
@@ -376,7 +380,22 @@ def build_local(
             every miss is post-genesis, and affirmatively-EMPTY shards
             don't count — a miss means a real hole. Raise the threshold
             (up to 1.0) for sources whose outages legitimately have no
-            objects at all.
+            objects at all. Absent shards whose period extends past the
+            range's `to` are **open**: not yet finished happening, so
+            their objects may legitimately not exist (a month whose
+            tripdata publishes mid-following-month). They're excluded
+            from both the numerator and the denominator and reported
+            separately (`expected-absent (open period): …` on stderr) —
+            no ratio can express "only the open period may be absent",
+            since the denominator is the sources *this* build reads, not
+            all history. `to` is the same clock expected cover is
+            computed from, so an uncapped fill reaching `now` forgives
+            exactly what it couldn't have expected.
+        strict_open_periods: disable the open-period exclusion above —
+            every absent shard counts toward the ratio, restoring the
+            pre-classification behavior. For builds that should only
+            ever run over closed history (e.g. a backfill whose range
+            deliberately stops at the last closed period).
         verbose: per-flush progress lines on stderr.
     """
     t0 = time.time()
@@ -855,6 +874,23 @@ def build_local(
         cov = getattr(source, 'coverage', None)
         if cov is not None:
             n_periods, missing = cov()
+            if not strict_open_periods:
+                # Classify absences by period: a tile whose period extends
+                # past `to` (the clock expected cover was computed from)
+                # hasn't finished happening, so its object may legitimately
+                # not exist yet — excluded from both sides of the ratio.
+                # Anything closed stays a real hole at the same threshold.
+                mt = getattr(source, 'missing_tiles', None)
+                if mt is not None:
+                    open_tiles = [t for t in mt() if t.period.end > to]
+                    if open_tiles:
+                        for t in open_tiles:
+                            err(f"expected-absent (open period): {t.key} "
+                                f"[{t.period.start.isoformat()}, {t.period.end.isoformat()})")
+                        open_keys = {t.key for t in open_tiles}
+                        missing = [k for k in missing if k not in open_keys]
+                        n_periods -= len(open_tiles)
+                        result.expected_absent = len(open_tiles)
             result.missing_source = len(missing)
             if missing:
                 err(f"missing source shards ({len(missing)}/{n_periods}): "

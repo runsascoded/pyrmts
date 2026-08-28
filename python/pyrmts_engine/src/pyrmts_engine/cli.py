@@ -136,6 +136,7 @@ def invalidate(fs_root: str | None, range_: str, config: str) -> None:
 @option('-M', '--max-missing', type=float, default=0.0, help="Tolerated fraction of absent source shards (default 0.0 = strict; absent ≠ present-but-EMPTY)")
 @option('-m', '--manifest', help="Record written shards to this JSONL manifest")
 @option('-n', '--pyramid-name', required=True, help="Pyramid name for shard registration")
+@option('-o', '--strict-open-periods', is_flag=True, help="Count absent open-period sources toward -M/--max-missing (default: an absent source whose period extends past the range's `to` is expected-absent, excluded from the ratio)")
 @option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
 @option('-r', '--range', 'range_', required=True, help="Half-open build range, <from-iso>/<to-iso> (UTC)")
 @option('-S', '--spill-dir', help="Scratch dir for WIP spill files (default: fresh temp dir)")
@@ -160,6 +161,7 @@ def build(
     max_missing: float,
     manifest: str | None,
     pyramid_name: str,
+    strict_open_periods: bool,
     fs_root: str | None,
     range_: str,
     spill_dir: str | None,
@@ -215,6 +217,7 @@ def build(
             resume=resume,
             allow_empty=allow_empty,
             max_missing_source=max_missing,
+            strict_open_periods=strict_open_periods,
             verbose=verbose,
         )
     except SourceCoverageError as e:
@@ -291,6 +294,7 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 @option('-m', '--manifest', help="Manifest destination (use s3:// — container disk is ephemeral)")
 @option('-M', '--memory', type=int, help="Override job memory MiB")
 @option('--max-missing', type=float, help="Tolerated fraction of absent source shards (build -M)")
+@option('--strict-open-periods', is_flag=True, help="build -o: count absent open-period sources toward --max-missing")
 @option('-n', '--pyramid-name', required=True, help="Pyramid name for shard registration")
 @option('-O', '--on-demand', is_flag=True, help="Submit to the on-demand queue (needs `bootstrap -o`); no Spot reclaims")
 @option('-r', '--range', 'range_', required=True, help="Half-open build range, <from-iso>/<to-iso> (UTC)")
@@ -318,6 +322,7 @@ def batch_submit(
     manifest: str | None,
     memory: int | None,
     max_missing: float | None,
+    strict_open_periods: bool,
     pyramid_name: str,
     on_demand: bool,
     range_: str,
@@ -350,6 +355,7 @@ def batch_submit(
             resume=resume,
             allow_empty=allow_empty,
             max_missing=max_missing,
+            strict_open_periods=strict_open_periods,
             filters=filters,
             workers=workers,
             max_inflight=max_inflight,

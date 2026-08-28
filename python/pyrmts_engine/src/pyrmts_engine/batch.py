@@ -140,6 +140,7 @@ def build_command(
     resume: bool = False,
     allow_empty: bool = False,
     max_missing: float | None = None,
+    strict_open_periods: bool = False,
     filters: tuple[str, ...] = (),
     workers: int | None = None,
     max_inflight: int | None = None,
@@ -173,6 +174,8 @@ def build_command(
         cmd += ['-e']
     if max_missing is not None:
         cmd += ['-M', str(max_missing)]
+    if strict_open_periods:
+        cmd += ['-o']
     for f in filters:
         cmd += ['-F', f]
     if workers is not None:

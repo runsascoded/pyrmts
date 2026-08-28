@@ -361,3 +361,104 @@ def test_zero_row_period_writes_empty_shard():
     # Neighboring day unaffected.
     jan5 = _parse_shard(pyramid.storage.get('pyr/q/1d/2026-01-05.parquet'))
     assert len(jan5) == 2 * (DAY_MS // Q_MS)
+
+
+# ---- open-period source classification (`specs/engine-open-period-source.md`) ----
+#
+# An uncapped fill whose range reaches past the last closed period wants a
+# source that cannot exist yet (a month whose tripdata publishes
+# mid-following-month). Such absences are expected-absent: excluded from
+# both sides of the `max_missing_source` ratio and reported separately,
+# while a closed-period absence keeps failing at the same threshold. The
+# clock is the range's `to` — the same one expected cover is computed from.
+
+TO_OPEN = TO + timedelta(hours=3)  # mid-way through the (absent) [TO, TO+6h) tile
+OPEN_TILE_LINE = (
+    'expected-absent (open period): pyr/q/6h/2026-01-08T00.parquet '
+    '[2026-01-08T00:00:00+00:00, 2026-01-08T06:00:00+00:00)'
+)
+
+
+def _expected_keys_open(pyramid) -> list[str]:
+    return sorted(
+        e.key for e in list_expected_shards(pyramid, (FROM, TO_OPEN))
+        if (e.tier, e.shard_dur) != ('q', '6h')
+    )
+
+
+def test_open_period_absence_forgiven(capsys):
+    """The open-period tile's absence passes the strict (0.0) default,
+    reported as expected-absent; outputs build and register in full."""
+    pyramid = make_pyramid()
+    write_base_shards(pyramid)  # [FROM, TO) present; [TO, TO+6h) never written
+    index = MemShardIndex()
+    result = build_local(
+        pyramid, (FROM, TO_OPEN), WideShardSource(pyramid, shard_dur='6h'),
+        pyramid_name='test', shard_index=index, window='3h',
+    )
+    assert result.expected_absent == 1
+    assert result.missing_source == 0
+    lines = capsys.readouterr().err.splitlines()
+    assert [l for l in lines if l.startswith('expected-absent')] == [OPEN_TILE_LINE]
+    assert sorted(w.key for w in result.written) == _expected_keys_open(pyramid)
+    assert sorted(r.key for r in index.records) == _expected_keys_open(pyramid)
+
+
+def test_open_period_excluded_closed_absence_still_raises(capsys):
+    """A closed-period hole alongside the open one still trips the guard —
+    with the open tile excluded from both numerator and denominator
+    (1/24, not 2/25)."""
+    pyramid = make_pyramid()
+    write_base_shards(pyramid)
+    pyramid.storage._data.pop('pyr/q/6h/2026-01-04T00.parquet')
+    with pytest.raises(SourceCoverageError) as exc:
+        build_local(
+            pyramid, (FROM, TO_OPEN), WideShardSource(pyramid, shard_dur='6h'),
+            pyramid_name='test', window='3h',
+        )
+    assert str(exc.value) == (
+        'build_local: 1/24 source shards absent (> max_missing_source=0.0): '
+        'pyr/q/6h/2026-01-04T00.parquet — a real hole (GC\'d rung, filter '
+        'typo, wrong rung), not an outage (outage shards are '
+        'present-but-EMPTY); raise max_missing_source / --max-missing if '
+        'such holes are expected here (outputs WERE written/registered)'
+    )
+    lines = capsys.readouterr().err.splitlines()
+    assert [l for l in lines if l.startswith('expected-absent')] == [OPEN_TILE_LINE]
+
+
+def test_open_period_only_source_no_division_issue():
+    """The single-source shape (gap set = one open period): the denominator
+    goes to 0 after exclusion and the guard passes — 1.00-missing under the
+    old ratio, the case no threshold could express. (`allow_empty` opts out
+    of the orthogonal zero-row guard: the one window read nothing.)"""
+    pyramid = make_pyramid()  # no base shards at all
+    result = build_local(
+        pyramid, (TO, TO_OPEN), WideShardSource(pyramid, shard_dur='6h'),
+        pyramid_name='test', allow_empty=True, window='3h',
+    )
+    assert result.expected_absent == 1
+    assert result.missing_source == 0
+
+
+def test_strict_open_periods_restores_ratio():
+    """`strict_open_periods=True` counts the open tile like any other
+    absence (1/25 > 0.0 → raise) — outputs still written/registered
+    identically to the forgiving run."""
+    pyramid = make_pyramid()
+    write_base_shards(pyramid)
+    index = MemShardIndex()
+    with pytest.raises(SourceCoverageError) as exc:
+        build_local(
+            pyramid, (FROM, TO_OPEN), WideShardSource(pyramid, shard_dur='6h'),
+            pyramid_name='test', shard_index=index, window='3h',
+            strict_open_periods=True,
+        )
+    assert str(exc.value) == (
+        'build_local: 1/25 source shards absent (> max_missing_source=0.0): '
+        'pyr/q/6h/2026-01-08T00.parquet — a real hole (GC\'d rung, filter '
+        'typo, wrong rung), not an outage (outage shards are '
+        'present-but-EMPTY); raise max_missing_source / --max-missing if '
+        'such holes are expected here (outputs WERE written/registered)'
+    )
+    assert sorted(r.key for r in index.records) == _expected_keys_open(pyramid)

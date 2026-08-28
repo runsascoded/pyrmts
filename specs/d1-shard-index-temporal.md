@@ -1,6 +1,8 @@
 # `D1ShardIndex`: make windowed `listShards` seekable
 
-Status: **proposed**. Written by the ctbk session (2026-08-28).
+Status: **implemented pyrmts-side (2026-08-28)**; awaiting ctbk `pds l` validation before push. Written by the ctbk session (2026-08-28).
+
+Implementation notes: the DDL entry point is `D1ShardIndex.schemaSql()` (this spec's `ddl()`). The index statement is emitted after the shards `CREATE TABLE` (and respects `shardsTable` overrides: `<shards>_period`); `skipInventory` omits it along with the table. Tests landed in two layers: the existing mock-based file asserts the emitted DDL strings, and a new `shard-index.sqlite.test.ts` runs `D1ShardIndex` against a real SQLite (`node:sqlite`, no new dep) — the windowed-`listShards` `EXPLAIN QUERY PLAN` asserts the exact plan `SEARCH pyramid_shards USING INDEX pyramid_shards_period (pyramid=? AND period_end>?)`, plus the fixture/tier-pinned/whole-history/re-run-`schemaSql()` cases below, with the narrow-window result additionally compared byte-identical against the same query after `DROP INDEX`. ctbk already applied the statement to prod by hand (14,561 → 22 rows read on the 1-hour-window measurement), so its re-run of `schemaSql()` will hit the `IF NOT EXISTS` no-op path.
 
 `listShards(pyramid, { range })` already pushes the window down into SQL — `WHERE pyramid = ? AND period_end > ? AND period_start < ?` — but the table `pyrmts-cfw` creates has no index that can serve it. The predicate is evaluated by scanning the pyramid's entire partition, so a per-request serving query pays the full inventory on every call.
 

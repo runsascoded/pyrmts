@@ -156,6 +156,19 @@ export class D1ShardIndex implements ShardIndex {
   // Returns one statement per table in dependency order. WITHOUT ROWID
   // makes the tables key-only — saves space and guarantees strict
   // PK-driven uniqueness.
+  //
+  // The shards table also gets a `(pyramid, period_end)` secondary index:
+  // a windowed `listShards` pins neither `tier` nor `shard_dur`, so the PK
+  // can only seek to the pyramid partition and must scan all of it —
+  // O(shards in pyramid) rows read per call, growing silently with history
+  // (measured 857× amplification at 14.5K shards). `period_end > from` is
+  // the selective predicate, and on a WITHOUT ROWID table the index entries
+  // carry the PK columns, so the index is near-covering. Cost: one extra
+  // index entry per `recordShard` — D1 bills writes per row, so a hot
+  // ingest path pays 1 additional row-write per shard recorded.
+  //
+  // All statements are `IF NOT EXISTS`, so re-running `schemaSql()` is the
+  // migration path for deployments provisioned before the index existed.
   static schemaSql(opts: D1ShardIndexOptions = {}): string[] {
     const w = quoteIdent(opts.watermarksTable ?? DEFAULT_WATERMARKS_TABLE)
     const s = quoteIdent(opts.shardsTable ?? DEFAULT_SHARDS_TABLE)
@@ -170,6 +183,7 @@ export class D1ShardIndex implements ShardIndex {
       `) WITHOUT ROWID`,
     ]
     if (!(opts.skipInventory ?? false)) {
+      const shardsTable = opts.shardsTable ?? DEFAULT_SHARDS_TABLE
       out.push(
         `CREATE TABLE IF NOT EXISTS ${s} (\n` +
         `  pyramid TEXT NOT NULL,\n` +
@@ -181,6 +195,7 @@ export class D1ShardIndex implements ShardIndex {
         `  written_at INTEGER NOT NULL,\n` +
         `  PRIMARY KEY (pyramid, tier, shard_dur, period_start)\n` +
         `) WITHOUT ROWID`,
+        `CREATE INDEX IF NOT EXISTS ${quoteIdent(`${shardsTable}_period`)} ON ${s} (pyramid, period_end)`,
       )
     }
     return out

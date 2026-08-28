@@ -257,6 +257,7 @@ describe('D1ShardIndex.schemaSql', () => {
       '  written_at INTEGER NOT NULL,\n' +
       '  PRIMARY KEY (pyramid, tier, shard_dur, period_start)\n' +
       ') WITHOUT ROWID',
+      'CREATE INDEX IF NOT EXISTS "pyramid_shards_period" ON "pyramid_shards" (pyramid, period_end)',
     ])
   })
 
@@ -273,6 +274,9 @@ describe('D1ShardIndex.schemaSql', () => {
     })
     expect(stmts[0]).toContain('"t1_watermarks"')
     expect(stmts[1]).toContain('"t1_shards"')
+    expect(stmts[2]).toBe(
+      'CREATE INDEX IF NOT EXISTS "t1_shards_period" ON "t1_shards" (pyramid, period_end)',
+    )
   })
 
   test('quotes identifiers with embedded double-quotes', () => {

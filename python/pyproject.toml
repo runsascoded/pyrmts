@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["pyrmts", "pyrmts_engine", "pyrmts_ops"]
+members = ["pyrmts", "pyrmts_engine", "pyrmts_ops", "pyrmts_pulumi"]
 
 [tool.uv]
 package = false

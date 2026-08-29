@@ -6,6 +6,17 @@ export interface D1ShardIndexOptions {
     skipInventory?: boolean;
     now?: () => number;
 }
+export interface SchemaObject {
+    name: string;
+    kind: 'table' | 'index';
+    sql: string;
+    columns: string[];
+}
+export interface SchemaDiff {
+    ok: boolean;
+    missing: string[];
+    mismatched: string[];
+}
 export declare class D1ShardIndex implements ShardIndex {
     private readonly db;
     private readonly watermarksTable;
@@ -17,5 +28,7 @@ export declare class D1ShardIndex implements ShardIndex {
     listShards(pyramidName: string, filter?: ListShardsFilter): Promise<RecordedShard[]>;
     recordShard(input: RecordShardInput): Promise<void>;
     static schemaSql(opts?: D1ShardIndexOptions): string[];
+    static schemaObjects(opts?: D1ShardIndexOptions): SchemaObject[];
+    static verifySchema(db: D1Like, opts?: D1ShardIndexOptions): Promise<SchemaDiff>;
 }
 //# sourceMappingURL=shard-index.d.ts.map

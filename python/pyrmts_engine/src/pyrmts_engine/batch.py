@@ -15,6 +15,10 @@ Design points:
 - `bootstrap` is create-if-missing for role/logs/ECR/CE/queue; the job
   definition is re-registered each run (revisions are harmless and
   comparing specs is fussier than it's worth).
+- Every name is derived from one `prefix` via `resource_names`. Batch job
+  definitions, queues, compute environments, IAM roles, and log groups are
+  **account-global**, so two consumers bootstrapping into one AWS account
+  share (and clobber) each other's unless they pass distinct prefixes.
 
 Pure spec-builder functions below are the tested surface; the boto3 calls
 are thin wrappers around them."""
@@ -22,13 +26,12 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import dataclass
 from functools import partial
 
 err = partial(print, file=sys.stderr)
 
 PREFIX = 'pyrmts-engine'
-LOG_GROUP = f'/{PREFIX}/batch'
-EXECUTION_ROLE = f'{PREFIX}-batch-execution'
 ECS_TRUST_POLICY = (
     '{"Version": "2012-10-17", "Statement": [{"Effect": "Allow", '
     '"Principal": {"Service": "ecs-tasks.amazonaws.com"}, '
@@ -39,16 +42,57 @@ ECS_EXECUTION_POLICY_ARN = 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskEx
 
 # -- pure builders ----------------------------------------------------------
 
+@dataclass(frozen=True)
+class Names:
+    """Every account-global name `bootstrap` and `submit` touch, derived from
+    one prefix."""
+    prefix: str
+    job_definition: str
+    execution_role: str
+    log_group: str
+    spot_ce: str
+    od_ce: str
+    spot_queue: str
+    od_queue: str
+
+    def queue(self, on_demand: bool = False) -> str:
+        return self.od_queue if on_demand else self.spot_queue
+
+
+def resource_names(prefix: str = PREFIX) -> Names:
+    """Derive the resource names for `prefix`.
+
+    Batch job definitions, queues, compute environments, IAM roles, and log
+    groups are all account-global, so two consumers bootstrapping in one AWS
+    account collide on every one of them unless they pass distinct prefixes.
+    This is the single source of truth for that mapping — `bootstrap`,
+    `submit`, and the spec builders all route through it rather than
+    re-deriving names, so a name can't drift between the creating call and
+    the reading one."""
+    return Names(
+        prefix=prefix,
+        job_definition=prefix,
+        execution_role=f'{prefix}-batch-execution',
+        log_group=f'/{prefix}/batch',
+        spot_ce=f'{prefix}-spot',
+        od_ce=f'{prefix}-od',
+        spot_queue=prefix,
+        od_queue=f'{prefix}-od',
+    )
+
+
 def compute_environment_spec(
     *,
     name: str | None = None,
+    prefix: str = PREFIX,
     spot: bool = True,
     max_vcpus: int = 16,
     subnets: list[str],
     security_group_ids: list[str],
 ) -> dict:
+    names = resource_names(prefix)
     return {
-        'computeEnvironmentName': name or (f'{PREFIX}-spot' if spot else f'{PREFIX}-od'),
+        'computeEnvironmentName': name or (names.spot_ce if spot else names.od_ce),
         'type': 'MANAGED',
         'state': 'ENABLED',
         'computeResources': {
@@ -69,9 +113,10 @@ def job_definition_spec(
     memory_mib: int = 32768,
     ephemeral_gib: int = 100,
     execution_role_arn: str,
-    log_group: str = LOG_GROUP,
+    log_group: str | None = None,
     environment: dict[str, str] | None = None,
 ) -> dict:
+    log_group = log_group if log_group is not None else resource_names(name).log_group
     return {
         'jobDefinitionName': name,
         'type': 'container',
@@ -301,34 +346,49 @@ def bootstrap(
     *,
     image: str,
     arch: str = 'X86_64',
-    max_vcpus: int = 16,
-    vcpus: int = 8,
-    memory_mib: int = 32768,
-    ephemeral_gib: int = 100,
+    prefix: str = PREFIX,
+    max_vcpus: int | None = None,
+    vcpus: int | None = None,
+    memory_mib: int | None = None,
+    ephemeral_gib: int | None = None,
     on_demand: bool = False,
     environment: dict[str, str] | None = None,
+    clients: dict | None = None,
 ) -> None:
-    c = _clients()
+    # Sizing defaults live on the spec builders, not here: restating them
+    # meant a change to one site silently shadowed by the other (the job
+    # definition shipped 8 vCPU while `job_definition_spec` said 16).
+    # `None` means "whatever the builder's default is".
+    c = clients if clients is not None else _clients()
+    names = resource_names(prefix)
+    ce_sizing = {} if max_vcpus is None else {'max_vcpus': max_vcpus}
+    jd_sizing = {
+        k: v for k, v in (
+            ('vcpus', vcpus), ('memory_mib', memory_mib), ('ephemeral_gib', ephemeral_gib),
+        ) if v is not None
+    }
 
     # Execution role (image pull + logs).
     try:
-        role = c['iam'].get_role(RoleName=EXECUTION_ROLE)['Role']
-        err(f'role {EXECUTION_ROLE}: exists')
+        role = c['iam'].get_role(RoleName=names.execution_role)['Role']
+        err(f'role {names.execution_role}: exists')
     except c['iam'].exceptions.NoSuchEntityException:
         role = c['iam'].create_role(
-            RoleName=EXECUTION_ROLE,
+            RoleName=names.execution_role,
             AssumeRolePolicyDocument=ECS_TRUST_POLICY,
         )['Role']
-        c['iam'].attach_role_policy(RoleName=EXECUTION_ROLE, PolicyArn=ECS_EXECUTION_POLICY_ARN)
-        err(f'role {EXECUTION_ROLE}: created')
+        c['iam'].attach_role_policy(
+            RoleName=names.execution_role, PolicyArn=ECS_EXECUTION_POLICY_ARN,
+        )
+        err(f'role {names.execution_role}: created')
 
     # Log group.
-    groups = c['logs'].describe_log_groups(logGroupNamePrefix=LOG_GROUP)['logGroups']
-    if not any(g['logGroupName'] == LOG_GROUP for g in groups):
-        c['logs'].create_log_group(logGroupName=LOG_GROUP)
-        err(f'log group {LOG_GROUP}: created')
+    groups = c['logs'].describe_log_groups(logGroupNamePrefix=names.log_group)['logGroups']
+    if not any(g['logGroupName'] == names.log_group for g in groups):
+        c['logs'].create_log_group(logGroupName=names.log_group)
+        err(f'log group {names.log_group}: created')
     else:
-        err(f'log group {LOG_GROUP}: exists')
+        err(f'log group {names.log_group}: exists')
 
     # ECR repo (only if the image ref looks like ECR-in-this-account).
     _ensure_repo(c['ecr'], image)
@@ -353,10 +413,10 @@ def bootstrap(
     # pair (queue `<prefix>-od`) when requested — ~3.3× compute cost but
     # immune to Spot reclaims, for "final" runs until resume makes Spot
     # reclaims cheap.
-    pairs = [(True, PREFIX)] + ([(False, f'{PREFIX}-od')] if on_demand else [])
+    pairs = [(True, names.spot_queue)] + ([(False, names.od_queue)] if on_demand else [])
     for spot, queue_name in pairs:
         spec = compute_environment_spec(
-            spot=spot, max_vcpus=max_vcpus, subnets=subnets, security_group_ids=sgs,
+            prefix=prefix, spot=spot, subnets=subnets, security_group_ids=sgs, **ce_sizing,
         )
         ce_name = spec['computeEnvironmentName']
         existing = c['batch'].describe_compute_environments(
@@ -385,34 +445,37 @@ def bootstrap(
 
     # Job definition — always (re-)registered; revisions are harmless.
     c['batch'].register_job_definition(**job_definition_spec(
+        name=names.job_definition,
         image=image,
         arch=arch,
-        vcpus=vcpus,
-        memory_mib=memory_mib,
-        ephemeral_gib=ephemeral_gib,
         execution_role_arn=role['Arn'],
         environment=environment,
+        **jd_sizing,
     ))
-    err(f'job definition {PREFIX}: registered')
+    err(f'job definition {names.job_definition}: registered')
 
 
 def submit(
     *,
     command: list[str],
     job_name: str,
-    queue: str = PREFIX,
+    prefix: str = PREFIX,
+    queue: str | None = None,
+    on_demand: bool = False,
     vcpus: int | None = None,
     memory_mib: int | None = None,
     environment: dict[str, str] | None = None,
     watch: bool = False,
+    clients: dict | None = None,
 ) -> int:
     """Submit a build job; with `watch`, tail its log stream and return the
     container's exit code (also non-zero on FAILED without one)."""
-    c = _clients()
+    c = clients if clients is not None else _clients()
+    names = resource_names(prefix)
     job = c['batch'].submit_job(
         jobName=job_name,
-        jobQueue=queue,
-        jobDefinition=PREFIX,
+        jobQueue=queue if queue is not None else names.queue(on_demand),
+        jobDefinition=names.job_definition,
         containerOverrides=submit_overrides(
             command, vcpus=vcpus, memory_mib=memory_mib, environment=environment,
         ),
@@ -422,10 +485,10 @@ def submit(
     if not watch:
         print(job_id)
         return 0
-    return _watch(c, job_id)
+    return _watch(c, job_id, log_group=names.log_group)
 
 
-def _watch(c: dict, job_id: str) -> int:
+def _watch(c: dict, job_id: str, *, log_group: str) -> int:
     last_status = None
     next_token = None
     stream = None
@@ -437,7 +500,7 @@ def _watch(c: dict, job_id: str) -> int:
             last_status = status
         stream = desc.get('container', {}).get('logStreamName') or stream
         if stream is not None:
-            kwargs = {'logGroupName': LOG_GROUP, 'logStreamName': stream, 'startFromHead': True}
+            kwargs = {'logGroupName': log_group, 'logStreamName': stream, 'startFromHead': True}
             if next_token is not None:
                 kwargs['nextToken'] = next_token
             try:

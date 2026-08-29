@@ -4,16 +4,20 @@ wrapper over these builders.)"""
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import astuple, replace
 
 from pyrmts import MemStorage
 from pyrmts_engine import ShardRecord, StorageJsonlShardIndex, WideShardSource, build_local
 from pyrmts_engine.batch import (
     ECR_LIFECYCLE_POLICY,
+    Names,
+    bootstrap,
     build_command,
     compute_environment_spec,
     job_definition_spec,
     push_commands,
+    resource_names,
+    submit,
     submit_overrides,
 )
 
@@ -252,3 +256,200 @@ def test_storage_jsonl_shard_index_default_cadence_and_reload():
     idx2.record_shard(replace(rec, key='k2'))
     lines = store.get('m.jsonl').decode().rstrip('\n').split('\n')
     assert [json.loads(l)['key'] for l in lines] == ['k1', 'k2']
+
+
+# -- resource naming --------------------------------------------------------
+
+def test_resource_names_default():
+    assert resource_names() == Names(
+        prefix='pyrmts-engine',
+        job_definition='pyrmts-engine',
+        execution_role='pyrmts-engine-batch-execution',
+        log_group='/pyrmts-engine/batch',
+        spot_ce='pyrmts-engine-spot',
+        od_ce='pyrmts-engine-od',
+        spot_queue='pyrmts-engine',
+        od_queue='pyrmts-engine-od',
+    )
+
+
+def test_resource_names_custom_prefix_isolates_every_account_global_name():
+    # Two consumers in one AWS account collide on all of these unless the
+    # prefix reaches every one; no name may fall back to the default.
+    a, b = resource_names(), resource_names('awair-pyrmts')
+    assert b == Names(
+        prefix='awair-pyrmts',
+        job_definition='awair-pyrmts',
+        execution_role='awair-pyrmts-batch-execution',
+        log_group='/awair-pyrmts/batch',
+        spot_ce='awair-pyrmts-spot',
+        od_ce='awair-pyrmts-od',
+        spot_queue='awair-pyrmts',
+        od_queue='awair-pyrmts-od',
+    )
+    assert set(astuple(a)) & set(astuple(b)) == set()
+
+
+def test_names_queue_selects_by_on_demand():
+    names = resource_names()
+    assert [names.queue(), names.queue(on_demand=False), names.queue(on_demand=True)] == [
+        'pyrmts-engine', 'pyrmts-engine', 'pyrmts-engine-od',
+    ]
+
+
+def test_job_definition_spec_log_group_follows_the_name():
+    spec = job_definition_spec(
+        name='awair-pyrmts', image='img', execution_role_arn='arn:role',
+    )
+    assert [
+        spec['jobDefinitionName'],
+        spec['containerProperties']['logConfiguration']['options']['awslogs-group'],
+    ] == ['awair-pyrmts', '/awair-pyrmts/batch']
+
+
+def test_compute_environment_spec_prefix():
+    assert [
+        compute_environment_spec(
+            prefix=p, spot=spot, subnets=['s'], security_group_ids=['g'],
+        )['computeEnvironmentName']
+        for p, spot in (('pyrmts-engine', True), ('pyrmts-engine', False),
+                        ('awair-pyrmts', True), ('awair-pyrmts', False))
+    ] == ['pyrmts-engine-spot', 'pyrmts-engine-od', 'awair-pyrmts-spot', 'awair-pyrmts-od']
+
+
+# -- bootstrap orchestration ------------------------------------------------
+
+class _NoSuchEntity(Exception): pass
+class _NoRepo(Exception): pass
+
+
+class FakeBatchClients:
+    """Recorded-call stand-in for the five boto3 clients `bootstrap` uses.
+
+    Everything already exists, so `bootstrap` takes its describe-branches and
+    the only mutation is the job-definition registration we assert on."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    # -- iam
+    class _Exc:
+        NoSuchEntityException = _NoSuchEntity
+        RepositoryNotFoundException = _NoRepo
+    exceptions = _Exc
+
+    def get_role(self, RoleName: str) -> dict:
+        self.calls.append(('get_role', {'RoleName': RoleName}))
+        return {'Role': {'Arn': f'arn:aws:iam::123:role/{RoleName}'}}
+
+    # -- logs
+    def describe_log_groups(self, logGroupNamePrefix: str) -> dict:
+        self.calls.append(('describe_log_groups', {'logGroupNamePrefix': logGroupNamePrefix}))
+        return {'logGroups': [{'logGroupName': logGroupNamePrefix}]}
+
+    # -- ecr
+    def describe_repositories(self, repositoryNames: list[str]) -> dict:
+        self.calls.append(('describe_repositories', {'repositoryNames': repositoryNames}))
+        return {}
+
+    # -- ec2
+    def describe_subnets(self, Filters: list) -> dict:
+        return {'Subnets': [{'SubnetId': 'subnet-1'}]}
+
+    def describe_security_groups(self, Filters: list) -> dict:
+        return {'SecurityGroups': [{'GroupId': 'sg-1'}]}
+
+    # -- batch
+    def describe_compute_environments(self, computeEnvironments: list[str]) -> dict:
+        self.calls.append(('describe_compute_environments', {'names': computeEnvironments}))
+        return {'computeEnvironments': [{'status': 'VALID'}]}
+
+    def describe_job_queues(self, jobQueues: list[str]) -> dict:
+        self.calls.append(('describe_job_queues', {'names': jobQueues}))
+        return {'jobQueues': [{'jobQueueName': jobQueues[0]}]}
+
+    def register_job_definition(self, **kwargs) -> dict:
+        self.calls.append(('register_job_definition', kwargs))
+        return {}
+
+    def submit_job(self, **kwargs) -> dict:
+        self.calls.append(('submit_job', kwargs))
+        return {'jobId': 'job-1'}
+
+    def as_clients(self) -> dict:
+        return {name: self for name in ('iam', 'logs', 'ecr', 'ec2', 'batch')}
+
+
+def _registered(fake: FakeBatchClients) -> dict:
+    return [kw for name, kw in fake.calls if name == 'register_job_definition'][0]
+
+
+def _sizing(spec: dict) -> dict:
+    cp = spec['containerProperties']
+    return {
+        **{r['type']: r['value'] for r in cp['resourceRequirements']},
+        'EPHEMERAL': cp['ephemeralStorage']['sizeInGiB'],
+    }
+
+
+def test_bootstrap_job_definition_sizing_defaults_to_the_spec_builders():
+    # Regression: `bootstrap` used to restate `vcpus: int = 8`, shadowing
+    # `job_definition_spec`'s 16 for every non-CLI caller — so a job could
+    # not fill the 16-vCPU compute environment it ran in.
+    fake = FakeBatchClients()
+    bootstrap(image='123.dkr.ecr.us-east-1.amazonaws.com/pyrmts-engine:abc', clients=fake.as_clients())
+    assert _sizing(_registered(fake)) == {'VCPU': '16', 'MEMORY': '32768', 'EPHEMERAL': 100}
+
+
+def test_bootstrap_sizing_overrides_are_passed_through():
+    fake = FakeBatchClients()
+    bootstrap(
+        image='img', vcpus=4, memory_mib=8192, ephemeral_gib=50,
+        clients=fake.as_clients(),
+    )
+    assert _sizing(_registered(fake)) == {'VCPU': '4', 'MEMORY': '8192', 'EPHEMERAL': 50}
+
+
+def test_bootstrap_prefix_reaches_every_resource():
+    fake = FakeBatchClients()
+    bootstrap(image='img', prefix='awair-pyrmts', on_demand=True, clients=fake.as_clients())
+    # Full sequence, not a prefix: every account-global name bootstrap reads
+    # or writes must carry the prefix. (Each CE is described twice — once to
+    # branch on existence, once by `_wait` polling for VALID.)
+    assert [c for c in fake.calls if c[0] != 'register_job_definition'] == [
+        ('get_role', {'RoleName': 'awair-pyrmts-batch-execution'}),
+        ('describe_log_groups', {'logGroupNamePrefix': '/awair-pyrmts/batch'}),
+        ('describe_repositories', {'repositoryNames': ['img']}),
+        ('describe_compute_environments', {'names': ['awair-pyrmts-spot']}),
+        ('describe_compute_environments', {'names': ['awair-pyrmts-spot']}),
+        ('describe_job_queues', {'names': ['awair-pyrmts']}),
+        ('describe_compute_environments', {'names': ['awair-pyrmts-od']}),
+        ('describe_compute_environments', {'names': ['awair-pyrmts-od']}),
+        ('describe_job_queues', {'names': ['awair-pyrmts-od']}),
+    ]
+    spec = _registered(fake)
+    assert [
+        spec['jobDefinitionName'],
+        spec['containerProperties']['logConfiguration']['options']['awslogs-group'],
+        spec['containerProperties']['executionRoleArn'],
+    ] == [
+        'awair-pyrmts',
+        '/awair-pyrmts/batch',
+        'arn:aws:iam::123:role/awair-pyrmts-batch-execution',
+    ]
+
+
+def test_submit_targets_the_prefixed_job_definition_and_queue():
+    # `submit` used to hard-code `jobDefinition=PREFIX`, so a job def
+    # bootstrapped under another prefix was unreachable.
+    for kwargs, expected in (
+        ({}, ('pyrmts-engine', 'pyrmts-engine')),
+        ({'on_demand': True}, ('pyrmts-engine', 'pyrmts-engine-od')),
+        ({'prefix': 'awair-pyrmts'}, ('awair-pyrmts', 'awair-pyrmts')),
+        ({'prefix': 'awair-pyrmts', 'on_demand': True}, ('awair-pyrmts', 'awair-pyrmts-od')),
+        ({'queue': 'custom'}, ('pyrmts-engine', 'custom')),
+    ):
+        fake = FakeBatchClients()
+        submit(command=['build'], job_name='j', clients=fake.as_clients(), **kwargs)
+        sent = [kw for name, kw in fake.calls if name == 'submit_job'][0]
+        assert (sent['jobDefinition'], sent['jobQueue']) == expected

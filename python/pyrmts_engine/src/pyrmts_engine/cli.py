@@ -12,6 +12,9 @@ from pathlib import Path
 from click import Choice, argument, group, option
 
 from pyrmts import FsStorage, S3Storage, parse_pyramid_yaml, pyramid_from_config
+# Safe at module scope: `batch` defers its boto3 import to `_clients()`, so
+# this costs nothing for consumers without the `[batch]` extra.
+from .batch import PREFIX
 from .engine import EmptySourceError, SourceCoverageError, build_local
 from .plan import compile_plan
 from .shard_index import JsonlShardIndex, NoopShardIndex, StorageJsonlShardIndex
@@ -241,15 +244,17 @@ def batch() -> None:
 @option('-i', '--image', required=True, help="Container image ref (ECR); repo is created if missing")
 @option('-M', '--max-vcpus', default=16, help="Compute-environment max vCPUs (default 16 = one full job at a time; raise to run concurrent builds)")
 @option('-m', '--memory', default=32768, help="Job-definition memory MiB (default 32768 — fits the mem-tight profile's 24 GB peak; use 49152+ for the par-max profile)")
-@option('-o', '--on-demand', is_flag=True, help="Also create an on-demand (non-Spot) CE + queue `pyrmts-engine-od` (submit -O targets it)")
+@option('-o', '--on-demand', is_flag=True, help="Also create an on-demand (non-Spot) CE + queue `<prefix>-od` (submit -O targets it)")
+@option('-p', '--prefix', default=PREFIX, help=f"Name prefix for every resource created (default {PREFIX!r}); Batch job definitions, queues, CEs, IAM roles, and log groups are account-global, so a second consumer sharing an AWS account needs its own prefix")
 @option('-v', '--vcpus', default=16, help="Job-definition vCPUs (default 16 — the size every converged profile was measured at; see `specs/done/engine-batch-packaging.md` §3)")
-def bootstrap(arch: str, envs: tuple[str, ...], ephemeral: int, image: str, max_vcpus: int, memory: int, on_demand: bool, vcpus: int) -> None:
+def bootstrap(arch: str, envs: tuple[str, ...], ephemeral: int, image: str, max_vcpus: int, memory: int, on_demand: bool, prefix: str, vcpus: int) -> None:
     """Idempotently create the role, log group, ECR repo, Fargate-Spot
     compute environment, queue, and job definition."""
     from .batch import bootstrap as _bootstrap
     _bootstrap(
         image=image,
         arch=arch,
+        prefix=prefix,
         max_vcpus=max_vcpus,
         vcpus=vcpus,
         memory_mib=memory,
@@ -297,6 +302,7 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 @option('--strict-open-periods', is_flag=True, help="build -o: count absent open-period sources toward --max-missing")
 @option('-n', '--pyramid-name', required=True, help="Pyramid name for shard registration")
 @option('-O', '--on-demand', is_flag=True, help="Submit to the on-demand queue (needs `bootstrap -o`); no Spot reclaims")
+@option('-p', '--prefix', default=PREFIX, help=f"Name prefix of the bootstrapped resources to submit to (default {PREFIX!r}); must match `bootstrap -p`")
 @option('-r', '--range', 'range_', required=True, help="Half-open build range, <from-iso>/<to-iso> (UTC)")
 @option('-s', '--sort', 'sort_csv', help="Override shard sort columns (comma-separated)")
 @option('-t', '--source-tier', help="Source rung tier name (WideShardSource)")
@@ -325,6 +331,7 @@ def batch_submit(
     strict_open_periods: bool,
     pyramid_name: str,
     on_demand: bool,
+    prefix: str,
     range_: str,
     sort_csv: str | None,
     source_tier: str | None,
@@ -338,7 +345,7 @@ def batch_submit(
 ) -> None:
     """Submit a build of CONFIG (an s3:// URL — the container has no local
     files) to the bootstrapped queue."""
-    from .batch import PREFIX, build_command, submit as _submit
+    from .batch import build_command, submit as _submit
     code = _submit(
         command=build_command(
             config,
@@ -364,7 +371,8 @@ def batch_submit(
             close_chunk=close_chunk,
         ),
         job_name=job_name or f'{pyramid_name}-build',
-        queue=f'{PREFIX}-od' if on_demand else PREFIX,
+        prefix=prefix,
+        on_demand=on_demand,
         vcpus=vcpus,
         memory_mib=memory,
         environment=_parse_filters(envs),

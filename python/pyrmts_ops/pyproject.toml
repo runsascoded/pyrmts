@@ -9,7 +9,11 @@ authors = [{ name = "Ryan Williams", email = "ryan@runsascoded.com" }]
 dependencies = [
     "pyrmts",
     "pyrmts-engine",
+    "click>=8",
 ]
+
+[project.scripts]
+pyrmts-ops = "pyrmts_ops.cli:cli"
 
 [project.optional-dependencies]
 aws = ["boto3>=1.34"]

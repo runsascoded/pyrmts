@@ -179,3 +179,96 @@ describe('D1ShardIndex on real SQLite', () => {
     expect(rows).toHaveLength(600)
   })
 })
+
+describe('D1ShardIndex.verifySchema on real SQLite', () => {
+  // Real SQLite here rather than a mock, because the whole value of
+  // `verifySchema` is agreeing with what SQLite actually reports through
+  // `sqlite_master` / `PRAGMA table_info` / `PRAGMA index_info`.
+  let db: DatabaseSync
+  let d1: D1Like
+
+  beforeEach(() => {
+    db = new SqliteDatabase(':memory:')
+    d1 = sqliteD1(db).d1
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  function applySchema(): void {
+    for (const stmt of D1ShardIndex.schemaSql()) db.exec(stmt)
+  }
+
+  test('a database built from schemaSql() verifies clean', async () => {
+    applySchema()
+    expect(await D1ShardIndex.verifySchema(d1)).toEqual({
+      ok: true, missing: [], mismatched: [],
+    })
+  })
+
+  test('an empty database reports every object missing', async () => {
+    expect(await D1ShardIndex.verifySchema(d1)).toEqual({
+      ok: false,
+      missing: ['pyramid_watermarks', 'pyramid_shards', 'pyramid_shards_period'],
+      mismatched: [],
+    })
+  })
+
+  test('a pre-index deployment reports exactly the missing index', async () => {
+    // The state both consumers were in: tables provisioned before
+    // `pyramid_shards_period` was added to the DDL.
+    applySchema()
+    db.exec('DROP INDEX "pyramid_shards_period"')
+    expect(await D1ShardIndex.verifySchema(d1)).toEqual({
+      ok: false, missing: ['pyramid_shards_period'], mismatched: [],
+    })
+  })
+
+  test('an index on the wrong columns is mismatched, not ok', async () => {
+    // `(period_end, pyramid)` cannot serve the windowed seek that
+    // `(pyramid, period_end)` does, so it must not read as equivalent.
+    db.exec(D1ShardIndex.schemaSql()[0]!)
+    db.exec(D1ShardIndex.schemaSql()[1]!)
+    db.exec('CREATE INDEX "pyramid_shards_period" ON "pyramid_shards" (period_end, pyramid)')
+    expect(await D1ShardIndex.verifySchema(d1)).toEqual({
+      ok: false,
+      missing: [],
+      mismatched: ['pyramid_shards_period: expected=["pyramid","period_end"] actual=["period_end","pyramid"]'],
+    })
+  })
+
+  test('a table missing a column is mismatched', async () => {
+    db.exec(
+      'CREATE TABLE "pyramid_watermarks" (pyramid TEXT NOT NULL, tier TEXT NOT NULL, ' +
+      'shard_dur TEXT NOT NULL, latest_period_end INTEGER NOT NULL, ' +
+      'PRIMARY KEY (pyramid, tier, shard_dur)) WITHOUT ROWID',
+    )
+    db.exec(D1ShardIndex.schemaSql()[1]!)
+    db.exec(D1ShardIndex.schemaSql()[2]!)
+    expect(await D1ShardIndex.verifySchema(d1)).toEqual({
+      ok: false,
+      missing: [],
+      mismatched: ['pyramid_watermarks: expected=["latest_period_end","pyramid","shard_dur","tier","updated_at"] actual=["latest_period_end","pyramid","shard_dur","tier"]'],
+    })
+  })
+
+  test('skipInventory verifies only the watermarks table', async () => {
+    db.exec(D1ShardIndex.schemaSql({ skipInventory: true })[0]!)
+    expect(await D1ShardIndex.verifySchema(d1, { skipInventory: true })).toEqual({
+      ok: true, missing: [], mismatched: [],
+    })
+    // …while the full expectation still flags the absent inventory objects.
+    expect((await D1ShardIndex.verifySchema(d1)).missing).toEqual([
+      'pyramid_shards', 'pyramid_shards_period',
+    ])
+  })
+
+  test('custom table names are verified under their own names', async () => {
+    const opts = { shardsTable: 't1_shards' }
+    for (const stmt of D1ShardIndex.schemaSql(opts)) db.exec(stmt)
+    expect(await D1ShardIndex.verifySchema(d1, opts)).toEqual({
+      ok: true, missing: [], mismatched: [],
+    })
+  })
+})

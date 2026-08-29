@@ -8,7 +8,7 @@ export { serveQuery } from './serve.js'
 export type { ServeOptions } from './serve.js'
 
 export { D1ShardIndex } from './shard-index.js'
-export type { D1ShardIndexOptions } from './shard-index.js'
+export type { D1ShardIndexOptions, SchemaDiff, SchemaObject } from './shard-index.js'
 
 export {
   PENDING_GRACE_MS,

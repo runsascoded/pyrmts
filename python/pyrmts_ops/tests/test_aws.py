@@ -3,11 +3,18 @@ EventBridge schedule upsert (recorded-call fakes, exact call shapes)."""
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 
 import pytest
 
-from pyrmts_ops.aws import build_zip, find_site_packages, upsert_schedule
+from pyrmts_ops.aws import (
+    ExpectedSchedule,
+    build_zip,
+    find_site_packages,
+    upsert_schedule,
+    verify_schedules,
+)
 
 
 def test_build_zip_entries_and_vendoring(tmp_path):
@@ -318,3 +325,189 @@ def test_re_running_the_same_schedule_swallows_the_permission_conflict():
         upsert_schedule('t-tick', 'rate(5 minutes)', 'arn:fn', 'fn', events=events, lam=lam)
     assert lam.statements == {'invoke-t-tick'}
     assert len(lam.calls) == 2
+
+
+# -- verify_schedules -------------------------------------------------------
+
+class FakeVerifyEvents:
+    """Read-only `events` surface: rules with state/expression, and targets."""
+
+    class exceptions:
+        class ResourceNotFoundException(Exception):
+            pass
+
+    def __init__(self, rules: dict[str, dict] | None = None) -> None:
+        self.rules = dict(rules or {})
+        self.calls: list[tuple] = []
+
+    def describe_rule(self, Name):
+        self.calls.append(('describe_rule', Name))
+        if Name not in self.rules:
+            raise self.exceptions.ResourceNotFoundException(Name)
+        r = self.rules[Name]
+        out = {'Name': Name, 'State': r.get('state', 'ENABLED')}
+        if 'schedule' in r:
+            out['ScheduleExpression'] = r['schedule']
+        return out
+
+    def list_targets_by_rule(self, Rule):
+        self.calls.append(('list_targets_by_rule', Rule))
+        targets = self.rules.get(Rule, {}).get('targets', [])
+        return {'Targets': [
+            {'Id': str(i), 'Arn': f'arn:aws:lambda:us-east-1:1:function:{fn}'}
+            for i, fn in enumerate(targets)
+        ]}
+
+
+class FakeVerifyLam:
+    """Read-only `lambda` surface: which functions exist, and which rules each
+    grants invoke permission to."""
+
+    class exceptions:
+        class ResourceNotFoundException(Exception):
+            pass
+
+    def __init__(self, functions: dict[str, list[str] | None] | None = None) -> None:
+        # name -> list of rules granted, or None for "no resource policy"
+        self.functions = dict(functions or {})
+        self.calls: list[tuple] = []
+
+    def get_function(self, FunctionName):
+        self.calls.append(('get_function', FunctionName))
+        if FunctionName not in self.functions:
+            raise self.exceptions.ResourceNotFoundException(FunctionName)
+        return {'Configuration': {'FunctionName': FunctionName}}
+
+    def get_policy(self, FunctionName):
+        self.calls.append(('get_policy', FunctionName))
+        granted = self.functions.get(FunctionName)
+        if granted is None:
+            raise self.exceptions.ResourceNotFoundException(FunctionName)
+        return {'Policy': json.dumps({'Statement': [
+            {
+                'Sid': f'invoke-{r}',
+                'Condition': {'ArnLike': {
+                    'AWS:SourceArn': f'arn:aws:events:us-east-1:1:rule/{r}',
+                }},
+            }
+            for r in granted
+        ]})}
+
+
+def _healthy():
+    return (
+        FakeVerifyEvents({
+            'avail-v6-tick': {'targets': ['gbfs-fill'], 'schedule': 'rate(5 minutes)'},
+            'avail-v3-tick': {'state': 'DISABLED', 'targets': ['gbfs-fill']},
+        }),
+        FakeVerifyLam({'gbfs-fill': ['avail-v6-tick', 'avail-v3-tick']}),
+    )
+
+
+def test_verify_schedules_clean():
+    events, lam = _healthy()
+    diff = verify_schedules(
+        [
+            ExpectedSchedule('avail-v6-tick', 'gbfs-fill', schedule='rate(5 minutes)'),
+            ExpectedSchedule('avail-v3-tick', 'gbfs-fill', enabled=False),
+        ],
+        events=events, lam=lam,
+    )
+    assert (diff.missing, diff.mismatched, diff.ok, diff.summary()) == (
+        (), (), True, 'schedules up to date',
+    )
+
+
+def test_verify_schedules_catches_the_missing_invoke_permission():
+    # The v6 outage, exactly: the rule exists, is ENABLED, and its target
+    # resolves — everything the console shows is healthy — but the function
+    # grants no permission for it, so every tick silently fails.
+    events = FakeVerifyEvents({'avail-v6-tick': {'targets': ['gbfs-fill']}})
+    lam = FakeVerifyLam({'gbfs-fill': ['avail-v5-tick']})  # only the *first* rule
+    diff = verify_schedules([ExpectedSchedule('avail-v6-tick', 'gbfs-fill')], events=events, lam=lam)
+    assert (diff.missing, diff.mismatched) == (
+        ('permission avail-v6-tick -> gbfs-fill',), (),
+    )
+    assert diff.summary() == 'missing: permission avail-v6-tick -> gbfs-fill'
+
+
+def test_verify_schedules_catches_a_function_with_no_policy_at_all():
+    events = FakeVerifyEvents({'tick': {'targets': ['fn']}})
+    lam = FakeVerifyLam({'fn': None})
+    diff = verify_schedules([ExpectedSchedule('tick', 'fn')], events=events, lam=lam)
+    assert diff.missing == ('permission tick -> fn',)
+
+
+def test_verify_schedules_catches_a_resurrected_retired_tick():
+    # A forced-ENABLED upsert re-enabling a retirement is the failure
+    # `531a3f8` fixed; this is what notices if it ever regresses.
+    events, lam = _healthy()
+    events.rules['avail-v3-tick']['state'] = 'ENABLED'
+    diff = verify_schedules(
+        [ExpectedSchedule('avail-v3-tick', 'gbfs-fill', enabled=False)],
+        events=events, lam=lam,
+    )
+    assert diff.mismatched == ('rule avail-v3-tick: expected=DISABLED actual=ENABLED',)
+
+
+def test_verify_schedules_reports_absent_rule_and_function():
+    events = FakeVerifyEvents({})
+    lam = FakeVerifyLam({})
+    diff = verify_schedules(
+        [ExpectedSchedule('gone-tick', 'gone-fn')], events=events, lam=lam,
+    )
+    assert (diff.missing, diff.mismatched) == (('rule gone-tick',), ())
+    # The rule is absent, so nothing downstream of it is probed.
+    assert lam.calls == []
+
+
+def test_verify_schedules_distinguishes_wrong_target_from_no_target():
+    events = FakeVerifyEvents({
+        'wrong': {'targets': ['other-fn']},
+        'none': {'targets': []},
+    })
+    lam = FakeVerifyLam({'fn': ['wrong', 'none'], 'other-fn': []})
+    diff = verify_schedules(
+        [ExpectedSchedule('wrong', 'fn'), ExpectedSchedule('none', 'fn')],
+        events=events, lam=lam,
+    )
+    assert (diff.mismatched, diff.missing) == (
+        ("target wrong: expected=fn actual=['other-fn']",),
+        ('target none -> fn',),
+    )
+
+
+def test_verify_schedules_checks_the_schedule_expression_only_when_asserted():
+    events, lam = _healthy()
+    asserted = verify_schedules(
+        [ExpectedSchedule('avail-v6-tick', 'gbfs-fill', schedule='rate(1 hour)')],
+        events=events, lam=lam,
+    )
+    assert asserted.mismatched == (
+        "rule avail-v6-tick: expected='rate(1 hour)' actual='rate(5 minutes)'",
+    )
+    unasserted = verify_schedules(
+        [ExpectedSchedule('avail-v6-tick', 'gbfs-fill')], events=events, lam=lam,
+    )
+    assert unasserted.ok
+
+
+def test_verify_schedules_probes_each_function_once():
+    events, lam = _healthy()
+    verify_schedules(
+        [
+            ExpectedSchedule('avail-v6-tick', 'gbfs-fill'),
+            ExpectedSchedule('avail-v3-tick', 'gbfs-fill', enabled=False),
+        ],
+        events=events, lam=lam,
+    )
+    assert lam.calls == [('get_function', 'gbfs-fill'), ('get_policy', 'gbfs-fill')]
+
+
+def test_verify_schedules_accepts_a_wildcard_source_arn():
+    # `add_permission` may store the source ARN with a trailing wildcard.
+    events = FakeVerifyEvents({'tick': {'targets': ['fn']}})
+    lam = FakeVerifyLam({'fn': []})
+    lam.functions['fn'] = ['tick']
+    diff = verify_schedules([ExpectedSchedule('tick', 'fn')], events=events, lam=lam)
+    assert diff.ok

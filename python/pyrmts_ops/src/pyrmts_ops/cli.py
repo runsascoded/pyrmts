@@ -1,6 +1,9 @@
 """`pyrmts-ops` CLI.
 
-Today: the D1 schema commands (`specs/d1-schema-drift.md`). pyrmts owns the
+Two verify-shaped command groups, both read-only and both meant for a
+consumer's CI: `d1` (schema drift) and `aws` (schedule/function drift).
+
+`d1` (`specs/d1-schema-drift.md`). pyrmts owns the
 `pyramid_shards` / `pyramid_watermarks` DDL but consumers apply it, so
 without these there is nothing that emits the current schema for a
 migration file, and nothing that notices a deployment still running an
@@ -14,9 +17,10 @@ import json as json_mod
 import sys
 from functools import partial
 
-from click import group, option
+from click import argument, group, option
 
 from pyrmts.d1 import apply_schema, schema_sql, verify_schema
+from .aws import ExpectedSchedule, verify_schedules
 
 err = partial(print, file=sys.stderr, flush=True)
 
@@ -114,3 +118,67 @@ def d1_apply(
         kwargs['database_id'] = database_id
     for sql in apply_schema(**kwargs):
         err(f'applied: {sql.splitlines()[0]}…' if '\n' in sql else f'applied: {sql}')
+
+
+@cli.group()
+def aws() -> None:
+    """AWS schedule/function drift: read-only checks."""
+
+
+def _parse_binding(spec: str, disabled: set[str]) -> ExpectedSchedule:
+    rule, sep, rest = spec.partition('=')
+    if not sep or not rule or not rest:
+        raise SystemExit(f'aws verify: expected RULE=FUNCTION[@SCHEDULE], got {spec!r}')
+    function, _, schedule = rest.partition('@')
+    if not function:
+        raise SystemExit(f'aws verify: no function in {spec!r}')
+    return ExpectedSchedule(
+        rule=rule,
+        function=function,
+        enabled=rule not in disabled,
+        schedule=schedule or None,
+    )
+
+
+@aws.command('verify')
+@option('-d', '--disabled', 'disabled_rules', multiple=True, help="Rule expected DISABLED — a retired tick that must stay retired (repeatable)")
+@option('-j', '--json', 'as_json', is_flag=True, help="Emit the diff as JSON on stdout")
+@argument('bindings', nargs=-1, required=True)
+def aws_verify(disabled_rules: tuple[str, ...], as_json: bool, bindings: tuple[str, ...]) -> None:
+    """Check each RULE=FUNCTION[@SCHEDULE] binding against the live account.
+
+    Read-only — needs only `events:DescribeRule`,
+    `events:ListTargetsByRule`, `lambda:GetFunction`, `lambda:GetPolicy`.
+    Exits 1 on any drift, so it can gate a deploy the way
+    `pyrmts-ops d1 verify` does.
+
+    \b
+    Checks per binding: the rule exists; its state matches (ENABLED unless
+    named in -d); its schedule expression matches, when one is given; it
+    targets FUNCTION; FUNCTION exists; and FUNCTION grants that rule invoke
+    permission — the last being the one a console reads as healthy.
+
+    \b
+    pyrmts-ops aws verify \\
+      avail-v6-tick=ctbk-gbfs-fill@'rate(5 minutes)' \\
+      avail-v3-tick=ctbk-gbfs-fill -d avail-v3-tick
+    """
+    disabled = set(disabled_rules)
+    expected = [_parse_binding(b, disabled) for b in bindings]
+    unknown = disabled - {e.rule for e in expected}
+    if unknown:
+        raise SystemExit(
+            f"aws verify: -d names rules with no binding: {', '.join(sorted(unknown))}",
+        )
+    diff = verify_schedules(expected)
+    if as_json:
+        print(json_mod.dumps(
+            {'ok': diff.ok, 'missing': list(diff.missing), 'mismatched': list(diff.mismatched)},
+            indent=2,
+        ))
+    else:
+        # stdout, matching `d1 verify` — the summary is the command's result,
+        # not a log line.
+        print(diff.summary())
+    if not diff.ok:
+        raise SystemExit(1)

@@ -22,6 +22,7 @@ import json
 import sys
 import time
 import zipfile
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -295,3 +296,148 @@ def deploy_pyramid_lambda(
             enabled=schedule_enabled, session=session,
         )
     return arn
+
+
+# -- read-only verification -------------------------------------------------
+#
+# The `verify`-shaped counterpart to the upserts above, matching
+# `pyrmts.d1.verify_schema`: it changes nothing and needs only read
+# permissions (`events:DescribeRule`, `events:ListTargetsByRule`,
+# `lambda:GetFunction`, `lambda:GetPolicy`), so a consumer can run it in CI
+# next to `pyrmts-ops d1 verify` on every push.
+#
+# It exists because in every schedule incident so far the failure was that
+# **nobody noticed**, not that nobody could express the desired state. The
+# invoke-permission check is the specific one that matters: a rule whose
+# permission is missing looks completely healthy from the console — it
+# exists, it is ENABLED, its target resolves — and silently fails at every
+# tick, which is exactly how ctbk lost its `avail-v6` tick.
+
+@dataclass(frozen=True)
+class ExpectedSchedule:
+    """One rule → function binding a consumer expects to exist.
+
+    `enabled=False` asserts a *retired* tick is still declared and still
+    off, which is worth checking: an upsert that forces `ENABLED` (as this
+    module's did until `531a3f8`) resurrects it silently."""
+    rule: str
+    function: str
+    enabled: bool = True
+    schedule: str | None = None
+
+
+@dataclass(frozen=True)
+class ScheduleDiff:
+    """Live-vs-expected difference, mirroring `pyrmts.d1.SchemaDiff`:
+    `missing` is an absent object, `mismatched` is present-but-wrong."""
+    missing: tuple[str, ...] = field(default=())
+    mismatched: tuple[str, ...] = field(default=())
+
+    @property
+    def ok(self) -> bool:
+        return not self.missing and not self.mismatched
+
+    def summary(self) -> str:
+        if self.ok:
+            return 'schedules up to date'
+        parts = []
+        if self.missing:
+            parts.append(f"missing: {', '.join(self.missing)}")
+        if self.mismatched:
+            parts.append(f"mismatched: {'; '.join(self.mismatched)}")
+        return ' — '.join(parts)
+
+
+def _rule_arn_matches(source_arn: str, rule: str) -> bool:
+    """An EventBridge rule ARN ends `:rule/<name>` (or `:rule/<bus>/<name>`),
+    and a permission may carry a trailing wildcard."""
+    return source_arn.rstrip('*').rstrip('/').split('/')[-1] == rule
+
+
+def _function_of(target_arn: str) -> str:
+    """`arn:aws:lambda:<region>:<acct>:function:<name>[:<qualifier>]`."""
+    parts = target_arn.split(':function:')
+    return parts[-1].split(':')[0] if len(parts) > 1 else target_arn
+
+
+def verify_schedules(
+    expected: Sequence[ExpectedSchedule],
+    *,
+    events=None,
+    lam=None,
+    session=None,
+) -> ScheduleDiff:
+    """Check each expected rule → function binding against the live account.
+
+    Read-only. Per binding: the rule exists, its state matches, its schedule
+    expression matches (when asserted), it targets the function, the
+    function exists, and the function grants that rule invoke permission."""
+    if events is None or lam is None:
+        import boto3
+        s = session or boto3
+        events = events or s.client('events')
+        lam = lam or s.client('lambda')
+
+    missing: list[str] = []
+    mismatched: list[str] = []
+    # Functions are checked once even when several rules target one.
+    fn_cache: dict[str, bool] = {}
+    policy_cache: dict[str, list[dict]] = {}
+
+    for exp in expected:
+        try:
+            rule = events.describe_rule(Name=exp.rule)
+        except events.exceptions.ResourceNotFoundException:
+            missing.append(f'rule {exp.rule}')
+            continue
+
+        want_state = 'ENABLED' if exp.enabled else 'DISABLED'
+        state = rule.get('State', 'ENABLED')
+        if state != want_state:
+            mismatched.append(f'rule {exp.rule}: expected={want_state} actual={state}')
+        if exp.schedule is not None:
+            actual = rule.get('ScheduleExpression')
+            if actual != exp.schedule:
+                mismatched.append(
+                    f'rule {exp.rule}: expected={exp.schedule!r} actual={actual!r}',
+                )
+
+        targets = events.list_targets_by_rule(Rule=exp.rule).get('Targets', [])
+        hit = [t for t in targets if _function_of(t.get('Arn', '')) == exp.function]
+        if not hit:
+            got = sorted({_function_of(t.get('Arn', '')) for t in targets})
+            if got:
+                mismatched.append(
+                    f'target {exp.rule}: expected={exp.function} actual={got}',
+                )
+            else:
+                missing.append(f'target {exp.rule} -> {exp.function}')
+
+        if exp.function not in fn_cache:
+            try:
+                lam.get_function(FunctionName=exp.function)
+                fn_cache[exp.function] = True
+            except lam.exceptions.ResourceNotFoundException:
+                fn_cache[exp.function] = False
+        if not fn_cache[exp.function]:
+            missing.append(f'function {exp.function}')
+            continue
+
+        if exp.function not in policy_cache:
+            try:
+                doc = lam.get_policy(FunctionName=exp.function)['Policy']
+                policy_cache[exp.function] = json.loads(doc).get('Statement', [])
+            except lam.exceptions.ResourceNotFoundException:
+                # No resource policy at all: nothing may invoke it.
+                policy_cache[exp.function] = []
+        granted = any(
+            _rule_arn_matches(
+                st.get('Condition', {}).get('ArnLike', {}).get('AWS:SourceArn', ''),
+                exp.rule,
+            )
+            for st in policy_cache[exp.function]
+        )
+        if not granted:
+            missing.append(f'permission {exp.rule} -> {exp.function}')
+
+    return ScheduleDiff(missing=tuple(missing), mismatched=tuple(mismatched))

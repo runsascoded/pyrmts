@@ -42,3 +42,11 @@ Implemented: `WideShardSource(pyramid, tier_name)` defaults to min-cover; `shard
 Tests: `tests/test_min_cover.py` — mixed-rung build byte-identical to a single-rung build's h/d outputs; redundant-tile ignoring (21 vs 24 tiles read, bytes unchanged); tip fill (coverage end = end of the finest tip tile, only later-data shards + absent source-tier tiles unfillable, no uncovered window read); mid-range hole → exact `SourceCoverageError`. Existing suite pins `shard_dur='6h'` (the seeded-scratch case) to keep exercising pinned semantics.
 
 Spec stays in `specs/` until ctbk drops `-d` from its wrapper and burns min-cover in on avail-v5 (tip-adjacent `-f` fills).
+
+## Closed 2026-08-29
+
+The spec's own condition was *"stays in `specs/` until ctbk drops `-d` from its wrapper."* It has: `gbfs engine submit` — the production path, and what `rides-v5-extend` drives — defaults `-s 1m` (help: *"min-cover: read the tier as stored"*) and appends `-d` only when a `@shard_dur` is present, so an unqualified `-s` reaches the engine as `-t 1m` with no rung pin.
+
+The `1m@2d` defaults that remain are on `gbfs engine build` and `gbfs engine seed`, and are correct there: both operate on the scratch prefix (`build` "never serving keys, never D1"; `seed` server-side-copies one rung into scratch), which is precisely the seeded-scratch case pinned mode exists for.
+
+*(Recorded because an earlier read of this got it wrong — grepping `source_rung` finds `engine build`'s `1m@2d` first and it is easy to conclude from that line alone that production still pins. The distinguishing check is whether the wrapper appends `-d`, at `gbfs_cli.py:1454`, not what any one default string says.)*

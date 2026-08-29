@@ -52,6 +52,10 @@ Two things this package does **not** create, in both cases because they already 
 - **The query worker / `/health` app.** Workers and Pages deploy from `wrangler` in the app's own repo with its own build; a Pulumi resource wrapping that would fight the app's pipeline for ownership. What the app needs from here is its *bindings*, which `ShardIndex.wrangler_binding()` and the stores emit.
 - **The D1 schema.** `pyrmts-ops d1 {schema,verify,apply}` owns it. Pulumi has no clean way to express "apply these statements, in order, once", and migration numbering is consumer-owned (consumers interleave their own tables). Run `pyrmts-ops d1 verify` in CI — detection is the half that pays.
 
+## Examples
+
+`examples/aws/` and `examples/cloudflare/` are runnable programs — a reference to read, a template to copy, and a schema check you can run against a real account with `pulumi preview` (read-only, read-scoped credentials suffice). See `examples/README.md`.
+
 ## Installing
 
 ```bash

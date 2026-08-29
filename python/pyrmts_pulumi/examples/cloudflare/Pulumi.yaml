@@ -1,0 +1,3 @@
+name: pyrmts-example-cloudflare
+runtime: python
+description: Cloudflare-side pyrmts components — a runnable reference and a schema check.

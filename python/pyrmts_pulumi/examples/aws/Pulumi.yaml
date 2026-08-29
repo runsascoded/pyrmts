@@ -1,0 +1,3 @@
+name: pyrmts-example-aws
+runtime: python
+description: AWS-side pyrmts components — a runnable reference and a schema check.

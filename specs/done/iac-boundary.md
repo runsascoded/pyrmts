@@ -1,8 +1,8 @@
 # Should pyrmts own an IaC layer? Where the boundary goes
 
-Status: **proposed** (2026-08-28, pyrmts session). Answers the question ctbk raised after `specs/done/d1-shard-index-temporal.md`: *"if pyrmts went this way, the natural resource set is a 'pyramid stack' … `pyrmts_ops` already exists as a package and is the obvious home."* Written after surveying what every relevant repo actually does, because the answer turns on evidence that was scattered across four of them.
+Status: **superseded by implementation** (2026-08-29). Its short answer was overturned by the user, correctly — see **Outcome** at the end for what shipped and which arguments here survived. Originally: **proposed** (2026-08-28, pyrmts session). Answers the question ctbk raised after `specs/done/d1-shard-index-temporal.md`: *"if pyrmts went this way, the natural resource set is a 'pyramid stack' … `pyrmts_ops` already exists as a package and is the obvious home."* Written after surveying what every relevant repo actually does, because the answer turns on evidence that was scattered across four of them.
 
-**Short answer: no — not as a framework adoption, and the sequencing ctbk proposed is right for a reason other than the one given.** Step 1 (schema) is done and shipped separately (`specs/d1-schema-drift.md`). Steps 2 and 3 should not be "pyrmts adopts Pulumi"; they should be three specific repairs to what pyrmts already ships, listed at the end. The rest of this argues why.
+**Short answer (superseded — see Outcome): no — not as a framework adoption, and the sequencing ctbk proposed is right for a reason other than the one given.** Step 1 (schema) is done and shipped separately (`specs/d1-schema-drift.md`). Steps 2 and 3 should not be "pyrmts adopts Pulumi"; they should be three specific repairs to what pyrmts already ships, listed at the end. The rest of this argues why.
 
 ## The evidence that changed the answer
 
@@ -45,6 +45,28 @@ Two ctbk-specific notes from the inventory, worth fixing whether or not the stac
 
 ## Non-goals
 
-- pyrmts depending on Pulumi, CDK, Terraform, or any provider SDK. The `boto3`-behind-an-extra, lazily-imported convention stays.
+- ~~pyrmts depending on Pulumi, CDK, Terraform, or any provider SDK.~~ *(Overtaken: `pyrmts_pulumi` depends on `pulumi`, with `pulumi-aws` / `pulumi-cloudflare` as extras. The convention it preserves is the one that mattered — providers are imported lazily inside the components, so a package needing only AWS never loads the Cloudflare provider, and `pyrmts`, `pyrmts-engine`, and `pyrmts-ops` take no IaC dependency at all.)*
 - pyrmts owning consumer resources (queues, custom domains, worker secrets, Analytics Engine datasets, per-device stacks).
 - Reconciliation or state tracking inside pyrmts. If a consumer wants a state file, that is what their IaC tool is for.
+
+## Outcome (2026-08-29): the answer was wrong, and `pyrmts_pulumi` shipped
+
+The user's clarification: *"provide Pulumi code in this repo that users of pyrmts can use, in their own Pulumi code/stacks, to save boilerplate and most easily stand up required or common infra patterns."*
+
+That is a **component library**, and this document argued against a **framework adoption** — pyrmts owning a stack, a backend, credentials, and a tool choice that consumers inherit. Those are different propositions, and conflating them was the error: the original question said "offer some Pulumi/IaC for standing up the required/common resources", which is the library reading. Shipped as `python/pyrmts_pulumi/`: `S3ShardStore`, `R2ShardStore`, `ShardIndex`, `FillFunction`, `BatchEngine`, and a `Pyramid` that composes them. pyrmts still runs no stack, configures no provider, and holds no credentials.
+
+**Which arguments here survived, and how they shaped the result:**
+
+- *"The resource set is mostly not pyrmts-shaped."* Stands, and it defined the scope. The inventory above named the genuinely shared surface — fill Lambda, its schedule, D1, R2/S3 bucket (plus Batch) — and that is exactly the component set, no more. The conclusion drawn from it was wrong in direction: a small, well-bounded surface is an argument that a library is *cheap and safe*, not that it is unnecessary.
+- *"Ownership boundaries would be wrong in both directions."* Stands, and became explicit non-goals rather than a reason to abstain. The package creates no Worker, no Pages app, no custom domain, and no D1 schema; `pyrmts-ops d1 apply` keeps the schema and `wrangler` keeps the app. `ShardIndex.wrangler_binding()` hands the app its binding instead of trying to own it.
+- *"A half-adopted IaC layer implies coverage it doesn't have."* Stands, and is the reason the non-goals are stated in the README rather than left implicit.
+- *"The conventions are three-way split."* Stands as a real limitation. awair is on CDK and cannot use these components. What it *can* use is the tool-neutral layer §2 asked for: `compute_environment_spec` / `job_definition_spec` emit AWS's own schemas, and `BatchEngine` consumes those same builders rather than restating them — so the description has one home and Pulumi is merely one applier of it.
+
+**Two defects found by building it**, both from asking what happens with more than one consumer (`03406e0`):
+
+1. `bootstrap` restated `vcpus: int = 8` beside a builder that said 16, shadowing it for every non-CLI caller — reproduced against the pre-fix tree. Sizing now delegates.
+2. Every Batch/IAM/log name was an account-global module constant, and `submit` hard-coded `jobDefinition=PREFIX`, so two consumers in one AWS account would clobber each other. `resource_names(prefix)` is now the one mapping.
+
+The imperative path still defaults its prefix to the shared `pyrmts-engine`, so isolation there remains opt-in via `-p`. `pyrmts_pulumi` does not inherit that: `default_prefix()` is `<project>-<stack>`, distinct per deployment by construction, and a test asserts two prefixes yield disjoint names for every resource type.
+
+**What did not change:** §1's repairs and §3's `verify`-shaped detection still stand on their own — a component library reconciles what it declares and notices nothing about what it doesn't, so `pyrmts-ops d1 verify` remains the thing that catches drift in CI, and the schedule/function check §3 proposes is still unbuilt and still the highest-value next step.

@@ -35,7 +35,7 @@ class Mocks(pulumi.runtime.Mocks):
         state = dict(args.inputs)
         state.setdefault('name', args.name)
         state.setdefault('arn', f'arn:aws:mock:::{args.name}')
-        if args.typ == 'aws:s3/bucketV2:BucketV2':
+        if args.typ == 'aws:s3/bucket:Bucket':
             state.setdefault('bucket', args.name)
         return [f'{args.name}-id', state]
 

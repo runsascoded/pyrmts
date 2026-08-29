@@ -22,6 +22,14 @@ Every resource here lives in a namespace that is **global to the cloud account**
 
 The prefix defaults to `<pulumi-project>-<pulumi-stack>`, which is distinct for every deployment by construction, so isolation is the default rather than a flag you must remember. Pass `prefix=` to override — to adopt names that already exist in an account, or to keep a name stable across a project rename.
 
+### Why explicit names, not Pulumi autonaming
+
+Pulumi normally guarantees isolation for free: with no explicit `name=`, it appends a random suffix per stack (`probe-auto` → `probe-auto-885d82d`), so two stacks cannot collide. These components **opt out** of that, setting physical names from the prefix.
+
+The reason is addressability. pyrmts's runtime resolves names rather than reading stack outputs — `pyrmts-engine batch submit -p <prefix>` derives the queue, job definition and log group from the prefix — and a random suffix is not derivable. Deterministic `<project>-<stack>` names keep both properties: unique per deployment *and* reproducible by the CLI.
+
+The residual risk autonaming would have covered: `pulumi.get_stack()` is the bare stack name, so two stacks with the same project *and* stack name, in different orgs or backends, deploying to one cloud account, still collide. If that is your situation, pass an explicit `prefix`.
+
 This is deliberately *stricter* than the imperative path: `pyrmts-engine batch bootstrap` defaults its prefix to the shared constant `pyrmts-engine`, so two consumers that both take its default clobber each other. Use `-p` there, or use this package.
 
 ## Handoff to the runtime

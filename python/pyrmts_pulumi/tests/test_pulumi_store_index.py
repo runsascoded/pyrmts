@@ -7,8 +7,8 @@ from conftest import DECLARED, declared
 
 from pyrmts_pulumi import Pyramid, R2ShardStore, S3ShardStore, ShardIndex
 
-BUCKET = 'aws:s3/bucketV2:BucketV2'
-LIFECYCLE = 'aws:s3/bucketLifecycleConfigurationV2:BucketLifecycleConfigurationV2'
+BUCKET = 'aws:s3/bucket:Bucket'
+LIFECYCLE = 'aws:s3/bucketLifecycleConfiguration:BucketLifecycleConfiguration'
 R2 = 'cloudflare:index/r2Bucket:R2Bucket'
 D1 = 'cloudflare:index/d1Database:D1Database'
 

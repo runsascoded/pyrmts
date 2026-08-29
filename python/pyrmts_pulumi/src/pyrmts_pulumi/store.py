@@ -44,7 +44,7 @@ class S3ShardStore(pulumi.ComponentResource):
 
         child = pulumi.ResourceOptions(parent=self)
         names = scoped_names(prefix)
-        bucket = aws.s3.BucketV2(
+        bucket = aws.s3.Bucket(
             f'{name}-bucket',
             # Explicit when given; otherwise Pulumi autonames from the stack,
             # which is what keeps two deployments from claiming one bucket.
@@ -54,14 +54,14 @@ class S3ShardStore(pulumi.ComponentResource):
             opts=child,
         )
         if expire_raw_after_days is not None:
-            aws.s3.BucketLifecycleConfigurationV2(
+            aws.s3.BucketLifecycleConfiguration(
                 f'{name}-lifecycle',
                 bucket=bucket.id,
-                rules=[aws.s3.BucketLifecycleConfigurationV2RuleArgs(
+                rules=[aws.s3.BucketLifecycleConfigurationRuleArgs(
                     id='expire-raw',
                     status='Enabled',
-                    filter=aws.s3.BucketLifecycleConfigurationV2RuleFilterArgs(prefix=raw_prefix),
-                    expiration=aws.s3.BucketLifecycleConfigurationV2RuleExpirationArgs(
+                    filter=aws.s3.BucketLifecycleConfigurationRuleFilterArgs(prefix=raw_prefix),
+                    expiration=aws.s3.BucketLifecycleConfigurationRuleExpirationArgs(
                         days=expire_raw_after_days,
                     ),
                 )],

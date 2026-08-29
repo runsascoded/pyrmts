@@ -1,6 +1,6 @@
 # Engine missing-source: classify by period, not by ratio
 
-Status: **implemented pyrmts-side (2026-08-28)**; awaiting ctbk validation (editable install) before push. Written by the ctbk session (2026-08-28).
+Status: **done (2026-08-28)** — implemented `72f2552`, validated by ctbk on editable installs, pushed to `r/main`. Written by the ctbk session (2026-08-28).
 
 Implementation notes: `TiledSource` now records absent *tiles* (key + period) — `coverage()` keeps its keys-only shape, and a new `missing_tiles()` exposes the periods. `build_local` classifies before applying the ratio: absent tiles with `period.end > to` are excluded from both sides, reported as `expected-absent (open period): <key> [<start>, <end>)` on stderr, and counted in a new `BuildResult.expected_absent`; `strict_open_periods=False` is the `build_local` kwarg (the spec's flag, inverted-default as specced), surfaced as `build -o/--strict-open-periods` and forwarded through `batch submit --strict-open-periods` / `build_command_args`. The clock is literally the range's `to` — no wall-clock enters the engine, so builds stay deterministic and a capped rebuild over closed history gets strict behavior for free (every absent period then satisfies `end <= to`). All four contract tests landed in `test_engine.py` (forgiven open tile; open-excluded 1/24 alongside a closed hole; denominator-0 single-source shape; `--strict` restoring 1/25), each also asserting outputs/registrations are unchanged by classification.
 
@@ -58,3 +58,10 @@ Nothing about the ratio's semantics changes for closed periods, so existing call
 - `ctbk gbfs rides-v5-sweep` is a standalone command, so a tripped guard's skipped relic sweep can be run by hand (`dd0d72d8`).
 
 When this lands, ctbk drops the tolerance from `rides-v5-extend` entirely rather than retuning it.
+
+## Outcome
+
+- **pyrmts**: `72f2552` (2026-08-28), on `r/main`. Python packages install from git; no dist artifact is involved (the JS dist built at the same SHA is `612f144`, unrelated to this change).
+- **ctbk validation** (editable installs of the Python trio, before the push): ctbk suite 62 passed, pyrmts suite 226 passed, both flags surfacing (`build -o/--strict-open-periods` and the `batch submit --strict-open-periods` passthrough), and ctbk's real submit path renders `pyrmts-engine batch submit … -f -t 1m --max-missing 0.01` with no `--strict-open-periods` — i.e. the monthly cadence gets the non-strict default.
+- **Deviation from the spec, agreed better**: the spec said classify against wall-clock `now`; the implementation uses the range's `to`. Wall-clock inside the engine would let two runs of the same uncapped fill classify differently across a period boundary, breaking the byte-determinism the engine maintains elsewhere — and the "capped rebuild over closed history" case then gets strict behavior for free (every absent period satisfies `end <= to`) instead of needing the escape hatch. `--strict-open-periods` stays for the genuinely-strict caller. `coverage()` also kept its keys-only shape, with `missing_tiles()` added alongside, so nothing downstream of `coverage()` changed.
+- **ctbk-side remaining** (theirs): re-pin the Python trio past `6378cdd`, then drop `max_missing` from `rides-v5-extend` entirely rather than retuning it. That stops the Sept 20 monthly run failing on the absent open month — the failure that silently skipped the www deploy for 12 days — and unsticks `specs/gc-legacy-pyramids.md`, whose avail<6 GC gates on the first fully-auto month.

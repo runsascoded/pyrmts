@@ -1,6 +1,6 @@
 # `D1ShardIndex`: make windowed `listShards` seekable
 
-Status: **implemented pyrmts-side (2026-08-28)**; awaiting ctbk `pds l` validation before push. Written by the ctbk session (2026-08-28).
+Status: **done (2026-08-28)** — implemented `a7a33e0`, validated by ctbk on `pds l` links, pushed to `r/main`, dist `612f144e79fe5573baca9d3e785b42255e05d69a`. Written by the ctbk session (2026-08-28).
 
 Implementation notes: the DDL entry point is `D1ShardIndex.schemaSql()` (this spec's `ddl()`). The index statement is emitted after the shards `CREATE TABLE` (and respects `shardsTable` overrides: `<shards>_period`); `skipInventory` omits it along with the table. Tests landed in two layers: the existing mock-based file asserts the emitted DDL strings, and a new `shard-index.sqlite.test.ts` runs `D1ShardIndex` against a real SQLite (`node:sqlite`, no new dep) — the windowed-`listShards` `EXPLAIN QUERY PLAN` asserts the exact plan `SEARCH pyramid_shards USING INDEX pyramid_shards_period (pyramid=? AND period_end>?)`, plus the fixture/tier-pinned/whole-history/re-run-`schemaSql()` cases below, with the narrow-window result additionally compared byte-identical against the same query after `DROP INDEX`. ctbk already applied the statement to prod by hand (14,561 → 22 rows read on the 1-hour-window measurement), so its re-run of `schemaSql()` will hit the `IF NOT EXISTS` no-op path.
 
@@ -63,3 +63,10 @@ Write cost: one extra index entry per `recordShard`. ctbk writes ~14.5K D1 rows/
 - Caching `listShards`. `CachedShardIndex` deliberately passes it through — the comment says gap-discovery callers are infrequent (fsck/audit), which was true when written but isn't how ctbk's serving path uses it. Whether the passthrough should change is a **separate** question, and it should be decided after this index lands: a seekable query reading 17 rows may simply not be worth caching, and adding a TTL over stale inventory has its own freshness cost.
 - Changing the `pyramid_shards` PK. The clustered order is right for the write path and for tier-pinned reads; this is an additive index.
 - The `rg_manifest` access pattern, which already has `(pyramid, key, cell_min, cell_max)` and is not implicated in the measurement above.
+
+## Outcome
+
+- **pyrmts**: `a7a33e0` (2026-08-28). `main` = `72f2552` on `r/main`; `build-dist.yml` green (run 33222611136). Dist pin: `"pyrmts-cfw": "https://github.com/runsascoded/pyrmts#612f144&path:/js/packages/pyrmts-cfw"` (`pyrmts` at the same SHA — `pyrmts-cfw` carries `pyrmts@workspace:*`, so the two swap together; linking `pyrmts-cfw` alone fails `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`).
+- **ctbk validation** (on `pds l` links, before the push): api 207 + cascade 113 + `pyrmts-cfw` 93 tests green, `tsc` clean on both workers, including the new `shard-index.sqlite.test.ts`.
+- **ctbk prod** had already applied the statement by hand, which is where the confirming measurement comes from: `SEARCH pyramid_shards USING PRIMARY KEY (pyramid=?)` matched 17 / read 14,561 → `SEARCH … USING INDEX pyramid_shards_period` matched 21 / read 22 (**662×**). Index build: 60,591 rows, 63 ms, +4 MB. Their `gbfs/d1/schema.sql` records the hand-applied statement pointing back here; re-running `schemaSql()` is the `IF NOT EXISTS` no-op that reconciles it.
+- **Follow-on the measurement surfaced** (not this spec's job): nothing *runs* `schemaSql()` as a migration against an existing deployment, so a DDL change upstream reaches prod only if a human remembers. ctbk offered to spec a migration runner for `pyrmts-ops`; see that spec if it lands.

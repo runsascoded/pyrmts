@@ -191,15 +191,51 @@ def upsert_schedule(
     *,
     input_json: str | None = None,
     description: str = '',
+    enabled: bool | None = None,
     session=None,
+    events=None,
+    lam=None,
 ) -> None:
-    """EventBridge rule → function target (+ invoke permission)."""
+    """EventBridge rule → function target (+ invoke permission).
+
+    `enabled` controls the rule's state: `True`/`False` set it explicitly,
+    and the default `None` means **preserve** — a rule an operator disabled
+    stays disabled across redeploys, and a new rule is created ENABLED.
+
+    That default is deliberate, and is the one thing here that is not a
+    plain upsert. `put_rule` has no "leave it alone" mode: omitting `State`
+    means ENABLED, so an unconditional call silently re-enables whatever an
+    operator turned off. Disabling a tick is how you retire a pyramid, so
+    with a forced state the *only* way to make a retirement stick is to
+    delete the calling code — at which point the rule still exists in the
+    account, invisible to the deployer, and reappears if the code ever comes
+    back. (ctbk hit exactly this retiring `avail-v3`, 2026-08-28, and
+    documented the trap in a code comment because there was nowhere else to
+    put it.) Preserving is the behavior that lets a disable mean something;
+    pass `enabled=True` when a deploy really should (re-)enable a tick.
+
+    The invoke-permission `StatementId` is per-rule (`invoke-<rule>`). A
+    constant id looks idempotent and isn't: the second rule targeting the
+    same function raises `ResourceConflictException` against the *first*
+    rule's statement, the retry-swallow hides it, and the rule then fires
+    into a function that rejects it. ctbk lost its `avail-v6` tick to this
+    for a day (2026-08-06)."""
     import boto3
-    sess = session or boto3.Session()
-    events = sess.client('events')
-    lam = sess.client('lambda')
+    sess = None
+    if events is None or lam is None:
+        sess = session or boto3.Session()
+    events = events if events is not None else sess.client('events')
+    lam = lam if lam is not None else sess.client('lambda')
+    state = None if enabled is None else ('ENABLED' if enabled else 'DISABLED')
+    if state is None:
+        # Preserve: read the live state, defaulting to ENABLED for a rule
+        # that doesn't exist yet.
+        try:
+            state = events.describe_rule(Name=rule).get('State', 'ENABLED')
+        except events.exceptions.ResourceNotFoundException:
+            state = 'ENABLED'
     rule_arn = events.put_rule(
-        Name=rule, ScheduleExpression=rate, State='ENABLED', Description=description,
+        Name=rule, ScheduleExpression=rate, State=state, Description=description,
     )['RuleArn']
     target: dict = {'Id': 'fn', 'Arn': func_arn}
     if input_json is not None:
@@ -207,13 +243,13 @@ def upsert_schedule(
     events.put_targets(Rule=rule, Targets=[target])
     try:
         lam.add_permission(
-            FunctionName=func_name, StatementId='events-invoke',
+            FunctionName=func_name, StatementId=f'invoke-{rule}',
             Action='lambda:InvokeFunction', Principal='events.amazonaws.com',
             SourceArn=rule_arn,
         )
     except lam.exceptions.ResourceConflictException:
         pass
-    err(f'schedule {rule}: {rate}' + (f' input={input_json}' if input_json else ''))
+    err(f'schedule {rule}: {rate} state={state}' + (f' input={input_json}' if input_json else ''))
 
 
 def deploy_pyramid_lambda(
@@ -233,12 +269,16 @@ def deploy_pyramid_lambda(
     schedule: str | None = None,
     schedule_rule: str | None = None,
     schedule_input: str | None = None,
+    schedule_enabled: bool | None = None,
     session=None,
     client=None,
 ) -> str:
     """Role + function (+ optional schedule) in one idempotent call.
     Package via `image_uri` (recommended — see module docstring) or
-    `zip_blob`. Returns the function ARN."""
+    `zip_blob`. Returns the function ARN.
+
+    `schedule_enabled` passes through to `upsert_schedule`; the default
+    `None` preserves a rule's existing state rather than forcing it on."""
     role_arn = upsert_lambda_role(role_name, description=description, session=session)
     arn = upsert_lambda_function(
         name,
@@ -251,6 +291,7 @@ def deploy_pyramid_lambda(
     if schedule is not None:
         upsert_schedule(
             schedule_rule or f'{name}-tick', schedule, arn, name,
-            input_json=schedule_input, description=description, session=session,
+            input_json=schedule_input, description=description,
+            enabled=schedule_enabled, session=session,
         )
     return arn

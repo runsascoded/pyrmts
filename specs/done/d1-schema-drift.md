@@ -1,6 +1,6 @@
 # D1 schema drift: pyrmts owns the DDL, so pyrmts should emit, verify, and apply it
 
-Status: **implemented pyrmts-side (2026-08-28)**; awaiting consumer validation (`pds l` for the TS half, editable install for the Python half) before push. Written by the pyrmts session while scoping the IaC question ctbk raised in `specs/done/d1-shard-index-temporal.md` — see `specs/iac-boundary.md` for the other half of that answer.
+Status: **done** (2026-08-29). Implemented pyrmts-side 2026-08-28, validated by ctbk against live `ctbk-gbfs`, pushed in `bb1af9b`, and adopted in ctbk CI.
 
 ## The gap
 
@@ -46,3 +46,11 @@ Three verbs, twinned across both languages, over the objects the index needs rat
 1. **awair** — apply the missing index: `pyrmts-ops d1 schema > cfw/cascade/migrations/0005_pyrmts_period_index.sql` (or copy the one statement), `wrangler d1 migrations apply awair-cascade --remote`. Then drop the hand-transcription warning from `0001_shard_index.sql`'s header and point it at `pyrmts-ops d1 verify` instead.
 2. **ctbk** — `pyrmts-ops d1 verify` should already report clean (they applied the index by hand). `gbfs/d1/schema.sql`'s pyrmts block becomes deletable once verify runs somewhere; their own tables stay.
 3. **Either** — wire `verify` into CI or the deploy script, and/or surface `D1ShardIndex.verifySchema` as a line in the existing `/health` payload. The point is that *something* notices; which something is the consumer's call.
+
+## Outcome (2026-08-29)
+
+Both halves shipped and agree byte-for-byte: `D1ShardIndex.{schemaSql,verifySchema}` (TS) and `pyrmts.d1.{schema_sql,verify_schema,apply_schema}` (Python), surfaced as `pyrmts-ops d1 {schema,verify,apply}`.
+
+**Adopted in ctbk**, which is what closes this: `.github/workflows/gbfs.yml` installs `pyrmts-ops` at the rev its own `pyproject.toml` pins — deriving the SHA with `sed` rather than pasting a second copy — and runs `pyrmts-ops d1 verify -d "$id"`, with the database id read out of `gbfs/api/wrangler.toml` instead of pasted again. Drift in either the pin or the id fails the build. ctbk validated `verify` against the live `ctbk-gbfs` database before the push (`schema up to date`, exit 0).
+
+**Still outstanding, awair-side**: awair provisioned its tables before `pyramid_shards_period` existed, so it is missing the index and pays a full-partition scan per windowed `listShards`. One `pyrmts-ops d1 apply` after a pin bump. `verify` reports exactly that gap — the `test_pre_index_deployment` case in `shard-index.sqlite.test.ts` is that state, asserted.

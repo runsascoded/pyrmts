@@ -65,7 +65,7 @@ def job_definition_spec(
     name: str = PREFIX,
     image: str,
     arch: str = 'X86_64',
-    vcpus: int = 8,
+    vcpus: int = 16,
     memory_mib: int = 32768,
     ephemeral_gib: int = 100,
     execution_role_arn: str,

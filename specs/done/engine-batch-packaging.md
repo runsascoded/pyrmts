@@ -108,3 +108,24 @@ All landed engine/CLI/tooling-side; per-finding:
    - `bootstrap -o/--on-demand` additionally creates a FARGATE (non-Spot) CE + queue `pyrmts-engine-od`; `submit -O/--on-demand` targets it. Spot + `-u` resubmits should usually beat it on cost now, but it's there for one-shot "final" runs.
 
 Suggested first move ctbk-side: rebuild/push the image at this rev (picks up the env baking + trim + serialize-first-read), `bootstrap -i <new-ref>` to bump the job def, then resubmit the full range on Spot with `-t/-d` (or the factory) plus `-m s3://… -u` — reclaims then cost minutes. `-e` should NOT be passed.
+
+
+## Closed (2026-08-28) — §3 numbers landed
+
+The last literal open item was §3's own note: *"Job-def defaults … provisional until ctbk's full-run numbers land (§3 copy-numbers step still owed; adjust `bootstrap` defaults then)."* Those numbers landed in `specs/done/engine-e-iteration.md`; they are now in the defaults.
+
+**vCPUs 8 → 16.** §3's reason for 8 was explicit — *"more vCPUs are wasted until the executor parallelizes across windows"* — and that is exactly what the `e`-box iteration then delivered. Every converged profile was measured at 16 vCPU, reaching **10.03 effective cores / 47.9 min** on the full ctbk range. The job definition was also asking for half of what the compute environment already allowed (`max_vcpus=16`), so a single job could never use the CE. Cost is roughly neutral: total CPU is ~constant (~8h) across every concurrency config — the engine is work-conserving, only overlap quality moves — so doubling vCPUs mostly buys wall-clock.
+
+**Memory stays 32768 MiB**, now for a measured reason rather than a provisional one: the mem-tight profile (`-w 1h -b 20g -C 2 -c 1g`) peaks at **24.0 GB**, and the engine's default budget of 70% of the detected limit is ~22.4 GB on a 32 GiB container — i.e. the default dials reproduce the measured profile. The par-leaning and par-max profiles peak at 37.0 / 37.7 GB and need `-m 49152` or more; that trade is documented in `bootstrap`'s help.
+
+**Ephemeral stays 100 GiB** — observed spill peaked ~22 GB, so this is 4× headroom.
+
+The two profiles, for reference (full ctbk avail range, 16 vCPU box):
+
+| profile | dials | wall | eff cores | peak RSS |
+|---|---|---|---|---|
+| mem-tight (default-shaped) | `-w 1h -b 20g -C 2 -c 1g` | 65.3 min | 7.36 | 24.0 GB |
+| par-leaning | `-w 1h -b 24g -C 3 -c 2g` | 56.4 min | 8.86 | 37.0 GB |
+| par-max | `-w 3h -b 36g -C 4` | 47.9 min | 10.03 | 37.7 GB |
+
+The ctbk-side smoke this spec waited on is discharged by `specs/done/engine-fill-mode.md` — `batch submit` is a production path (`ctbk gbfs rides-v5-extend` calls `_engine_submit(..., fill=True)`).

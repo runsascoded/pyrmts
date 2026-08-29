@@ -239,10 +239,10 @@ def batch() -> None:
 @option('-e', '--env', 'envs', multiple=True, help="Job-definition env var, NAME=VALUE (repeatable; e.g. R2 creds)")
 @option('-g', '--ephemeral', default=100, help="Ephemeral storage GiB (spill scratch; default 100)")
 @option('-i', '--image', required=True, help="Container image ref (ECR); repo is created if missing")
-@option('-M', '--max-vcpus', default=16, help="Compute-environment max vCPUs (default 16)")
-@option('-m', '--memory', default=32768, help="Job-definition memory MiB (default 32768)")
+@option('-M', '--max-vcpus', default=16, help="Compute-environment max vCPUs (default 16 = one full job at a time; raise to run concurrent builds)")
+@option('-m', '--memory', default=32768, help="Job-definition memory MiB (default 32768 — fits the mem-tight profile's 24 GB peak; use 49152+ for the par-max profile)")
 @option('-o', '--on-demand', is_flag=True, help="Also create an on-demand (non-Spot) CE + queue `pyrmts-engine-od` (submit -O targets it)")
-@option('-v', '--vcpus', default=8, help="Job-definition vCPUs (default 8)")
+@option('-v', '--vcpus', default=16, help="Job-definition vCPUs (default 16 — the size every converged profile was measured at; see `specs/done/engine-batch-packaging.md` §3)")
 def bootstrap(arch: str, envs: tuple[str, ...], ephemeral: int, image: str, max_vcpus: int, memory: int, on_demand: bool, vcpus: int) -> None:
     """Idempotently create the role, log group, ECR repo, Fargate-Spot
     compute environment, queue, and job definition."""

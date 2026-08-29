@@ -64,3 +64,10 @@ Tests to lock: overlap staleness (edge-touching periods excluded), fine-before-c
 ## Acceptance
 
 ctbk retires `RAW_FINALITY_S` (or shrinks it to a ~2 min anti-race grace): builds proceed with whatever raw minutes exist; a late-landing minute triggers `invalidate` of its 1-minute interval and the next 5-min tick repairs the ≤15 covering fine shards. The "declared lost" concept disappears — absent minutes are just absent, repaired iff their datum ever lands.
+
+
+## Closed (2026-08-28)
+
+The only stated remainder was a passive week-long soak after ctbk's prod synthetic repair went green on 2026-08-05 — 23 days ago, with no regression reported. A **second** consumer has since adopted independently: awair `ce1cbdd` ("cfw/cascade: switch to pyrmts journal-based invalidation"), `8dc4560`, `50c5496`, with `cfw/cascade/src/cascade.ts:73` citing `pyrmts_engine.invalidation.invalidate`. Two consumers in prod.
+
+Implementation: write side `pyrmts/invalidation.py` (`Invalidation:39`, `journal_key:47`, `load_invalidations:70`, CAS-retried `invalidate:82`); read side `pyrmts_engine/invalidation.py` (`overlaps:29`, `stale_keys_for:34`, `prune_spent:54`); storage CAS primitives on all three backends (`pyrmts/storage.py`: `EtagConflict:10`, `get_with_etag:36`, `put_if_match:45`); driver wiring `consolidate.py:411 honor_invalidations`; CLI `pyrmts-engine invalidate -r`; JS port `js/packages/pyrmts/src/invalidation.ts`. Tests in `test_invalidation.py` (edge-touching staleness, end-to-end repair, changed-md5 vs initial build) and `test_invalidation_write.py` (journal round-trip, CAS retry preserving a concurrent append).

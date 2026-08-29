@@ -36,7 +36,7 @@ def test_job_definition_spec():
                 'cpuArchitecture': 'X86_64',
             },
             'resourceRequirements': [
-                {'type': 'VCPU', 'value': '8'},
+                {'type': 'VCPU', 'value': '16'},
                 {'type': 'MEMORY', 'value': '32768'},
             ],
             'ephemeralStorage': {'sizeInGiB': 100},

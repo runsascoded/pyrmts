@@ -130,3 +130,10 @@ Small, low-risk. Path:
 2. Refactor `consolidate._fixed_delta` and its two call sites.
 3. Add the two acceptance tests (`[1d, 1mo]` consolidation, yaml validation).
 4. Push to `main`; awair repins, flips `raw: [1d, 1mo]` in `pyramid.yml`, and updates Lambda to write 1d shards. Awair-side migration deletes the existing `raw/1mo/*.parquet` files after cascade re-derives them from the daily rung (or leaves them in place — cascade overwrites on consolidation).
+
+
+## Closed (2026-08-28)
+
+Consumer hold discharged — awair adopted. `~/c/awair/src/awair/pyramid.yml:48` is now `- { name: raw, bin: 1min, shards: [1d, 1mo] }` (awair `709f151`, "Multi-rung raw: `[1mo] → [1d, 1mo]`"), its `pyproject.toml:39` pins `pyrmts@bdafada` which contains this spec's `f8bfe0c`, and the Lambda 1d tip writes landed as `src/awair/lmbda/updater.py:69 write_pyrmts_raw_shard` ("Tip rung: the FINEST shard duration … cascade owns any coarser rungs via same-tier consolidation") with follow-ups `44171e8` and `791d560`. That is acceptance #5 running in production.
+
+pyrmts-side evidence: `_fixed_delta` is gone repo-wide, `nominal_delta_ms` lives at `pyrmts/axis.py:35`, the eligibility filter is nominal-width at `pyrmts_engine/consolidate.py:88`, and nominal-divisibility validation mirrors across `pyrmts/yaml.py:285-299` and `js/packages/pyrmts/src/ladder.ts:89-110`. Tests: `test_consolidate.py::test_tile_from_existing_calendar_rung` (28-vs-31-day slots), `::test_calendar_consolidation_byte_identical_to_engine_build` (acceptance #2), `::test_overlap_cover_calendar_rung`.

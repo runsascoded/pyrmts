@@ -91,23 +91,19 @@ Simulated a daily cron top-up: `manifest-full4` truncated at 07-17 (drops 13 tai
 
 Lambda profile datum: `-w 1h -j 2 -b 7g -C 1 -c 512m` → 8.8 min / 9.7 GB peak (pre-gating; expect ~6.5 GB with gated readahead).
 
-## Incremental (cron/Lambda) builds: consolidation, not re-walk
+## Incremental (cron/Lambda) builds → moved
 
-Today the engine builds every output shard from the source cascade, and resume re-walks all windows feeding any unfinished shard — so the day a large rung period completes (e.g. `30m@64d`, `2h@256d`; max-rung N is ~constant 3-4k bins across tiers by ladder design), the top-up run re-walks that whole span from source. That's an artifact of the current implementation, not a necessity:
-
-- **Same-tier consolidation** (to build): a new large-dur shard = its tier's finer materialized shards covering the same period, in rev-chron geometric pieces (e.g. `2m@2d` ⇐ `{…, 6h, 12h, 1d}`). Shard boundaries are bin-aligned, so no (cell, bin) key spans inputs → **no group_by at all**; it's a pure k-way merge of already-(s2,dt)-sorted parquet. Memory = one decompressed RG per input = O(R) RGs (R = ladder pieces ≤ ~10) — megabytes, Lambda-shaped. Build as composable stream ops (RG sources → merge/combine nodes → sinks), not bespoke loops — the same pieces should serve phase-2 sorted-run merge closes.
-- **Zero-decode concat** (design card, not scheduled): for dt-first-sorted pyramids, consolidation inputs cover disjoint key ranges → output = literal concatenation of input RGs; compressed-RG stitching (thrift metadata surgery; pyarrow doesn't expose raw RG copy — needs low-level or arrow-rs) holds 1 *compressed* RG resident. Caveat: inherits input RG boundaries (tail RGs < rg_size) → not RGIP vs a from-source build; canonical bytes would be the consolidated form.
-- **Lambda envelope for the daily top-up walk**: dominated by the source-shard parse (~3 GB steady post-Enum; ~8-10 GB transient, shrinkable via streaming `wide_to_long`). The whole-shard parse cache exists because the (s2_cell, dt) sort defeats dt-based RG pruning — every RG is a cell-range spanning the full shard period. A dt-major base rung (or engine-private dt-major mirror) would make `read_window` RG-streamable and delete the 3 GB floor.
-- **Tests**: Lambda-style workloads need first-class tests — single-additional-tick cascades (extend a built range by one base bin, resume, assert minimal windows + byte-identity), then profiling on those shapes. (First one landed: `test_single_tick_incremental_resume`, which also made no-op resumes exactly free, `96b1659`.)
-
-Sizing correction (2026-07-23 discussion): same-tier consolidation under (s2,dt) does **not** hold R full shards uncompressed — it's a k-way heap merge of streams sharing the sort key: resident = each input's frontier RG + one output RG ≈ single-digit MBs. The genuinely whole-shard-sized pieces are (1) source window-slicing (dt-pruning impossible under (s2,dt) → the ~3 GB parse cache) and (2) the close-time (s2,dt) sort of a fresh shard. Design directions, independently adoptable, by value-per-complexity:
-
-1. **dt-major base rung** (or engine-private mirror): makes `read_window` RG-streamable, deletes the parse-cache floor. (The rest of a dual-sorted pyramid buys little: cross-tier rebins need decode+group_by regardless, and same-tier consolidation is already merge-cheap.)
-2. **s2-range shadow buckets** (5-10 buckets, boundaries alignable to the ragged station-leaf s2 frontier) on *live/non-max* shards only: Lambda sorts 5-10× smaller pieces, and — since buckets are disjoint s2 ranges each internally (s2,dt)-sorted — the unsharded serving shard is a **zero-decode concat** of bucket shards in bucket order. Serving/CFW reads stay on the stitched unsharded form (live min-cover included); buckets are build-side artifacts, dropped once a max-rung shard stitches.
-3. **k-way merge consolidation** (needed regardless; see above) — build as composable stream ops (RG source → merge/combine → sink) shared with phase-2 merge closes.
+This section became `specs/engine-incremental-consolidation.md` (2026-08-28). None of it was implemented, so it was lifted out rather than archived here: same-tier consolidation as composable stream ops, a dt-major base rung, s2-range shadow buckets, and the zero-decode concat design card. The measurements that motivate it stay above.
 
 ## Notes
 
 - Iterate code here directly (this clone), commit on `main` as usual; the laptop sessions will `git fetch` from `e` / get pushed-back commits — coordinate via this spec's status line.
 - Memory profile of every run is in `~/engine-runs/<label>.mem` — cite peak/steady numbers in the spec when closing it out.
 - If close-time memory (not window concurrency) turns out to bind, that's the deferred phase-2 (sorted-run merge closes) trigger.
+
+
+## Closed (2026-08-28)
+
+Both ctbk-side residues named in the Acceptance status are discharged. The **Batch proof run**: `specs/done/engine-fill-mode.md:7` records ctbk standing up `avail-v5/` via an engine Batch backfill (genesis→07-18), and its 08-16 adoption note makes `batch submit -f` the production rides-v5 cadence — "the engine's proven 34 min / ~$2 for a full 3.4-month build at ~10 effective cores". The **content-compare**: `specs/done/engine-raw-ingest.md:80` records `compare_manifest` against prod avail-v5 returning **9/9 `equal`** on real data.
+
+The "## Incremental (cron/Lambda) builds" section was **moved out** to `specs/engine-incremental-consolidation.md` before archiving — none of it is implemented, and it would have been buried here. This spec keeps the measurements that motivate it.

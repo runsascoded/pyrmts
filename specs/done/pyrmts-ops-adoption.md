@@ -115,3 +115,12 @@ Original plan:
   The residual value was never the stage coverage — `pyrmts_ops/tests/fixture_pyramid.py` and `pyrmts_engine/tests/conftest.py` are both deliberately non-ctbk ladders already exercised by `test_gc`/`test_rebuild`/`test_lambda_entry` — it was the *seams*. And the one seam a single test can't span is the language boundary: ingest/cascade/fill/GC are Python, health-cover is TS, so "end-to-end" would mean building a cross-language harness and then mostly testing the harness.
 
   If the knowledge wants capturing, the cheap artifact is a "what a consumer must supply" doc distilled from what awair actually provided — not a fixture.
+
+
+## Closed (2026-08-28)
+
+All four phases were marked done pyrmts-side on 2026-07-28 and pushed 2026-07-30 (`main` `3073c60`, dist `37c363f`); the only remaining hold was ctbk re-pinning past that. It has: `specs/shard-invalidation.md` records ctbk deploying "workers + Lambda image on the `ce770e7` pin" on 2026-08-05, downstream of `3073c60`. Phase 4 is independently corroborated in a second consumer — `~/c/awair/cfw/serve/src/index.ts:28` imports `pyramidCover` from `pyrmts-cfw`.
+
+The cross-cutting items were verified done 2026-08-16, and the toy-second-consumer end-state check was deliberately dropped that day (discharged by awair being a real one).
+
+**Residue, deliberately not blocking this close:** the "what a consumer must supply" doc named at the end of the Cross-cutting section was never written. Tracked as its own item rather than holding a 4-phase spec open for a doc.

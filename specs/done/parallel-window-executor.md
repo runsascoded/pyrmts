@@ -65,3 +65,14 @@ The `EmptySourceError` guard only catches the 100%-missing catastrophe; **partia
 - **§2 sorted-run merge closes + §3 streaming fast path — deferred**, deliberately: with closes on their own thread the 113 s stall is already off the critical path, and concurrent-close memory is bounded (one close at a time), so the remaining benefit is only the close-time RAM spike (~worst 12.7M-row combine ≈ well under the 32 GiB job def). It's also the riskiest piece for byte-identity (incremental wide writes must reproduce `write_tier_parquet` bytes exactly). Revisit when a Batch run shows close memory as the binding constraint.
 
 Spec stays in `specs/` until the ctbk Batch re-baseline confirms the effective-cores target (and settles whether §2 is needed).
+
+
+## Closed (2026-08-28) — §2/§3 superseded
+
+The hold condition ("stays in `specs/` until the ctbk Batch re-baseline confirms the effective-cores target, and settles whether §2 is needed") is met, and it settled §2 in the negative.
+
+The re-baseline landed: ~10 effective cores on Batch (`specs/done/engine-fill-mode.md:7`), against the 2.6-2.7 sequential reference. And the question §2 existed to answer — whether close-time memory binds — was answered *yes* and then solved by different means: peak RSS hit 37 GB with three close transients stacked (`specs/done/engine-e-iteration.md`), and the fix was **chunked closes** (`a7b6097`, `pyrmts_engine/engine.py:666-702`: disjoint bin-range chunks with ordered `seq` registration) plus a close pool (`614c234`), landing the mem-tight profile at 24.0 GB peak. Sorted-run k-way merge closes were never needed.
+
+So §1 (parallel walk, `b67c727`), §4 (`WideShardSource.coverage()` + `max_missing_source`, CLI `-M`), and §5 (byte-identity gate, `test_engine.py::test_parallel_workers_byte_identical`) shipped; §2 and §3 are superseded by a cheaper fix to the same constraint.
+
+If merge machinery is ever wanted, it should be built for a different reason — same-tier consolidation, where the k-way merge is the *algorithm* rather than a memory workaround. That case is written up in `specs/engine-incremental-consolidation.md`, which explicitly notes the two should share an implementation.

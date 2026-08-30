@@ -12,6 +12,16 @@ export interface ExtraTip {
     uploaded?: number;
     label?: string;
 }
+/** Identifies one rung — the join key between an external stats row and
+ *  the timeline segments it describes. */
+export interface RungKey {
+    tier: string;
+    shardDur: string;
+}
+/** Class suffix that spotlights `highlight`'s rung: its segments stay lit
+ *  (`tt-hl`) while every other segment fades back (`tt-faded`). Empty string
+ *  (no spotlight) when `highlight` is null — the default rendering. */
+export declare function spotlightClass(highlight: RungKey | null | undefined, tier: string, shardDur: string): string;
 export interface CoverTimelineProps {
     tiers: PyramidTierCoverStatus[];
     genesis: number;
@@ -23,6 +33,10 @@ export interface CoverTimelineProps {
     hrefFor?: (key: string) => string;
     /** Overrides the default navigation; receives the slot's storage key. */
     onShardClick?: (key: string) => void;
+    /** Rung to spotlight (e.g. hovered in a sibling stats table): its
+     *  segments stay lit while every other segment fades back. `null` = no
+     *  spotlight (the default, unchanged rendering). */
+    highlight?: RungKey | null;
 }
 /** First-of-month gridline instants covering `[genesis, now]`, starting at
  *  the first-of-month at-or-before `genesis` (the leading line may fall
@@ -59,5 +73,5 @@ export declare function coverageWindow(genesisTs: number, now: number): {
  * `--pyrmts-present`, `--pyrmts-pending`, `--pyrmts-missing`,
  * `--pyrmts-tip` — override to retheme).
  */
-export declare function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShardClick }: CoverTimelineProps): import("react/jsx-runtime").JSX.Element;
+export declare function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShardClick, highlight }: CoverTimelineProps): import("react/jsx-runtime").JSX.Element;
 //# sourceMappingURL=cover-timeline.d.ts.map

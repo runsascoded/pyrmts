@@ -5,6 +5,14 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-run
 import { autoUpdate, flip, FloatingPortal, offset, shift, useFloating, } from '@floating-ui/react';
 import { useState } from 'react';
 const MS_PER_DAY = 86_400_000;
+/** Class suffix that spotlights `highlight`'s rung: its segments stay lit
+ *  (`tt-hl`) while every other segment fades back (`tt-faded`). Empty string
+ *  (no spotlight) when `highlight` is null — the default rendering. */
+export function spotlightClass(highlight, tier, shardDur) {
+    if (highlight == null)
+        return '';
+    return highlight.tier === tier && highlight.shardDur === shardDur ? ' tt-hl' : ' tt-faded';
+}
 const fmtDay = (iso) => iso.slice(0, 10);
 export function monthGridlines(genesis, now) {
     const out = [];
@@ -47,7 +55,7 @@ export function coverageWindow(genesisTs, now) {
  * `--pyrmts-present`, `--pyrmts-pending`, `--pyrmts-missing`,
  * `--pyrmts-tip` — override to retheme).
  */
-export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShardClick }) {
+export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShardClick, highlight = null }) {
     const [tip, setTip] = useState(null);
     const { refs, floatingStyles } = useFloating({
         open: tip !== null,
@@ -71,7 +79,7 @@ export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShard
                 window.location.assign(hrefFor(key));
         },
     };
-    const segClass = (status, key) => `tt-seg-${status}${key !== undefined && clickable ? ' tt-clickable' : ''}`;
+    const segClass = (status, key, tier, shardDur) => `tt-seg-${status}${key !== undefined && clickable ? ' tt-clickable' : ''}${spotlightClass(highlight, tier, shardDur)}`;
     const range = Math.max(1, now - genesis);
     const toX = (t) => ((t - genesis) / range) * 1000;
     const rowH = 14;
@@ -85,13 +93,13 @@ export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShard
     const anyTips = (extraTips ?? []).length > 0;
     return (_jsxs("div", { className: "tier-timeline", children: [_jsxs("svg", { viewBox: `0 0 ${svgW + labelW} ${svgH + 14}`, preserveAspectRatio: "none", className: "tier-timeline-svg", "aria-label": "Coverage timeline", children: [_jsx("g", { className: "tt-grid", children: gridlines.map((g, i) => (_jsx("line", { x1: labelW + toX(g.t), x2: labelW + toX(g.t), y1: 0, y2: svgH, className: g.major ? 'tt-grid-major' : 'tt-grid-minor' }, i))) }), tiers.map((t, i) => {
                         const y = i * (rowH + rowGap);
-                        return (_jsxs("g", { className: "tt-row", children: [_jsx("text", { x: labelW - 4, y: y + rowH - 3, textAnchor: "end", className: "tt-label", children: t.tier }), _jsx("rect", { x: labelW, y: y, width: svgW, height: rowH, className: "tt-bg" }), t.segments.map(s => {
+                        return (_jsxs("g", { className: "tt-row", children: [_jsx("text", { x: labelW - 4, y: y + rowH - 3, textAnchor: "end", className: `tt-label${highlight?.tier === t.tier ? ' tt-label-hl' : ''}`, children: t.tier }), _jsx("rect", { x: labelW, y: y, width: svgW, height: rowH, className: "tt-bg" }), t.segments.map(s => {
                                     const start = Date.parse(s.start);
                                     const end = Date.parse(s.end);
                                     const x0 = toX(Math.max(start, genesis));
                                     const x1 = toX(Math.min(end, now));
                                     const w = Math.max(0.3, x1 - x0);
-                                    return (_jsx("rect", { x: labelW + x0, y: y, width: w, height: rowH, className: segClass(s.status, s.key), ...hoverProps({
+                                    return (_jsx("rect", { x: labelW + x0, y: y, width: w, height: rowH, className: segClass(s.status, s.key, t.tier, s.shardDur), ...hoverProps({
                                             tier: t.tier,
                                             shardDur: s.shardDur,
                                             status: s.status,
@@ -100,7 +108,7 @@ export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShard
                                             key: s.key,
                                             buildableAt: s.buildableAt,
                                         }), ...clickProps(s.key) }, s.start));
-                                }), tipsFor(t.tier).map(tipSeg => (_jsx("rect", { x: labelW + toX(Math.max(tipSeg.start, genesis)), y: y, width: Math.max(0.3, toX(Math.min(tipSeg.end, now)) - toX(Math.max(tipSeg.start, genesis))), height: rowH, className: `tt-seg-tip${tipSeg.key !== undefined && clickable ? ' tt-clickable' : ''}`, ...hoverProps({
+                                }), tipsFor(t.tier).map(tipSeg => (_jsx("rect", { x: labelW + toX(Math.max(tipSeg.start, genesis)), y: y, width: Math.max(0.3, toX(Math.min(tipSeg.end, now)) - toX(Math.max(tipSeg.start, genesis))), height: rowH, className: `tt-seg-tip${tipSeg.key !== undefined && clickable ? ' tt-clickable' : ''}${spotlightClass(highlight, tipSeg.tier, tipSeg.shardDur)}`, ...hoverProps({
                                         tier: tipSeg.tier,
                                         shardDur: tipSeg.shardDur,
                                         status: tipSeg.label ?? 'live tip',

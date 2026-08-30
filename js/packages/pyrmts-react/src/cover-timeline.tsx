@@ -29,6 +29,21 @@ export interface ExtraTip {
   label?: string     // tooltip status label; default 'live tip'
 }
 
+/** Identifies one rung — the join key between an external stats row and
+ *  the timeline segments it describes. */
+export interface RungKey {
+  tier: string
+  shardDur: string
+}
+
+/** Class suffix that spotlights `highlight`'s rung: its segments stay lit
+ *  (`tt-hl`) while every other segment fades back (`tt-faded`). Empty string
+ *  (no spotlight) when `highlight` is null — the default rendering. */
+export function spotlightClass(highlight: RungKey | null | undefined, tier: string, shardDur: string): string {
+  if (highlight == null) return ''
+  return highlight.tier === tier && highlight.shardDur === shardDur ? ' tt-hl' : ' tt-faded'
+}
+
 export interface CoverTimelineProps {
   tiers: PyramidTierCoverStatus[]
   genesis: number    // ms — left edge (pre-padded; see `coverageWindow`)
@@ -40,6 +55,10 @@ export interface CoverTimelineProps {
   hrefFor?: (key: string) => string
   /** Overrides the default navigation; receives the slot's storage key. */
   onShardClick?: (key: string) => void
+  /** Rung to spotlight (e.g. hovered in a sibling stats table): its
+   *  segments stay lit while every other segment fades back. `null` = no
+   *  spotlight (the default, unchanged rendering). */
+  highlight?: RungKey | null
 }
 
 /** Hovered-segment payload for the (single, shared) floating tooltip. */
@@ -109,7 +128,7 @@ export function coverageWindow(genesisTs: number, now: number): { genesis: numbe
  * `--pyrmts-present`, `--pyrmts-pending`, `--pyrmts-missing`,
  * `--pyrmts-tip` — override to retheme).
  */
-export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShardClick }: CoverTimelineProps) {
+export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShardClick, highlight = null }: CoverTimelineProps) {
   const [tip, setTip] = useState<TipState | null>(null)
   const { refs, floatingStyles } = useFloating({
     open: tip !== null,
@@ -131,8 +150,8 @@ export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShard
       else window.location.assign(hrefFor!(key))
     },
   }
-  const segClass = (status: string, key: string | undefined) =>
-    `tt-seg-${status}${key !== undefined && clickable ? ' tt-clickable' : ''}`
+  const segClass = (status: string, key: string | undefined, tier: string, shardDur: string) =>
+    `tt-seg-${status}${key !== undefined && clickable ? ' tt-clickable' : ''}${spotlightClass(highlight, tier, shardDur)}`
 
   const range = Math.max(1, now - genesis)
   const toX = (t: number) => ((t - genesis) / range) * 1000
@@ -180,7 +199,7 @@ export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShard
                 x={labelW - 4}
                 y={y + rowH - 3}
                 textAnchor="end"
-                className="tt-label"
+                className={`tt-label${highlight?.tier === t.tier ? ' tt-label-hl' : ''}`}
               >
                 {t.tier}
               </text>
@@ -205,7 +224,7 @@ export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShard
                     y={y}
                     width={w}
                     height={rowH}
-                    className={segClass(s.status, s.key)}
+                    className={segClass(s.status, s.key, t.tier, s.shardDur)}
                     {...hoverProps({
                       tier: t.tier,
                       shardDur: s.shardDur,
@@ -226,7 +245,7 @@ export function CoverTimeline({ tiers, genesis, now, extraTips, hrefFor, onShard
                   y={y}
                   width={Math.max(0.3, toX(Math.min(tipSeg.end, now)) - toX(Math.max(tipSeg.start, genesis)))}
                   height={rowH}
-                  className={`tt-seg-tip${tipSeg.key !== undefined && clickable ? ' tt-clickable' : ''}`}
+                  className={`tt-seg-tip${tipSeg.key !== undefined && clickable ? ' tt-clickable' : ''}${spotlightClass(highlight, tipSeg.tier, tipSeg.shardDur)}`}
                   {...hoverProps({
                     tier: tipSeg.tier,
                     shardDur: tipSeg.shardDur,

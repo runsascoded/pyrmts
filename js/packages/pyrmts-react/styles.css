@@ -45,6 +45,22 @@
   cursor: pointer;
 }
 
+/* Rung spotlight (`highlight` prop): the hovered rung's segments stay lit
+ * while the rest fade back — the visual join to a sibling stats table. */
+.tier-timeline .tier-timeline-svg rect {
+  transition: opacity 0.12s ease;
+}
+.tier-timeline .tt-faded {
+  opacity: var(--pyrmts-faded-opacity, 0.15);
+}
+.tier-timeline .tt-hl {
+  filter: brightness(1.2);
+}
+.tier-timeline .tt-label-hl {
+  fill: var(--pyrmts-text-primary, currentColor);
+  font-weight: 700;
+}
+
 /* Bright/contrasting so it reads against the shard green. */
 .tier-timeline .tt-now {
   stroke: var(--pyrmts-now, #ef4444);

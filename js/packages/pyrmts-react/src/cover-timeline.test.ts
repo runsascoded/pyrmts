@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 
-import { coverageWindow, monthGridlines } from './cover-timeline.js'
+import { coverageWindow, monthGridlines, spotlightClass } from './cover-timeline.js'
 
 const MS_PER_DAY = 86_400_000
 const t = (s: string) => Date.parse(s)
@@ -24,6 +24,20 @@ describe('coverageWindow', () => {
       genesis: genesis - MS_PER_DAY,
       now,
     })
+  })
+})
+
+describe('spotlightClass', () => {
+  test('no highlight → empty suffix (default rendering, all callers)', () => {
+    expect(spotlightClass(null, '32d', '1m')).toBe('')
+    expect(spotlightClass(undefined, '32d', '1m')).toBe('')
+  })
+
+  test('matching rung → lit; every other rung → faded', () => {
+    const hl = { tier: '32d', shardDur: '1m' }
+    expect(spotlightClass(hl, '32d', '1m')).toBe(' tt-hl')
+    expect(spotlightClass(hl, '32d', '2d')).toBe(' tt-faded') // same tier, other rung
+    expect(spotlightClass(hl, '8d', '1m')).toBe(' tt-faded')  // other tier, same shardDur
   })
 })
 

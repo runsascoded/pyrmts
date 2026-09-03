@@ -5,6 +5,7 @@ export interface D1ShardIndexOptions {
     shardsTable?: string;
     skipInventory?: boolean;
     now?: () => number;
+    extraColumns?: Record<string, string[]>;
 }
 export interface SchemaObject {
     name: string;

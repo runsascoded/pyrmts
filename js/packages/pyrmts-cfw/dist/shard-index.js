@@ -202,9 +202,11 @@ export class D1ShardIndex {
             const actual = info.results.map(r => r.name);
             if (o.kind === 'table') {
                 // Column order is not load-bearing for a table (SELECTs name their
-                // columns); an index's order is.
+                // columns); an index's order is. Registered `extraColumns` widen the
+                // accepted set but keep the check strict — an unregistered stray
+                // column still lands in `mismatched`.
                 const a = [...actual].sort();
-                const e = [...o.columns].sort();
+                const e = [...o.columns, ...(opts.extraColumns?.[o.name] ?? [])].sort();
                 if (a.length !== e.length || a.some((c, k) => c !== e[k])) {
                     mismatched.push(`${o.name}: expected=${JSON.stringify(e)} actual=${JSON.stringify(a)}`);
                 }

@@ -126,6 +126,57 @@ def test_verify_json_emits_the_full_diff(monkeypatch):
     }
 
 
+_STATS_SCHEMA = {
+    'sqlite_master': FULL_SCHEMA['sqlite_master'],
+    'pragmas': {
+        **FULL_SCHEMA['pragmas'],
+        'pyramid_shards': FULL_SCHEMA['pragmas']['pyramid_shards'] + [
+            'n_rows', 'n_rgs', 'size_bytes', 'footer_bytes',
+        ],
+    },
+}
+
+
+def test_verify_registered_extra_columns_pass(monkeypatch):
+    """`-x` lets a consumer register app-owned columns (awair's stats/footer
+    caches on `pyramid_shards`) so the CI gate agrees with what `/health`
+    shows — no false drift."""
+    _install_fake_query(monkeypatch, **_STATS_SCHEMA)
+    result = CliRunner().invoke(cli, [
+        'd1', 'verify', '-x', 'pyramid_shards:n_rows,n_rgs,size_bytes,footer_bytes',
+    ])
+    assert result.exit_code == 0
+    assert result.output == 'schema up to date\n'
+
+
+def test_verify_unregistered_extra_column_still_drifts(monkeypatch):
+    _install_fake_query(monkeypatch, **_STATS_SCHEMA)
+    # Register only three of the four live extras → the fourth is drift.
+    result = CliRunner().invoke(cli, [
+        'd1', 'verify', '-j', '-x', 'pyramid_shards:n_rows,n_rgs,size_bytes',
+    ])
+    assert result.exit_code == 1
+    assert json.loads(result.output) == {
+        'ok': False,
+        'missing': [],
+        'mismatched': [
+            "pyramid_shards: expected=['key', 'n_rgs', 'n_rows', 'period_end', "
+            "'period_start', 'pyramid', 'shard_dur', 'size_bytes', 'tier', "
+            "'written_at'] actual=['footer_bytes', 'key', 'n_rgs', 'n_rows', "
+            "'period_end', 'period_start', 'pyramid', 'shard_dur', 'size_bytes', "
+            "'tier', 'written_at']",
+        ],
+    }
+
+
+def test_verify_malformed_extra_column_spec_errors(monkeypatch):
+    _install_fake_query(monkeypatch, **FULL_SCHEMA)
+    result = CliRunner().invoke(cli, ['d1', 'verify', '-x', 'no_colon_here'])
+    assert (result.exit_code, str(result.exception)) == (
+        1, "d1 verify: expected TABLE:COL[,COL…], got 'no_colon_here'",
+    )
+
+
 def test_apply_runs_every_statement_and_reports_each(monkeypatch):
     calls = _install_fake_query(monkeypatch, sqlite_master=[], pragmas={})
     result = CliRunner().invoke(cli, ['d1', 'apply'])

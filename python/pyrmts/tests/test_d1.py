@@ -288,6 +288,68 @@ def test_verify_schema_flags_an_index_on_the_wrong_columns():
     ))
 
 
+def test_verify_schema_tolerates_registered_extra_columns_but_still_flags_strays():
+    """A consumer (awair) adds stats/footer columns to `pyramid_shards`.
+    Registered via `extra_columns` they pass; an unregistered stray still
+    reads as drift — the strict check the registration is meant to keep."""
+    extra = ['footer_bytes', 'n_rgs', 'n_rows', 'rg_row_counts', 'size_bytes']
+    base = [
+        'pyramid', 'tier', 'shard_dur', 'period_start', 'period_end',
+        'key', 'written_at',
+    ]
+    query, _ = _fake_query(
+        sqlite_master=[
+            {'type': 'table', 'name': 'pyramid_watermarks'},
+            {'type': 'table', 'name': 'pyramid_shards'},
+            {'type': 'index', 'name': 'pyramid_shards_period'},
+        ],
+        pragmas={
+            'pyramid_watermarks': [
+                'pyramid', 'tier', 'shard_dur', 'latest_period_end', 'updated_at',
+            ],
+            'pyramid_shards': base + extra,
+            'pyramid_shards_period': ['pyramid', 'period_end'],
+        },
+    )
+    # Registered → clean.
+    assert verify_schema(
+        query=query,
+        extra_columns={'pyramid_shards': tuple(extra)},
+    ) == SchemaDiff()
+    # Unregistered → flagged.
+    assert verify_schema(query=query) == SchemaDiff(mismatched=(
+        "pyramid_shards: expected=['key', 'period_end', 'period_start', 'pyramid', "
+        "'shard_dur', 'tier', 'written_at'] actual=['footer_bytes', 'key', 'n_rgs', "
+        "'n_rows', 'period_end', 'period_start', 'pyramid', 'rg_row_counts', "
+        "'shard_dur', 'size_bytes', 'tier', 'written_at']",
+    ))
+    # A stray column beyond the registered set is still caught.
+    query_stray, _ = _fake_query(
+        sqlite_master=[
+            {'type': 'table', 'name': 'pyramid_watermarks'},
+            {'type': 'table', 'name': 'pyramid_shards'},
+            {'type': 'index', 'name': 'pyramid_shards_period'},
+        ],
+        pragmas={
+            'pyramid_watermarks': [
+                'pyramid', 'tier', 'shard_dur', 'latest_period_end', 'updated_at',
+            ],
+            'pyramid_shards': base + extra + ['stray'],
+            'pyramid_shards_period': ['pyramid', 'period_end'],
+        },
+    )
+    assert verify_schema(
+        query=query_stray,
+        extra_columns={'pyramid_shards': tuple(extra)},
+    ) == SchemaDiff(mismatched=(
+        "pyramid_shards: expected=['footer_bytes', 'key', 'n_rgs', 'n_rows', "
+        "'period_end', 'period_start', 'pyramid', 'rg_row_counts', 'shard_dur', "
+        "'size_bytes', 'tier', 'written_at'] actual=['footer_bytes', 'key', 'n_rgs', "
+        "'n_rows', 'period_end', 'period_start', 'pyramid', 'rg_row_counts', "
+        "'shard_dur', 'size_bytes', 'stray', 'tier', 'written_at']",
+    ))
+
+
 def test_apply_schema_runs_every_statement_with_no_params():
     calls: list[tuple[str, list]] = []
 

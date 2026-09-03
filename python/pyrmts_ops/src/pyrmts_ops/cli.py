@@ -58,18 +58,36 @@ def d1_schema(skip_inventory: bool, shards_table: str, watermarks_table: str) ->
         print(f'{sql};')
 
 
+def _parse_extra_columns(specs: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+    """`TABLE:COL[,COL…]` specs → `{table: (col, …)}`, merging repeats of a
+    table. Registers app-owned columns a consumer added to a pyrmts table so
+    `verify` tolerates them without loosening the check."""
+    out: dict[str, tuple[str, ...]] = {}
+    for spec in specs:
+        table, sep, cols = spec.partition(':')
+        if not sep or not table or not cols:
+            raise SystemExit(f'd1 verify: expected TABLE:COL[,COL…], got {spec!r}')
+        parsed = tuple(c.strip() for c in cols.split(',') if c.strip())
+        if not parsed:
+            raise SystemExit(f'd1 verify: no columns in {spec!r}')
+        out[table] = out.get(table, ()) + parsed
+    return out
+
+
 @d1.command('verify')
 @option('-d', '--database-id', help="D1 database id (default `$D1_DATABASE_ID`)")
 @option('-i', '--skip-inventory', is_flag=True, help="Expect only the watermarks table")
 @option('-j', '--json', 'as_json', is_flag=True, help="Emit the diff as JSON on stdout")
 @option('-s', '--shards-table', default='pyramid_shards', help="Shards table name (default `pyramid_shards`)")
 @option('-w', '--watermarks-table', default='pyramid_watermarks', help="Watermarks table name (default `pyramid_watermarks`)")
+@option('-x', '--extra-column', 'extra_columns', multiple=True, help="`TABLE:COL[,COL…]`: app-owned columns to tolerate on a pyrmts table (repeatable). A live column that is neither expected nor registered still reads as drift.")
 def d1_verify(
     database_id: str | None,
     skip_inventory: bool,
     as_json: bool,
     shards_table: str,
     watermarks_table: str,
+    extra_columns: tuple[str, ...],
 ) -> None:
     """Diff a live D1 database against the expected schema (read-only).
 
@@ -78,6 +96,8 @@ def d1_verify(
     kwargs = _tables(skip_inventory, shards_table, watermarks_table)
     if database_id is not None:
         kwargs['database_id'] = database_id
+    if extra_columns:
+        kwargs['extra_columns'] = _parse_extra_columns(extra_columns)
     diff = verify_schema(**kwargs)
     if as_json:
         print(json_mod.dumps({

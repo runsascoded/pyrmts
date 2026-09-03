@@ -215,6 +215,7 @@ def verify_schema(
     watermarks_table: str = WATERMARKS_TABLE,
     shards_table: str = SHARDS_TABLE,
     skip_inventory: bool = False,
+    extra_columns: dict[str, tuple[str, ...]] | None = None,
     query=None,
     **kwargs,
 ) -> SchemaDiff:
@@ -224,9 +225,15 @@ def verify_schema(
     `PRAGMA index_info` for columns — all three are supported by D1's query
     API (`PRAGMA page_count` and `dbstat` are not, and aren't needed).
 
+    `extra_columns` maps a table name to app-owned columns the consumer has
+    added to it (e.g. stats/footer caches on `pyramid_shards`); they are
+    tolerated without loosening the check — a live column neither expected
+    nor registered still reads as drift. Peer of the TS `extraColumns` opt.
+
     `query` overrides the query callable (defaults to `d1_query`); remaining
     kwargs (`database_id`, `account_id`, `api_token`) pass through."""
     q = query if query is not None else d1_query
+    extra_columns = extra_columns or {}
     expected = schema_objects(
         watermarks_table=watermarks_table,
         shards_table=shards_table,
@@ -250,10 +257,13 @@ def verify_schema(
         actual = tuple(r['name'] for r in info)
         if o.kind == 'table':
             # Column order is not load-bearing for a table (SELECTs name
-            # their columns); an index's order is.
-            if set(actual) != set(o.columns):
+            # their columns); an index's order is. Registered `extra_columns`
+            # widen the accepted set but keep the check strict — an
+            # unregistered stray column still reads as drift.
+            expected_cols = set(o.columns) | set(extra_columns.get(o.name, ()))
+            if set(actual) != expected_cols:
                 mismatched.append(
-                    f'{o.name}: expected={sorted(o.columns)} actual={sorted(actual)}'
+                    f'{o.name}: expected={sorted(expected_cols)} actual={sorted(actual)}'
                 )
         elif actual != o.columns:
             mismatched.append(f'{o.name}: expected={list(o.columns)} actual={list(actual)}')

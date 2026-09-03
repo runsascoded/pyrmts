@@ -271,4 +271,29 @@ describe('D1ShardIndex.verifySchema on real SQLite', () => {
       ok: true, missing: [], mismatched: [],
     })
   })
+
+  test('registered extraColumns pass; an unregistered stray column still drifts', async () => {
+    // A consumer (awair) extends `pyramid_shards` with stats/footer caches.
+    for (const stmt of D1ShardIndex.schemaSql()) db.exec(stmt)
+    for (const col of ['n_rows', 'n_rgs', 'size_bytes', 'footer_bytes']) {
+      db.exec(`ALTER TABLE "pyramid_shards" ADD COLUMN ${col} INTEGER`)
+    }
+    const registered = { pyramid_shards: ['n_rows', 'n_rgs', 'size_bytes', 'footer_bytes'] }
+    // Registered → clean.
+    expect(await D1ShardIndex.verifySchema(d1, { extraColumns: registered })).toEqual({
+      ok: true, missing: [], mismatched: [],
+    })
+    // Unregistered → still flagged (the whole point of registering vs. a
+    // blanket subset check).
+    expect(await D1ShardIndex.verifySchema(d1)).toEqual({
+      ok: false,
+      missing: [],
+      mismatched: ['pyramid_shards: expected=["key","period_end","period_start","pyramid","shard_dur","tier","written_at"] actual=["footer_bytes","key","n_rgs","n_rows","period_end","period_start","pyramid","shard_dur","size_bytes","tier","written_at"]'],
+    })
+    // A typo'd/unaccounted column is caught even with the others registered.
+    db.exec('ALTER TABLE "pyramid_shards" ADD COLUMN stray INTEGER')
+    expect((await D1ShardIndex.verifySchema(d1, { extraColumns: registered })).mismatched).toEqual([
+      'pyramid_shards: expected=["footer_bytes","key","n_rgs","n_rows","period_end","period_start","pyramid","shard_dur","size_bytes","tier","written_at"] actual=["footer_bytes","key","n_rgs","n_rows","period_end","period_start","pyramid","shard_dur","size_bytes","stray","tier","written_at"]',
+    ])
+  })
 })

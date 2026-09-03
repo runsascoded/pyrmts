@@ -33,6 +33,13 @@ export interface D1ShardIndexOptions {
   // Injectable clock (epoch ms) for `updated_at` / `written_at`.
   // Default `Date.now`.
   now?: () => number
+  // App-owned columns a consumer has added to one of pyrmts's tables
+  // (keyed by resolved table name — e.g. `pyramid_shards`), tolerated by
+  // `verifySchema` without loosening the check: a live column that is
+  // neither expected nor registered here still reads as drift. Lets a
+  // consumer extend the inventory table (stats/footer caches) while keeping
+  // a strict gate. Only consulted by `verifySchema`.
+  extraColumns?: Record<string, string[]>
 }
 
 // One object `D1ShardIndex` expects to exist, with the columns that make it
@@ -279,9 +286,11 @@ export class D1ShardIndex implements ShardIndex {
       const actual = info.results.map(r => r.name)
       if (o.kind === 'table') {
         // Column order is not load-bearing for a table (SELECTs name their
-        // columns); an index's order is.
+        // columns); an index's order is. Registered `extraColumns` widen the
+        // accepted set but keep the check strict — an unregistered stray
+        // column still lands in `mismatched`.
         const a = [...actual].sort()
-        const e = [...o.columns].sort()
+        const e = [...o.columns, ...(opts.extraColumns?.[o.name] ?? [])].sort()
         if (a.length !== e.length || a.some((c, k) => c !== e[k])) {
           mismatched.push(`${o.name}: expected=${JSON.stringify(e)} actual=${JSON.stringify(a)}`)
         }

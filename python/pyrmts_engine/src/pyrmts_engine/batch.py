@@ -239,6 +239,45 @@ def build_command(
     return cmd
 
 
+MEM_BUDGET_FRACTION = 0.7
+
+
+def with_default_mem_budget(
+    command: list[str],
+    memory_mib: int,
+    fraction: float = MEM_BUDGET_FRACTION,
+) -> list[str]:
+    """`build` command with `-b <fraction × memory_mib>m` added when the
+    caller gave no explicit `-b`.
+
+    The submitter knows the job's memory (`-M`, or the job definition's
+    MEMORY requirement); the engine's in-container detection reads the
+    cgroup files, which on Fargate can report the HOST's memory (the task
+    limit lives on an ancestor cgroup / only in ECS metadata) — the
+    default budget then exceeds the container and the OOM-killer, not the
+    engine's admission control, ends the build. Passing the budget from
+    here is deterministic; the detection stays as the non-Batch fallback.
+    """
+    if not command or command[0] != 'build' or '-b' in command:
+        return command
+    budget = ['-b', f'{int(memory_mib * fraction)}m']
+    # `build_command` puts the config positional last.
+    return command[:-1] + budget + command[-1:] if len(command) > 1 else command + budget
+
+
+def job_definition_memory_mib(batch, job_definition: str) -> int | None:
+    """MEMORY resource requirement (MiB) of the latest ACTIVE revision of
+    `job_definition`; None when it has no such requirement."""
+    defs = batch.describe_job_definitions(jobDefinitionName=job_definition, status='ACTIVE')['jobDefinitions']
+    if not defs:
+        return None
+    latest = max(defs, key=lambda d: d['revision'])
+    for rr in latest.get('containerProperties', {}).get('resourceRequirements', []):
+        if rr.get('type') == 'MEMORY':
+            return int(rr['value'])
+    return None
+
+
 def submit_overrides(
     command: list[str],
     *,
@@ -472,6 +511,11 @@ def submit(
     container's exit code (also non-zero on FAILED without one)."""
     c = clients if clients is not None else _clients()
     names = resource_names(prefix)
+    if command[:1] == ['build'] and '-b' not in command:
+        mib = memory_mib if memory_mib is not None else job_definition_memory_mib(c['batch'], names.job_definition)
+        if mib is not None:
+            command = with_default_mem_budget(command, mib)
+            err(f'mem_budget: -b {command[command.index("-b") + 1]} ({MEM_BUDGET_FRACTION:.0%} of {mib} MiB)')
     job = c['batch'].submit_job(
         jobName=job_name,
         jobQueue=queue if queue is not None else names.queue(on_demand),

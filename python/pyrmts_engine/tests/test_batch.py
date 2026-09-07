@@ -14,11 +14,13 @@ from pyrmts_engine.batch import (
     bootstrap,
     build_command,
     compute_environment_spec,
+    job_definition_memory_mib,
     job_definition_spec,
     push_commands,
     resource_names,
     submit,
     submit_overrides,
+    with_default_mem_budget,
 )
 
 from conftest import FROM, TO, make_pyramid, write_base_shards
@@ -372,6 +374,14 @@ class FakeBatchClients:
         self.calls.append(('register_job_definition', kwargs))
         return {}
 
+    def describe_job_definitions(self, jobDefinitionName: str, status: str) -> dict:
+        self.calls.append(('describe_job_definitions', {'jobDefinitionName': jobDefinitionName, 'status': status}))
+        rr = [{'type': 'VCPU', 'value': '8'}, {'type': 'MEMORY', 'value': '32768'}]
+        return {'jobDefinitions': [
+            {'revision': 3, 'containerProperties': {'resourceRequirements': [{'type': 'VCPU', 'value': '16'}, {'type': 'MEMORY', 'value': '65536'}]}},
+            {'revision': 12, 'containerProperties': {'resourceRequirements': rr}},
+        ]}
+
     def submit_job(self, **kwargs) -> dict:
         self.calls.append(('submit_job', kwargs))
         return {'jobId': 'job-1'}
@@ -437,6 +447,43 @@ def test_bootstrap_prefix_reaches_every_resource():
         '/awair-pyrmts/batch',
         'arn:aws:iam::123:role/awair-pyrmts-batch-execution',
     ]
+
+
+def test_with_default_mem_budget():
+    cmd = ['build', '-n', 'p', '-r', 'a/b', 's3://b/c.yaml']
+    assert with_default_mem_budget(cmd, 32768) == ['build', '-n', 'p', '-r', 'a/b', '-b', '22937m', 's3://b/c.yaml']
+    # Explicit `-b` passes through unchanged; non-`build` commands are left alone.
+    explicit = ['build', '-b', '24g', 's3://b/c.yaml']
+    assert with_default_mem_budget(explicit, 32768) == explicit
+    assert with_default_mem_budget(['validate', 'x'], 32768) == ['validate', 'x']
+
+
+def test_job_definition_memory_mib_reads_the_latest_revision():
+    fake = FakeBatchClients()
+    assert job_definition_memory_mib(fake, 'pyrmts-engine') == 32768
+    assert fake.calls == [('describe_job_definitions', {'jobDefinitionName': 'pyrmts-engine', 'status': 'ACTIVE'})]
+
+
+def test_submit_defaults_mem_budget_from_job_memory():
+    # Fargate misreports the cgroup limit (ctbk 2026-09-07: 46 GB budget in
+    # a 32 GiB task → exit 137), so the submitter pins `-b` from the memory
+    # it knows: `-M` when given, else the job definition's MEMORY.
+    cmd = ['build', '-n', 'p', '-r', 'a/b', 's3://b/c.yaml']
+    fake = FakeBatchClients()
+    submit(command=cmd, job_name='j', clients=fake.as_clients())
+    sent = [kw for name, kw in fake.calls if name == 'submit_job'][0]
+    assert sent['containerOverrides']['command'] == ['build', '-n', 'p', '-r', 'a/b', '-b', '22937m', 's3://b/c.yaml']
+
+    fake = FakeBatchClients()
+    submit(command=cmd, job_name='j', memory_mib=49152, clients=fake.as_clients())
+    sent = [kw for name, kw in fake.calls if name == 'submit_job'][0]
+    assert sent['containerOverrides']['command'] == ['build', '-n', 'p', '-r', 'a/b', '-b', '34406m', 's3://b/c.yaml']
+    assert [name for name, _ in fake.calls] == ['submit_job']  # no job-def lookup when -M is given
+
+    fake = FakeBatchClients()
+    submit(command=['build', '-b', '0', 's3://b/c.yaml'], job_name='j', clients=fake.as_clients())
+    sent = [kw for name, kw in fake.calls if name == 'submit_job'][0]
+    assert sent['containerOverrides']['command'] == ['build', '-b', '0', 's3://b/c.yaml']
 
 
 def test_submit_targets_the_prefixed_job_definition_and_queue():

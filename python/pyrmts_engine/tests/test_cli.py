@@ -102,7 +102,7 @@ def test_build_with_source_factory(tmp_path: Path):
     # Startup banner (finding 9) on stderr, before any read: resolved
     # workers/K/budget + window/range/spill. Machine-dependent fields are
     # normalized, shape asserted exactly.
-    banner = re.sub(r'workers=\d+, max_inflight=\d+, mem_budget=[\d.]+GB', 'workers=<j>, max_inflight=<K>, mem_budget=<b>', result.stderr.split('\n')[0])
+    banner = re.sub(r'workers=\d+, max_inflight=\d+, mem_budget=[\d.]+GB \([^)]+\)', 'workers=<j>, max_inflight=<K>, mem_budget=<b>', result.stderr.split('\n')[0])
     banner = re.sub(r'spill=\S+', 'spill=<dir>', banner)
     assert banner == (
         'build_local: 6 windows × 1d over 2026-01-02T00:00/2026-01-08T00:00, '

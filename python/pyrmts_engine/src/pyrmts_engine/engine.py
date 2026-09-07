@@ -215,28 +215,91 @@ def _rss_bytes() -> int | None:
         return None
 
 
-def _detect_mem_bytes() -> int | None:
-    """Effective memory limit: cgroup v2 `memory.max`, then cgroup v1
-    `memory.limit_in_bytes` (Batch/Fargate set these on the container),
-    then host MemTotal. None when nothing is readable (non-Linux)."""
-    for path in (
-        '/sys/fs/cgroup/memory.max',
-        '/sys/fs/cgroup/memory/memory.limit_in_bytes',
-    ):
-        try:
-            v = Path(path).read_text().strip()
-        except OSError:
-            continue
-        if v.isdigit() and int(v) < 1 << 60:  # v1 reports ~2^63 for "no limit"
-            return int(v)
+def _read_limit(path: Path) -> int | None:
+    """A cgroup memory limit file's value, or None when absent / unlimited
+    (`max`, or v1's ~2^63 sentinel)."""
     try:
-        with open('/proc/meminfo') as f:
-            for line in f:
-                if line.startswith('MemTotal:'):
-                    return int(line.split()[1]) * 1024
+        v = path.read_text().strip()
+    except OSError:
+        return None
+    return int(v) if v.isdigit() and int(v) < 1 << 60 else None
+
+
+def _ecs_task_metadata() -> dict | None:
+    """`GET $ECS_CONTAINER_METADATA_URI_V4/task` (Fargate / ECS only; the
+    env var is absent everywhere else). None on any failure."""
+    uri = os.environ.get('ECS_CONTAINER_METADATA_URI_V4')
+    if not uri:
+        return None
+    import json
+    from urllib.request import urlopen
+    try:
+        with urlopen(f'{uri}/task', timeout=2) as resp:
+            return json.load(resp)
+    except Exception:
+        return None
+
+
+def _detect_mem_limit(
+    *,
+    sysfs: str = '/sys/fs/cgroup',
+    proc: str = '/proc',
+    ecs_task: dict | None = None,
+) -> tuple[int, str] | None:
+    """`(bytes, source)`: the tightest memory limit visible to this
+    process, or None when nothing is readable (non-Linux).
+
+    Candidates, smallest wins:
+    - cgroup v2 `memory.max` at this process's own cgroup (from
+      `/proc/self/cgroup`) and every ancestor up to the mount root — on
+      Fargate the container's own cgroup says `max` while the task-level
+      limit sits on an ancestor, so the root file alone reads as unlimited;
+    - cgroup v1 `memory/memory.limit_in_bytes` (root);
+    - ECS task metadata `Limits.Memory` (MiB) — authoritative on Fargate
+      even when no cgroup file exposes the task limit.
+    Fallback: host `MemTotal`, tagged `meminfo` so a fallthrough is visible
+    in the build banner rather than 30 minutes later as an OOM kill.
+    """
+    root = Path(sysfs)
+    candidates: list[tuple[int, str]] = []
+    rel_paths: list[str] = []
+    try:
+        for line in Path(proc, 'self', 'cgroup').read_text().splitlines():
+            # v2: `0::/path`; v1: `N:memory:/path` (only the memory controller matters).
+            parts = line.split(':', 2)
+            if len(parts) == 3 and (parts[1] == '' or 'memory' in parts[1].split(',')):
+                rel_paths.append(parts[2])
+    except OSError:
+        pass
+    for rel in rel_paths:
+        parts = [p for p in rel.split('/') if p]
+        for depth in range(len(parts), -1, -1):
+            sub = '/'.join(parts[:depth])
+            v = _read_limit(root / sub / 'memory.max') if sub else _read_limit(root / 'memory.max')
+            if v is not None:
+                candidates.append((v, f'cgroup:/{sub}'))
+    if (v := _read_limit(root / 'memory.max')) is not None:
+        candidates.append((v, 'cgroup:/'))
+    if (v := _read_limit(root / 'memory' / 'memory.limit_in_bytes')) is not None:
+        candidates.append((v, 'cgroup-v1:/'))
+    mib = ((ecs_task or {}).get('Limits') or {}).get('Memory')
+    if isinstance(mib, (int, float)) and mib > 0:
+        candidates.append((int(mib) << 20, 'ecs-metadata'))
+    if candidates:
+        return min(candidates, key=lambda c: c[0])
+    try:
+        for line in Path(proc, 'meminfo').read_text().splitlines():
+            if line.startswith('MemTotal:'):
+                return int(line.split()[1]) * 1024, 'meminfo'
     except OSError:
         pass
     return None
+
+
+def _detect_mem_bytes() -> int | None:
+    """Effective memory limit in bytes (see `_detect_mem_limit`)."""
+    lim = _detect_mem_limit(ecs_task=_ecs_task_metadata())
+    return lim[0] if lim else None
 
 
 def _warmup_arrow() -> None:
@@ -717,8 +780,11 @@ def build_local(
     n_workers = workers or os.cpu_count() or 4
     inflight_cap = max_inflight or 2 * n_workers
     if mem_budget is None:
-        detected = _detect_mem_bytes()
-        mem_budget = int(detected * 0.7) if detected is not None else 0
+        detected = _detect_mem_limit(ecs_task=_ecs_task_metadata())
+        mem_budget = int(detected[0] * 0.7) if detected is not None else 0
+        mem_src = detected[1] if detected is not None else 'undetected'
+    else:
+        mem_src = 'explicit'
     completed = [False] * n
     rows_of = [0] * n
     watermark = 0
@@ -738,7 +804,7 @@ def build_local(
         + (f", {result.present_shards} present" if result.present_shards else '')
         + (f", {result.unfillable} unfillable" if result.unfillable else '')
         + f"), workers={n_workers}, max_inflight={inflight_cap}, "
-        f"mem_budget={mem_budget / 1e9:.1f}GB"
+        f"mem_budget={mem_budget / 1e9:.1f}GB ({mem_src})"
         + (
             '' if src_rung is None
             else f", source tier={src_rung[0]} (min-cover)" if src_rung[1] is None

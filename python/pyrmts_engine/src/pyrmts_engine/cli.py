@@ -285,7 +285,7 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 
 
 @batch.command('submit')
-@option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the container's cgroup limit; 0 disables)")
+@option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the job's memory — `-M`, else the job definition's; 0 disables)")
 @option('-C', '--close-workers', type=int, help="build -C: concurrent close computations")
 @option('-c', '--close-chunk', help="build -c: target combined-long bytes per close chunk, e.g. 1g")
 @option('-d', '--source-shard', help="Pin the WideShardSource to one rung shard Duration (default: min-cover across the tier's rungs)")

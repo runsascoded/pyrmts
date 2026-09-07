@@ -429,9 +429,17 @@ def build_local(
             the source can't cover — needing data past its coverage end,
             or on a tier finer than the source rung's — are reported and
             skipped (`unfillable`), not an error; likewise absent tiles
-            of the source rung itself (raw-ingest territory). Mid-range
-            source holes are NOT clamped away: their windows are walked
-            and the `max_missing_source` guard still applies.
+            of the source rung itself (raw-ingest territory). A tiled
+            (raw-ingest) source is asked `present_keys` for every tile
+            the fill would read, BEFORE the walk: missing shards over an
+            absent OPEN tile (`period.end > to`) are deferred
+            (`BuildResult.deferred`, not an error — the next fill builds
+            them); missing shards over an absent CLOSED tile are held,
+            and past `max_missing_source` (over the tiles the fill would
+            read) the fill raises `SourceCoverageError` with NOTHING
+            written — the guard fires before the outputs, not after.
+            Within tolerance, closed holes build through as empty and
+            the post-walk ratio reports them as before.
         resume: skip shards already recorded in `shard_index` (which must
             expose `existing_keys()` — the JSONL manifest impls do), and
             skip source windows that only feed skipped shards. Shards are
@@ -461,9 +469,11 @@ def build_local(
             exactly what it couldn't have expected.
         strict_open_periods: disable the open-period exclusion above —
             every absent shard counts toward the ratio, restoring the
-            pre-classification behavior. For builds that should only
-            ever run over closed history (e.g. a backfill whose range
-            deliberately stops at the last closed period).
+            pre-classification behavior (and in fill mode an absent open
+            tile is held like a closed one: fail fast, nothing written).
+            For builds that should only ever run over closed history
+            (e.g. a backfill whose range deliberately stops at the last
+            closed period).
         verbose: per-flush progress lines on stderr.
     """
     t0 = time.time()
@@ -547,32 +557,65 @@ def build_local(
                 if e.tier in sub_source or e.effective_end > coverage_end
             }
         deferred: dict[str, Tile] = {}
+        held: dict[str, Tile] = {}
+        held_tiles: dict[str, Tile] = {}
+        tiles_read: dict[str, Tile] = {}
         tiles_for = getattr(source, 'tiles_for', None)
-        if rung is None and tiles_for is not None and not strict_open_periods:
-            # Tiled (raw-ingest) source: a tile whose period extends past
-            # `to` is OPEN — still happening — so its object may legitimately
-            # not exist yet. A missing shard overlapping an absent open tile
-            # is deferred, not built: building it now would write 0 rows
-            # (or a partial shard, when it straddles the last real tile)
-            # that every later fill then reads as "built" (ctbk 2026-09-07:
-            # 28 empty smg-v1 trailing shards, 3 in avail-v6's live tip).
-            # Absent CLOSED tiles stay real holes: their shards build and
-            # the `max_missing_source` guard below reports them.
-            open_tiles = [t for t in tiles_for(from_, to) if t.period.end > to]
-            if open_tiles:
-                present = set(pyramid.storage.list(commonprefix([t.key for t in open_tiles])))
-                absent_open = [t for t in open_tiles if t.key not in present]
-                for e in missing:
-                    if e.key in unfillable:
-                        continue
-                    for t in absent_open:
-                        if e.effective_start < t.period.end and e.effective_end > t.period.start:
-                            deferred[e.key] = t
+        if rung is None and tiles_for is not None:
+            # Tiled (raw-ingest) source: check every tile the fill would
+            # read BEFORE the walk (one `present_keys` call — a LIST, not
+            # fetches). Building a missing shard over an absent tile writes
+            # 0 rows (or a partial shard, when it straddles the last real
+            # tile) that every later fill then reads as "built" (ctbk
+            # 2026-09-07: 28 empty smg-v1 trailing shards, 3 in avail-v6's
+            # live tip, 12 per rides-v5 anchor), so no such shard is built:
+            # - a tile whose period extends past `to` is OPEN (still
+            #   happening) and may legitimately not exist yet — its shards
+            #   are DEFERRED, not an error; a later fill builds them.
+            # - an absent CLOSED tile is a real hole (late upstream, GC'd
+            #   tile, wrong prefix). Its shards are HELD and, past the
+            #   `max_missing_source` tolerance, the fill fails fast with
+            #   nothing written — the same guard that used to fire after
+            #   the outputs had already landed.
+            # `strict_open_periods` treats open tiles as closed.
+            tiles: list[Tile] = tiles_for(from_, to)
+            present_keys = getattr(source, 'present_keys', None)
+            if present_keys is not None:
+                present = present_keys(tiles)
+            else:
+                present = set(pyramid.storage.list(commonprefix([t.key for t in tiles])))
+            absent = [t for t in tiles if t.key not in present]
+            if strict_open_periods:
+                absent_open, absent_closed = [], absent
+            else:
+                absent_open = [t for t in absent if t.period.end > to]
+                absent_closed = [t for t in absent if t.period.end <= to]
+
+            def overlaps(e: ExpectedShard, t: Tile) -> bool:
+                return e.effective_start < t.period.end and e.effective_end > t.period.start
+
+            for e in missing:
+                if e.key in unfillable:
+                    continue
+                for t in absent_open:
+                    if overlaps(e, t):
+                        deferred[e.key] = t
+                        break
+            unfillable |= set(deferred)
+            result.deferred = len(deferred)
+            candidates = [e for e in missing if e.key not in unfillable]
+            for t in tiles:
+                if any(overlaps(e, t) for e in candidates):
+                    tiles_read[t.key] = t
+            held_tiles = {t.key: t for t in absent_closed if t.key in tiles_read}
+            if len(held_tiles) > max_missing_source * len(tiles_read):
+                for e in candidates:
+                    for t in held_tiles.values():
+                        if overlaps(e, t):
+                            held[e.key] = t
                             break
-                unfillable |= set(deferred)
-                result.deferred = len(deferred)
         result.unfillable = len(unfillable - set(deferred)) + len(missing_src)
-        fillable = [e for e in missing if e.key not in unfillable]
+        fillable = [e for e in missing if e.key not in unfillable and e.key not in held]
         keep = {e.key for e in fillable}
         for name, q in pending.items():
             pending[name] = deque(e for e in q if e.key in keep)
@@ -583,19 +626,35 @@ def build_local(
             sample = ', '.join(hard[:5]) + (', …' if len(hard) > 5 else '')
             err(f"fill: {len(hard)} unfillable (source coverage ends "
                 f"{coverage_end:%Y-%m-%dT%H:%M}): {sample}")
-        if deferred:
+
+        def report_by_tile(shards: dict[str, Tile], label: str) -> None:
             by_tile: dict[str, list[str]] = {}
-            for k, t in deferred.items():
+            for k, t in shards.items():
                 by_tile.setdefault(t.key, []).append(k)
             for tkey, ks in sorted(by_tile.items()):
-                t = deferred[ks[0]]
+                t = shards[ks[0]]
                 sample = ', '.join(sorted(ks)[:5]) + (', …' if len(ks) > 5 else '')
-                err(f"fill: {len(ks)} deferred (open-period source absent: {tkey} "
+                err(f"fill: {len(ks)} {label} source absent: {tkey} "
                     f"[{t.period.start.isoformat()}, {t.period.end.isoformat()})): {sample}")
+
+        if deferred:
+            report_by_tile(deferred, 'deferred (open-period')
         if missing_src:
             sample = ', '.join(e.key for e in missing_src[:5]) + (', …' if len(missing_src) > 5 else '')
             err(f"fill: {len(missing_src)} source-rung tiles absent (the rung the "
                 f"engine reads — raw-ingest fills those): {sample}")
+        if held:
+            report_by_tile(held, 'held (closed-period')
+            hs = sorted(held_tiles)
+            sample = ', '.join(hs[:5]) + (', …' if len(hs) > 5 else '')
+            raise SourceCoverageError(
+                f"build_local: {len(held_tiles)}/{len(tiles_read)} source tiles this fill "
+                f"would read are absent over CLOSED periods (> max_missing_source="
+                f"{max_missing_source}): {sample} — a real hole (late upstream, GC'd "
+                f"tile, wrong prefix), not an outage (outage tiles are present-but-EMPTY); "
+                f"NOTHING was written — cap the range before the hole, or raise "
+                f"max_missing_source / --max-missing if such holes are expected here"
+            )
         fill_spans = _merge_spans([(e.effective_start, e.effective_end) for e in fillable])
     elif resume:
         existing_keys = getattr(shard_index, 'existing_keys', None)

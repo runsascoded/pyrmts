@@ -132,7 +132,7 @@ def invalidate(fs_root: str | None, range_: str, config: str) -> None:
 @option('-d', '--source-shard', help="Pin the WideShardSource to one rung shard Duration (default: min-cover — read the tier as stored, largest present tile wins at each instant)")
 @option('-e', '--allow-empty', is_flag=True, help="Permit a 0-source-row (all-EMPTY) build; without it that exits nonzero (~always a mis-specified source rung)")
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
-@option('-f', '--fill', is_flag=True, help="Gap-fill: LIST the target prefix, build exactly the expected-but-missing shards (walking only their windows); missing shards the source can't cover are reported + skipped")
+@option('-f', '--fill', is_flag=True, help="Gap-fill: LIST the target prefix, build exactly the expected-but-missing shards (walking only their windows); missing shards the source can't cover are reported + skipped. Tiled sources are checked before the walk: shards over an absent open-period tile are deferred (exit 0), shards over an absent closed-period tile fail fast past -M with nothing written (exit 4)")
 @option('-g', '--rg-size', type=int, help="Output-shard parquet row-group size (all tiers; per-tier via the library)")
 @option('-j', '--workers', type=int, help="Window-worker threads (default: cpu count)")
 @option('-K', '--max-inflight', type=int, help="Max windows in flight past the watermark (memory bound; default 2×workers)")

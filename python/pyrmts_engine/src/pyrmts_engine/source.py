@@ -19,6 +19,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from os.path import commonprefix
 from typing import Protocol
 
 import polars as pl
@@ -121,6 +122,20 @@ class TiledSource:
 
     def fetch(self, key: str) -> bytes | None:
         return self.pyramid.storage.get(key)
+
+    def present_keys(self, tiles: list[Tile]) -> set[str]:
+        """Keys of `tiles` that exist, without fetching them. The engine's
+        fill mode asks this BEFORE the window walk, so a missing shard over
+        an absent tile is deferred (open period) or held (closed period —
+        the fill fails fast) instead of being built empty. Default: one
+        LIST of the pyramid's storage under the tiles' common prefix —
+        override when tiles live elsewhere (`fetch` reads another store)
+        or presence is already known (a published-periods set)."""
+        keys = [t.key for t in tiles]
+        if not keys:
+            return set()
+        listed = set(self.pyramid.storage.list(commonprefix(keys)))
+        return {k for k in keys if k in listed}
 
     # ---- chassis ----
 

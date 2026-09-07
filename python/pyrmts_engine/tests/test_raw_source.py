@@ -253,6 +253,14 @@ OPEN_DAY_LINE_PREFIX = (
     'fill: {n} deferred (open-period source absent: raw/2026-01-08.json '
     '[2026-01-08T00:00:00+00:00, 2026-01-09T00:00:00+00:00)): '
 )
+# Absent CLOSED tile in fill mode: raised before the walk (see below).
+CLOSED_HOLE_ERROR = (
+    'build_local: {k}/{n} source tiles this fill would read are absent over CLOSED '
+    'periods (> max_missing_source=0.0): {keys} — a real hole (late upstream, GC\'d '
+    'tile, wrong prefix), not an outage (outage tiles are present-but-EMPTY); '
+    'NOTHING was written — cap the range before the hole, or raise '
+    'max_missing_source / --max-missing if such holes are expected here'
+)
 
 
 def _split_by_open_day(pyramid) -> tuple[list[str], list[str]]:
@@ -296,14 +304,91 @@ def test_fill_defers_shards_over_absent_open_tile(capsys):
     assert sorted(r.key for r in index.records) == closed + deferred
 
 
-def test_fill_strict_open_periods_builds_over_absent_open_tile():
-    """`strict_open_periods=True` keeps the old behaviour: the trailing
-    shards build (empty over the absent day) and the coverage guard fires."""
+def test_fill_strict_open_periods_holds_absent_open_tile(capsys):
+    """`strict_open_periods=True`: the open day counts as closed, so its
+    absence is a real hole — the fill fails fast and writes nothing (not
+    even the 11 shards it could have built)."""
     pyramid, src = _raw_pyramid()
-    with pytest.raises(SourceCoverageError):
+    closed, deferred = _split_by_open_day(pyramid)
+    with pytest.raises(SourceCoverageError) as exc:
         build_local(
             pyramid, (FROM, TO_OPEN_DAY), src,
             pyramid_name='test', fill=True, window='3h', strict_open_periods=True,
         )
-    closed, deferred = _split_by_open_day(pyramid)
-    assert sorted(pyramid.storage.list('pyr/')) == closed + deferred
+    assert sorted(pyramid.storage.list('pyr/')) == []
+    assert str(exc.value) == CLOSED_HOLE_ERROR.format(k=1, n=7, keys='raw/2026-01-08.json')
+    lines = capsys.readouterr().err.splitlines()
+    assert [l for l in lines if l.startswith('fill:')] == [
+        'fill: 13 expected shards, 0 present, 13 missing, 11 fillable',
+        'fill: 2 held (closed-period source absent: raw/2026-01-08.json '
+        '[2026-01-08T00:00:00+00:00, 2026-01-09T00:00:00+00:00)): ' + ', '.join(deferred),
+    ]
+
+
+# ---- fill mode + absent CLOSED tiles ----------------------------------------
+#
+# The other half of the same incident: an uncapped rides fill over an
+# unpublished (closed) month built 12 empty shards per anchor and THEN
+# tripped the coverage guard. A closed hole is still an error, but the
+# fill now fails before the walk, with nothing written.
+
+# Every expected shard of `(FROM, TO)` whose effective period overlaps the
+# absent 2026-01-04 day tile.
+HELD_OVER_DAY4 = [
+    'pyr/d/4d/2026-01-03.parquet',
+    'pyr/h/4d/2026-01-03.parquet',
+    'pyr/q/1d/2026-01-04.parquet',
+]
+
+
+def test_fill_fails_fast_over_absent_closed_tile(capsys):
+    pyramid, src = _raw_pyramid(skip_label='2026-01-04')
+    with pytest.raises(SourceCoverageError) as exc:
+        build_local(pyramid, (FROM, TO), src, pyramid_name='test', fill=True, window='3h')
+    assert sorted(pyramid.storage.list('pyr/')) == []
+    assert str(exc.value) == CLOSED_HOLE_ERROR.format(k=1, n=6, keys='raw/2026-01-04.json')
+    lines = capsys.readouterr().err.splitlines()
+    assert [l for l in lines if l.startswith('fill:')] == [
+        'fill: 11 expected shards, 0 present, 11 missing, 8 fillable',
+        'fill: 3 held (closed-period source absent: raw/2026-01-04.json '
+        '[2026-01-04T00:00:00+00:00, 2026-01-05T00:00:00+00:00)): ' + ', '.join(HELD_OVER_DAY4),
+    ]
+
+
+def test_fill_builds_through_tolerated_closed_hole():
+    """Within `max_missing_source`, a closed hole is the caller's declared
+    outage shape: the shards over it build (empty there) and the post-walk
+    ratio reports the miss without raising."""
+    pyramid, src = _raw_pyramid(skip_label='2026-01-04')
+    index = MemShardIndex()
+    result = build_local(
+        pyramid, (FROM, TO), src,
+        pyramid_name='test', shard_index=index, fill=True, window='3h', max_missing_source=0.2,
+    )
+    expected = sorted(e.key for e in list_expected_shards(pyramid, (FROM, TO)))
+    assert len(expected) == 11
+    assert sorted(w.key for w in result.written) == expected
+    assert sorted(r.key for r in index.records) == expected
+    assert (result.deferred, result.unfillable, result.missing_source, result.expected_absent) == (0, 0, 1, 0)
+    assert src.coverage() == (6, ['raw/2026-01-04.json'])
+    assert pq.read_table(io.BytesIO(pyramid.storage.get('pyr/q/1d/2026-01-04.parquet'))).num_rows == 0
+
+
+def test_fill_prefers_present_keys_over_storage_listing():
+    """A source whose tiles live outside the pyramid's storage (ctbk's
+    rides source reads S3, the pyramid writes R2) answers presence itself:
+    with every tile declared present, nothing is deferred or held, and the
+    absent day surfaces only through the post-walk ratio as before."""
+    pyramid, src = _raw_pyramid(skip_label='2026-01-04')
+    src.present_keys = lambda tiles: {t.key for t in tiles}
+    with pytest.raises(SourceCoverageError) as exc:
+        build_local(pyramid, (FROM, TO), src, pyramid_name='test', fill=True, window='3h')
+    assert str(exc.value) == (
+        "build_local: 1/6 source shards absent (> max_missing_source=0.0): "
+        "raw/2026-01-04.json — a real hole (GC'd rung, filter typo, wrong rung), "
+        "not an outage (outage shards are present-but-EMPTY); raise "
+        "max_missing_source / --max-missing if such holes are expected here "
+        "(outputs WERE written/registered)"
+    )
+    expected = sorted(e.key for e in list_expected_shards(pyramid, (FROM, TO)))
+    assert sorted(pyramid.storage.list('pyr/')) == expected

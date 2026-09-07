@@ -105,7 +105,7 @@ from pyrmts import (
 from .longform import long_to_wide, rebin_long
 from .plan import UNIT_MS, _divides, bin_floor_expr, compile_plan
 from .shard_index import NoopShardIndex, ShardIndex, ShardRecord, now_ms
-from .source import Source
+from .source import Source, Tile
 from .spill import SpillBuffer
 
 
@@ -142,6 +142,10 @@ class BuildResult:
     # missing shards the source can't cover (reported + skipped, not built).
     present_shards: int = 0
     unfillable: int = 0
+    # Fill mode, tiled sources: missing shards overlapping an ABSENT source
+    # tile whose period extends past `to` (open — still happening). Not
+    # built this run; a later fill picks them up once the tile exists.
+    deferred: int = 0
     source_rows: int = 0
     missing_source: int = 0
     # Absent source shards whose period extends past the range's `to` —
@@ -155,10 +159,11 @@ class BuildResult:
         resumed = f"{self.resumed_shards} manifested shards skipped, " if self.resumed_shards else ""
         present = f"{self.present_shards} present shards skipped, " if self.present_shards else ""
         unfillable = f"{self.unfillable} unfillable shards skipped, " if self.unfillable else ""
+        deferred = f"{self.deferred} shards deferred (open-period source absent), " if self.deferred else ""
         return (
             f"build_local: {self.windows} windows, {self.source_rows:,} source rows → "
             f"{len(self.written)} shards ({total_bytes:,} bytes), "
-            f"{self.skipped_rungs} source-provided rungs skipped, {resumed}{present}{unfillable}"
+            f"{self.skipped_rungs} source-provided rungs skipped, {resumed}{present}{unfillable}{deferred}"
             f"wall {self.wall_seconds:.1f}s"
         )
 
@@ -541,17 +546,52 @@ def build_local(
                 e.key for e in missing
                 if e.tier in sub_source or e.effective_end > coverage_end
             }
-        result.unfillable = len(unfillable) + len(missing_src)
+        deferred: dict[str, Tile] = {}
+        tiles_for = getattr(source, 'tiles_for', None)
+        if rung is None and tiles_for is not None and not strict_open_periods:
+            # Tiled (raw-ingest) source: a tile whose period extends past
+            # `to` is OPEN — still happening — so its object may legitimately
+            # not exist yet. A missing shard overlapping an absent open tile
+            # is deferred, not built: building it now would write 0 rows
+            # (or a partial shard, when it straddles the last real tile)
+            # that every later fill then reads as "built" (ctbk 2026-09-07:
+            # 28 empty smg-v1 trailing shards, 3 in avail-v6's live tip).
+            # Absent CLOSED tiles stay real holes: their shards build and
+            # the `max_missing_source` guard below reports them.
+            open_tiles = [t for t in tiles_for(from_, to) if t.period.end > to]
+            if open_tiles:
+                present = set(pyramid.storage.list(commonprefix([t.key for t in open_tiles])))
+                absent_open = [t for t in open_tiles if t.key not in present]
+                for e in missing:
+                    if e.key in unfillable:
+                        continue
+                    for t in absent_open:
+                        if e.effective_start < t.period.end and e.effective_end > t.period.start:
+                            deferred[e.key] = t
+                            break
+                unfillable |= set(deferred)
+                result.deferred = len(deferred)
+        result.unfillable = len(unfillable - set(deferred)) + len(missing_src)
         fillable = [e for e in missing if e.key not in unfillable]
         keep = {e.key for e in fillable}
         for name, q in pending.items():
             pending[name] = deque(e for e in q if e.key in keep)
         err(f"fill: {len(plan.outputs)} expected shards, {result.present_shards} "
             f"present, {len(missing)} missing, {len(fillable)} fillable")
-        if unfillable:
-            sample = ', '.join(sorted(unfillable)[:5]) + (', …' if len(unfillable) > 5 else '')
-            err(f"fill: {len(unfillable)} unfillable (source coverage ends "
+        if unfillable - set(deferred):
+            hard = sorted(unfillable - set(deferred))
+            sample = ', '.join(hard[:5]) + (', …' if len(hard) > 5 else '')
+            err(f"fill: {len(hard)} unfillable (source coverage ends "
                 f"{coverage_end:%Y-%m-%dT%H:%M}): {sample}")
+        if deferred:
+            by_tile: dict[str, list[str]] = {}
+            for k, t in deferred.items():
+                by_tile.setdefault(t.key, []).append(k)
+            for tkey, ks in sorted(by_tile.items()):
+                t = deferred[ks[0]]
+                sample = ', '.join(sorted(ks)[:5]) + (', …' if len(ks) > 5 else '')
+                err(f"fill: {len(ks)} deferred (open-period source absent: {tkey} "
+                    f"[{t.period.start.isoformat()}, {t.period.end.isoformat()})): {sample}")
         if missing_src:
             sample = ', '.join(e.key for e in missing_src[:5]) + (', …' if len(missing_src) > 5 else '')
             err(f"fill: {len(missing_src)} source-rung tiles absent (the rung the "

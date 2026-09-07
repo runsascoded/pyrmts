@@ -18,7 +18,7 @@ import polars as pl
 import pyarrow.parquet as pq
 import pytest
 
-from pyrmts import MemStorage, Pyramid, shard_periods_covering
+from pyrmts import MemStorage, Pyramid, list_expected_shards, shard_periods_covering
 from pyrmts_engine import (
     MemShardIndex,
     SourceCoverageError,
@@ -233,3 +233,77 @@ def test_empty_window_within_tile_is_not_a_miss():
         ('pyr/q/1d/2026-01-02.parquet', rows_per_1d),
         ('pyr/q/1d/2026-01-03.parquet', 0),
     ]
+
+
+# ---- fill mode + open-period tiles ----------------------------------------
+#
+# ctbk 2026-09-07: an uncapped `-f` fill on a tiled source (daily parquet)
+# reached `now`; the day-in-progress tile didn't exist yet, and the engine
+# built the trailing rungs over it as 0-row shards that every later fill
+# then read as "built" (28 on smg-v1, 3 inside avail-v6's live tip). The
+# open-period classification only forgave the absence after the fact. In
+# fill mode a missing shard overlapping an ABSENT OPEN tile is deferred —
+# not built — and a later fill builds it once the tile exists.
+
+# 12h into the (absent) [TO, TO+1d) day tile: two whole q@6h shards sit
+# inside the open day and are expected; the h@1d / d@4d shards over it
+# extend past `to` and aren't.
+TO_OPEN_DAY = TO + timedelta(hours=12)
+OPEN_DAY_LINE_PREFIX = (
+    'fill: {n} deferred (open-period source absent: raw/2026-01-08.json '
+    '[2026-01-08T00:00:00+00:00, 2026-01-09T00:00:00+00:00)): '
+)
+
+
+def _split_by_open_day(pyramid) -> tuple[list[str], list[str]]:
+    """(closed, deferred) expected keys for `(FROM, TO_OPEN_DAY)`: a shard
+    is deferred iff its effective period overlaps the absent open day."""
+    closed, deferred = [], []
+    for e in list_expected_shards(pyramid, (FROM, TO_OPEN_DAY)):
+        (deferred if e.effective_end > TO else closed).append(e.key)
+    return sorted(closed), sorted(deferred)
+
+
+def test_fill_defers_shards_over_absent_open_tile(capsys):
+    pyramid, src = _raw_pyramid()  # raw days [FROM, TO) present; 2026-01-08 never written
+    closed, deferred = _split_by_open_day(pyramid)
+    assert deferred == ['pyr/q/6h/2026-01-08T00.parquet', 'pyr/q/6h/2026-01-08T06.parquet']
+    assert len(closed) == 11
+    index = MemShardIndex()
+    result = build_local(
+        pyramid, (FROM, TO_OPEN_DAY), src,
+        pyramid_name='test', shard_index=index, fill=True, window='3h',
+    )
+    assert sorted(w.key for w in result.written) == closed
+    assert sorted(r.key for r in index.records) == closed
+    assert (result.deferred, result.unfillable, result.missing_source, result.expected_absent) == (2, 0, 0, 0)
+    assert sorted(pyramid.storage.list('pyr/')) == closed
+    lines = capsys.readouterr().err.splitlines()
+    assert [l for l in lines if l.startswith('fill:')] == [
+        'fill: 13 expected shards, 0 present, 13 missing, 11 fillable',
+        OPEN_DAY_LINE_PREFIX.format(n=2) + ', '.join(deferred),
+    ]
+
+    # The day closes and its tile lands: the next fill builds exactly the
+    # deferred shards (everything else is present) and defers nothing.
+    _write_raw_days(pyramid.storage, start=TO, to=TO + timedelta(days=1))
+    result2 = build_local(
+        pyramid, (FROM, TO_OPEN_DAY), src,
+        pyramid_name='test', shard_index=index, fill=True, window='3h',
+    )
+    assert sorted(w.key for w in result2.written) == deferred
+    assert (result2.deferred, result2.present_shards) == (0, 11)
+    assert sorted(r.key for r in index.records) == closed + deferred
+
+
+def test_fill_strict_open_periods_builds_over_absent_open_tile():
+    """`strict_open_periods=True` keeps the old behaviour: the trailing
+    shards build (empty over the absent day) and the coverage guard fires."""
+    pyramid, src = _raw_pyramid()
+    with pytest.raises(SourceCoverageError):
+        build_local(
+            pyramid, (FROM, TO_OPEN_DAY), src,
+            pyramid_name='test', fill=True, window='3h', strict_open_periods=True,
+        )
+    closed, deferred = _split_by_open_day(pyramid)
+    assert sorted(pyramid.storage.list('pyr/')) == closed + deferred

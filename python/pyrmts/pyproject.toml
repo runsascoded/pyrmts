@@ -9,8 +9,11 @@ authors = [{ name = "Ryan Williams", email = "ryan@runsascoded.com" }]
 dependencies = [
     # PINNED, not floored (see the polars note in pyrmts_engine): the Batch
     # image installs unpinned, so an unfloored spec drifts prod ahead of the
-    # local lock. Bump deliberately + re-validate the image, never by accident.
-    "pyarrow==25.0.1",
+    # local lock. 22.0.0 matches ctbk's own byte-reproducible-parquet pin —
+    # pyrmts + a consumer share one env, so one pyarrow across both avoids a
+    # resolver conflict; the engine runs fine on 22 (tested on polars 1.44.1).
+    # Bump deliberately + re-validate the image, never by accident.
+    "pyarrow==22.0.0",
     "pyyaml>=6",
 ]
 

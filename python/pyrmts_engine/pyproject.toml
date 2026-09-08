@@ -8,7 +8,13 @@ license = { text = "MIT" }
 authors = [{ name = "Ryan Williams", email = "ryan@runsascoded.com" }]
 dependencies = [
     "pyrmts",
-    "polars>=1.0",
+    # PINNED, not floored: the Batch image installs this unpinned, so an
+    # unfloored spec let each rebuild resolve whatever polars was newest —
+    # local tests then ran a different polars than prod. That drift shipped
+    # a crash (ctbk smg-v1 2026-09-08: `unpivot(value_name=…)` naming an
+    # `on` column, tolerated by 1.41, `DuplicateError` on 1.44). Bump this
+    # deliberately and re-validate the image, never incidentally.
+    "polars==1.44.1",
     "click>=8",
 ]
 

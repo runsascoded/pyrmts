@@ -7,7 +7,10 @@ readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Ryan Williams", email = "ryan@runsascoded.com" }]
 dependencies = [
-    "pyarrow>=18",
+    # PINNED, not floored (see the polars note in pyrmts_engine): the Batch
+    # image installs unpinned, so an unfloored spec drifts prod ahead of the
+    # local lock. Bump deliberately + re-validate the image, never by accident.
+    "pyarrow==25.0.1",
     "pyyaml>=6",
 ]
 

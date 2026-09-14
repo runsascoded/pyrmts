@@ -1,4 +1,4 @@
-import type { Axis, Dim, GeoSpec, Metric, Pyramid, StorageBackend, Tier } from './types.js';
+import type { Axis, Dim, GeoSpec, IdentityRollup, Metric, Pyramid, StorageBackend, Tier } from './types.js';
 export interface PyramidConfig {
     storage: {
         type: string;
@@ -11,6 +11,7 @@ export interface PyramidConfig {
     metrics: Metric[];
     tiers: Tier[];
     geo?: GeoSpec;
+    identityRollup?: IdentityRollup;
 }
 export declare function parsePyramidYaml(text: string): PyramidConfig;
 export declare function validateShardPlaceholder(keyTemplate: string, tiers: Tier[]): void;

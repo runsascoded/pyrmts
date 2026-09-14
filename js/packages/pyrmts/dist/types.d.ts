@@ -79,6 +79,7 @@ export interface Pyramid {
     metrics: Metric[];
     tiers: Tier[];
     geo?: GeoSpec;
+    identityRollup?: IdentityRollup;
     limits?: PlanLimits;
 }
 export interface PlanLimits {
@@ -95,5 +96,10 @@ export declare class PlanLimitError extends Error {
 export interface GeoSpec {
     cellCol: string;
     resolutions: number[];
+}
+export interface IdentityRollup {
+    col: string;
+    map: string;
+    canonicalPrefix: string;
 }
 //# sourceMappingURL=types.d.ts.map

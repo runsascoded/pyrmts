@@ -48,6 +48,9 @@ export function parsePyramidYaml(text) {
     };
     if (root.geo !== undefined)
         cfg.geo = parseGeo(root.geo);
+    if (root.identityRollup !== undefined) {
+        cfg.identityRollup = parseIdentityRollup(root.identityRollup, cfg.geo);
+    }
     validateShardPlaceholder(cfg.keyTemplate, cfg.tiers);
     return cfg;
 }
@@ -100,6 +103,38 @@ function parseGeo(raw) {
     }
     return { cellCol, resolutions };
 }
+// Parse the optional `identityRollup` block (`specs/pyrmts-identity-rollup.md`).
+// Build-side only — carries no serve behavior in JS; parsed for parity with
+// the Python twin so a shared YAML round-trips in both.
+function parseIdentityRollup(raw, geo) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new Error('parsePyramidYaml: `identityRollup` must be a mapping');
+    }
+    const r = raw;
+    let col;
+    if (r.col === undefined) {
+        if (geo === undefined) {
+            throw new Error('parsePyramidYaml: identityRollup.col is required when no `geo` ' +
+                'block supplies a default cellCol');
+        }
+        col = geo.cellCol;
+    }
+    else if (typeof r.col === 'string') {
+        col = r.col;
+    }
+    else {
+        throw new Error('parsePyramidYaml: identityRollup.col must be a string');
+    }
+    if (typeof r.map !== 'string' || r.map === '') {
+        throw new Error('parsePyramidYaml: identityRollup.map must be a non-empty string ' +
+            '(the declared id-map input)');
+    }
+    const canonicalPrefix = r.canonicalPrefix === undefined ? 'c:' : r.canonicalPrefix;
+    if (typeof canonicalPrefix !== 'string' || canonicalPrefix === '') {
+        throw new Error('parsePyramidYaml: identityRollup.canonicalPrefix must be a non-empty string');
+    }
+    return { col, map: r.map, canonicalPrefix };
+}
 // Materialize a full Pyramid by wiring in a StorageBackend. Re-validates
 // the `{shard}` placeholder guard so a hand-built PyramidConfig
 // (bypassing `parsePyramidYaml`) still can't reach downstream fill/serve
@@ -117,6 +152,8 @@ export function pyramidFromConfig(cfg, storage) {
     };
     if (cfg.geo !== undefined)
         p.geo = cfg.geo;
+    if (cfg.identityRollup !== undefined)
+        p.identityRollup = cfg.identityRollup;
     return p;
 }
 function parseStorageBlock(raw) {

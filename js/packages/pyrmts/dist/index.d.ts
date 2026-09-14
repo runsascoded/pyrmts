@@ -1,4 +1,4 @@
-export type { Axis, Bin, ColumnFilter, Dim, Duration, FetchOptionsBase, FetchSegment, GeoSpec, Metric, MonoidName, Pyramid, Row, RunBoundary, Shard, StepCount, StepUnit, Storage, StorageBackend, Tier, TimeUnit, } from './types.js';
+export type { Axis, Bin, ColumnFilter, Dim, Duration, FetchOptionsBase, FetchSegment, GeoSpec, IdentityRollup, Metric, MonoidName, Pyramid, Row, RunBoundary, Shard, StepCount, StepUnit, Storage, StorageBackend, Tier, TimeUnit, } from './types.js';
 export { EtagConflict, NotSupported, PlanLimitError } from './types.js';
 export type { PlanLimits } from './types.js';
 export type { PyramidCoverRung, PyramidCoverSegment, PyramidCoverStatus, PyramidTierCoverStatus, } from './cover-status.js';

@@ -5,7 +5,7 @@ from textwrap import dedent
 
 import pytest
 
-from pyrmts import Tier, merge_lambda_shards, parse_pyramid_yaml
+from pyrmts import IdentityRollup, Tier, merge_lambda_shards, parse_pyramid_yaml
 
 
 def test_parses_shards_ladder():
@@ -458,4 +458,56 @@ def test_rejects_resolution_past_s2_max():
         parse_pyramid_yaml(_geo_yaml('{ cellCol: s2_cell, resolutions: [31] }'))
     assert str(exc.value) == (
         "parse_pyramid_yaml: geo.resolutions[0] must be an int in 0-30 (got 31)"
+    )
+
+
+def _id_rollup_yaml(*, geo: str | None, identity_rollup: str) -> str:
+    geo_line = f"\n        geo: {geo}" if geo is not None else ""
+    return dedent(f"""
+        storage:
+          type: r2
+          bucket: 380nwk
+          key: 'a/{{tier}}/{{shard}}/{{period}}.parquet'
+        binCol: ts
+        dims:
+          - {{ name: cell, type: s2 }}
+        metrics:
+          - {{ name: n, monoid: count }}
+        tiers:
+          - {{ name: raw, bin: 1d, shards: [1y] }}{geo_line}
+        identityRollup: {identity_rollup}
+    """).strip()
+
+
+def test_parses_identity_rollup_with_explicit_col():
+    cfg = parse_pyramid_yaml(_id_rollup_yaml(
+        geo=None,
+        identity_rollup="{ col: cell, map: station-id-map.json, canonicalPrefix: 'k:' }",
+    ))
+    assert cfg.identity_rollup == IdentityRollup(col='cell', map='station-id-map.json', canonicalPrefix='k:')
+
+
+def test_identity_rollup_col_defaults_to_geo_cell_col():
+    cfg = parse_pyramid_yaml(_id_rollup_yaml(
+        geo='{ cellCol: cell, resolutions: [20, 10] }',
+        identity_rollup='{ map: station-id-map.json }',
+    ))
+    assert cfg.identity_rollup == IdentityRollup(col='cell', map='station-id-map.json', canonicalPrefix='c:')
+
+
+def test_identity_rollup_requires_col_without_geo():
+    with pytest.raises(ValueError) as exc:
+        parse_pyramid_yaml(_id_rollup_yaml(geo=None, identity_rollup='{ map: m.json }'))
+    assert str(exc.value) == (
+        "parse_pyramid_yaml: identityRollup.col is required when no `geo` "
+        "block supplies a default cellCol"
+    )
+
+
+def test_identity_rollup_requires_map():
+    with pytest.raises(ValueError) as exc:
+        parse_pyramid_yaml(_id_rollup_yaml(geo=None, identity_rollup='{ col: cell }'))
+    assert str(exc.value) == (
+        "parse_pyramid_yaml: identityRollup.map must be a non-empty string "
+        "(the declared id-map input)"
     )

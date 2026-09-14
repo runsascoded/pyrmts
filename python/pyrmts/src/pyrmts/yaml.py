@@ -15,6 +15,7 @@ from .types import (
     Dim,
     DimType,
     GeoSpec,
+    IdentityRollup,
     Metric,
     MonoidName,
     Pyramid,
@@ -40,6 +41,7 @@ class PyramidConfig:
     tiers: list[Tier]
     axis: Axis = 'time'
     geo: GeoSpec | None = None
+    identity_rollup: IdentityRollup | None = None
 
 
 def parse_pyramid_yaml(text: str) -> PyramidConfig:
@@ -72,6 +74,8 @@ def parse_pyramid_yaml(text: str) -> PyramidConfig:
     )
     if 'geo' in raw and raw['geo'] is not None:
         cfg.geo = _parse_geo(raw['geo'])
+    if 'identityRollup' in raw and raw['identityRollup'] is not None:
+        cfg.identity_rollup = _parse_identity_rollup(raw['identityRollup'], cfg.geo)
     validate_shard_placeholder(cfg.keyTemplate, cfg.tiers)
     return cfg
 
@@ -90,6 +94,7 @@ def pyramid_from_config(cfg: PyramidConfig, storage: Storage) -> Pyramid:
         metrics=cfg.metrics,
         tiers=cfg.tiers,
         geo=cfg.geo,
+        identity_rollup=cfg.identity_rollup,
     )
 
 
@@ -384,3 +389,25 @@ def _parse_geo(raw: Any) -> GeoSpec:
                 f"got {resolutions}"
             )
     return GeoSpec(cellCol=cell_col, resolutions=tuple(resolutions))
+
+
+def _parse_identity_rollup(raw: Any, geo: GeoSpec | None) -> IdentityRollup:
+    if not isinstance(raw, dict):
+        raise ValueError("parse_pyramid_yaml: `identityRollup` must be a mapping")
+    col = raw.get('col')
+    if col is None:
+        if geo is None:
+            raise ValueError(
+                "parse_pyramid_yaml: identityRollup.col is required when no `geo` "
+                "block supplies a default cellCol"
+            )
+        col = geo.cellCol
+    if not isinstance(col, str):
+        raise ValueError("parse_pyramid_yaml: identityRollup.col must be a string")
+    map_ = raw.get('map')
+    if not isinstance(map_, str) or not map_:
+        raise ValueError("parse_pyramid_yaml: identityRollup.map must be a non-empty string (the declared id-map input)")
+    canonical_prefix = raw.get('canonicalPrefix', 'c:')
+    if not isinstance(canonical_prefix, str) or not canonical_prefix:
+        raise ValueError("parse_pyramid_yaml: identityRollup.canonicalPrefix must be a non-empty string")
+    return IdentityRollup(col=col, map=map_, canonicalPrefix=canonical_prefix)

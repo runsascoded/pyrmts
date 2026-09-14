@@ -116,3 +116,27 @@ Why this beats the two-level / sidecar framing in the body:
 **Orthogonal gap, do not fold into the merge fix — bin-responsive geometry.** A station's coordinate can change over its life (a move is often *why* it got a new id). Poly/rect→station-set resolution and "which stations are drawn over a time range" need a coordinate *per time-bin*, not a single representative coord. This is a pre-existing issue that canonicalization only makes visible; it wants its own treatment (per-bin station→s2-cell / coord), separate from the identity rollup.
 
 **For the ctbk round-trip:** how thoroughly were the ~25 merges vetted? The one-vocab design keeps raw rows in every shard, so re-splitting a bad merge stays a cheap canonical re-derive regardless — which lowers the stakes on getting all 25 right up front. Also confirm the ctbk-side plan (`rides_source.py` emitting raw ids, `vocab.py`/`station-vocab.json`, api-worker default-canonical + audit-leaf serving).
+
+## ctbk round-trip (2026-09-13) — accepted; no longer held
+
+**One-vocab accepted.** ctbk's `specs/serve-time-canonicalization.md` is revised to
+the single-vocab model: raw + canonical + s2 as members of one per-shard vocab,
+canonical row = build-time id-map-keyed monoid rollup of raw constituents, served
+canonical-by-default with `?raw=1` for audit off the *same* shard. The old
+two-level (leaf stack + separate canonical file set) and (A)/(B) framing are
+dropped. ctbk's dependency on pyrmts collapses to one capability: *given the
+id-map, emit one summed canonical `s:` row per canonical class present in a
+shard* (a declared pyramid input → DVX dep, shard-scoped invalidation).
+
+**Merge-vetting question answered.** Algorithmically clean, bimodal, not yet
+individually human-vetted — and one-vocab deliberately de-risks that (a bad merge
+is a one-shard canonical re-derive to flip). Over the 42 name-similar + <100 m
+candidate pairs the guard flagged: the **14 it merged all have exactly 1
+co-active month** (renumber transition); the **28 it kept separate all have ≥2**
+(2→80, sustained concurrency). No overlap between the two classes. Net: 25 prior
+false merges dissolved, 944 true renumbers preserved. Residual ambiguity = the 14
+borderline (1 co-month + similar name), surfaced for human eyeballing on ctbk's
+`/merge-review` page.
+
+**Bin-responsive geometry** acknowledged as a real, separate gap — recorded as
+out-of-scope in ctbk's spec, not folded into the merge fix.

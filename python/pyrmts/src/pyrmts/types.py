@@ -56,6 +56,19 @@ class GeoSpec:
     resolutions: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class IdentityRollup:
+    """Declares an id-map-keyed canonical identity level over a ragged-vocab
+    column (`specs/pyrmts-identity-rollup.md`). `col` holds `s:<raw>` station
+    leaves alongside s2 cells; a `{raw_token: canonical_token}` map rolls the
+    leaves up into `canonicalPrefix`-namespaced canonical rows. `map` is a
+    declared input (storage key / path) the engine loads and the harness
+    treats as a DVX dependency of the canonical rows."""
+    col: str
+    map: str
+    canonicalPrefix: str = 'c:'
+
+
 class Storage(Protocol):
     def head(self, key: str) -> dict | None: ...
     def get(self, key: str) -> bytes | None: ...
@@ -74,6 +87,7 @@ class Pyramid:
     tiers: list[Tier]
     axis: Axis = 'time'
     geo: GeoSpec | None = None
+    identity_rollup: IdentityRollup | None = None
 
     def tier(self, name: str) -> Tier:
         for t in self.tiers:

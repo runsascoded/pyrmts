@@ -13,6 +13,7 @@ from .axis import (
     parse_duration,
     shard_periods_covering,
 )
+from .canonicalize import CanonicalizeResult, canonicalize_shards, recanonicalize_table
 from .cascade import CascadeResult, cascade_tiers
 from .gap_discovery import ExpectedShard, list_expected_shards
 from .keys import substitute_key
@@ -23,6 +24,7 @@ from .types import (
     Dim,
     DimType,
     GeoSpec,
+    IdentityRollup,
     Metric,
     MonoidName,
     Pyramid,
@@ -40,11 +42,12 @@ from .yaml import (
 __version__ = "0.0.0"
 
 __all__ = [
-    'Axis', 'Dim', 'DimType', 'GeoSpec', 'Metric', 'MonoidName', 'Pyramid',
-    'Storage', 'Tier',
+    'Axis', 'Dim', 'DimType', 'GeoSpec', 'IdentityRollup', 'Metric', 'MonoidName',
+    'Pyramid', 'Storage', 'Tier',
     'ParsedTimeSpan', 'ShardPeriod',
     'add_span', 'bins_in_range', 'ceil_to_span', 'floor_to_span', 'format_period',
     'nominal_delta_ms', 'parse_duration', 'shard_periods_covering',
+    'CanonicalizeResult', 'canonicalize_shards', 'recanonicalize_table',
     'CascadeResult', 'cascade_tiers',
     'ExpectedShard', 'list_expected_shards',
     'substitute_key',

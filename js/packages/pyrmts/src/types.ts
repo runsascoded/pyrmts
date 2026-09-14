@@ -172,6 +172,9 @@ export interface Pyramid {
   // at all materialized resolutions; the geo planner (in `pyrmts-geo`)
   // picks a resolution at query time + filters by cell list.
   geo?: GeoSpec
+  // Optional id-map-keyed canonical identity level (build-side; serve is
+  // cover-agnostic). See `IdentityRollup`.
+  identityRollup?: IdentityRollup
   // Per-pyramid default query cost ceilings. `PlanQueryInput.limits`
   // overrides this wholesale (not merged field-by-field) when supplied.
   limits?: PlanLimits
@@ -215,4 +218,20 @@ export interface GeoSpec {
   cellCol: string
   // h3 resolutions materialized inside every shard. Finest first.
   resolutions: number[]
+}
+
+// Declares an id-map-keyed canonical identity level over a ragged-vocab
+// column (`specs/pyrmts-identity-rollup.md`). Consumed by the Python engine's
+// build side (`recanonicalize_table`); read/serve is cover-agnostic, so this
+// carries no serve behavior in JS — it exists for config parity with the
+// twinned `pyrmts.yaml` parser.
+export interface IdentityRollup {
+  // The cellCol/vocab column holding `s:<raw>` leaves + `<canonicalPrefix>`
+  // rollups + s2 cells (defaults to `geo.cellCol` when omitted).
+  col: string
+  // Declared input: a `{raw_token: canonical_token}` id-map (storage key /
+  // path) the engine loads and the harness treats as a DVX dependency.
+  map: string
+  // Canonical-rollup namespace / drop-and-rebuild marker (default `c:`).
+  canonicalPrefix: string
 }

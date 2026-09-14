@@ -10,6 +10,7 @@ export type {
   FetchOptionsBase,
   FetchSegment,
   GeoSpec,
+  IdentityRollup,
   Metric,
   MonoidName,
   Pyramid,

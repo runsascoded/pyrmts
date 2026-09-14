@@ -334,3 +334,57 @@ geo: { cellCol: s2_cell, resolutions: [30, 20, 16, 15] }
     expect(pyramid.geo).toEqual({ cellCol: 'h3', resolutions: [12, 9, 7, 4] })
   })
 })
+
+// Build-side config parsed for parity with the Python twin
+// (`specs/pyrmts-identity-rollup.md`); no serve behavior in JS.
+describe('parsePyramidYaml: identityRollup block', () => {
+  const base = `
+storage: { type: r2, key: 'k/{tier}/{shard}/{period}.parquet' }
+dims: [{ name: cell, type: s2 }]
+metrics: [{ name: n, monoid: count }]
+tiers: [{ name: raw, bin: 1d, shards: [1y] }]`
+
+  test('parses identityRollup with explicit col + canonicalPrefix', () => {
+    const cfg = parsePyramidYaml(`${base}
+identityRollup: { col: cell, map: station-id-map.json, canonicalPrefix: 'k:' }
+`)
+    expect(cfg.identityRollup).toEqual({ col: 'cell', map: 'station-id-map.json', canonicalPrefix: 'k:' })
+  })
+
+  test('col defaults to geo.cellCol; canonicalPrefix defaults to c:', () => {
+    const cfg = parsePyramidYaml(`${base}
+geo: { cellCol: cell, resolutions: [20, 10] }
+identityRollup: { map: station-id-map.json }
+`)
+    expect(cfg.identityRollup).toEqual({ col: 'cell', map: 'station-id-map.json', canonicalPrefix: 'c:' })
+  })
+
+  test('omits identityRollup when not in YAML', () => {
+    const cfg = parsePyramidYaml(base)
+    expect(cfg.identityRollup).toBeUndefined()
+  })
+
+  test('throws when col is omitted and no geo supplies a default', () => {
+    expect(() => parsePyramidYaml(`${base}
+identityRollup: { map: m.json }
+`)).toThrow(
+      'parsePyramidYaml: identityRollup.col is required when no `geo` block supplies a default cellCol',
+    )
+  })
+
+  test('throws when map is missing', () => {
+    expect(() => parsePyramidYaml(`${base}
+identityRollup: { col: cell }
+`)).toThrow(
+      'parsePyramidYaml: identityRollup.map must be a non-empty string (the declared id-map input)',
+    )
+  })
+
+  test('pyramidFromConfig propagates identityRollup to the Pyramid', () => {
+    const cfg = parsePyramidYaml(`${base}
+identityRollup: { col: cell, map: m.json }
+`)
+    const pyramid = pyramidFromConfig(cfg, memStorage())
+    expect(pyramid.identityRollup).toEqual({ col: 'cell', map: 'm.json', canonicalPrefix: 'c:' })
+  })
+})

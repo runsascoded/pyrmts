@@ -63,6 +63,33 @@ def _load_pyramid(config_path: str, fs_root: str | None):
     return pyramid_from_config(cfg, storage)
 
 
+def _load_id_map(pyramid, map_override: str | None) -> dict[str, str]:
+    """`{raw_token: canonical_token}` for the identity rollup
+    (`specs/pyrmts-identity-rollup.md`). From `--map` (local JSON path), else
+    the declared `identityRollup.map` — an `s3://` URL or a storage key
+    relative to the pyramid's storage."""
+    import json
+    ir = pyramid.identity_rollup
+    if map_override is not None:
+        blob: bytes | None = Path(map_override).read_bytes()
+        loc = map_override
+    elif ir is not None:
+        loc = ir.map
+        if loc.startswith('s3://'):
+            bucket, _, key = loc[len('s3://'):].partition('/')
+            blob = S3Storage(bucket=bucket).get(key)
+        else:
+            blob = pyramid.storage.get(loc)
+    else:
+        raise SystemExit("canonicalize: no `identityRollup` block and no --map; nothing to load")
+    if blob is None:
+        raise SystemExit(f"canonicalize: id-map not found at {loc!r}")
+    m = json.loads(blob)
+    if not isinstance(m, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in m.items()):
+        raise SystemExit("canonicalize: id-map must be a JSON object of {raw_token: canonical_token} strings")
+    return m
+
+
 def _parse_bytes(s: str) -> int:
     """`24g`/`512m`/`0` → bytes (binary units)."""
     import re
@@ -123,6 +150,53 @@ def invalidate(fs_root: str | None, range_: str, config: str) -> None:
     n = _invalidate(pyramid, interval)
     err(f"appended [{interval[0].isoformat()}, {interval[1].isoformat()}) to "
         f"{journal_key(pyramid)}: {n} entries pending")
+
+
+@cli.command()
+@option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
+@option('-j', '--concurrency', type=int, default=1, help="Parallel shard rewrites (default 1)")
+@option('-m', '--map', 'map_override', help="Local id-map JSON path (overrides identityRollup.map)")
+@option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
+@option('-r', '--range', 'range_', required=True, help="Half-open range to (re)derive canonical rows over, <from-iso>/<to-iso> (UTC)")
+@argument('config')
+def canonicalize(
+    filters: tuple[str, ...],
+    concurrency: int,
+    map_override: str | None,
+    fs_root: str | None,
+    range_: str,
+    config: str,
+) -> None:
+    """Re-derive canonical identity rows in every built shard overlapping the
+    range, in place (`specs/pyrmts-identity-rollup.md`).
+
+    Reads each shard's raw `s:` leaves + the declared id-map and writes summed
+    canonical rows alongside — no source re-pull, no cascade. Run after a build
+    to materialize the canonical level, or after an id-map change to refresh it
+    (the stale canonical rows are dropped and rebuilt, so it is idempotent for
+    a fixed map)."""
+    from pyrmts import canonicalize_shards
+    pyramid = _load_pyramid(config, fs_root)
+    ir = pyramid.identity_rollup
+    if ir is not None:
+        col, canonical_prefix = ir.col, ir.canonicalPrefix
+    elif pyramid.geo is not None:
+        col, canonical_prefix = pyramid.geo.cellCol, 'c:'
+    else:
+        raise SystemExit("canonicalize: need an `identityRollup` or `geo` block to resolve the vocab column")
+    id_map = _load_id_map(pyramid, map_override)
+    result = canonicalize_shards(
+        pyramid, id_map, _parse_range(range_),
+        col=col,
+        canonical_prefix=canonical_prefix,
+        concurrency=concurrency,
+        filter=_parse_filters(filters),
+    )
+    for key, status in result.errors:
+        err(f"  error {key}: {status}")
+    print(result.summary())
+    if result.errors:
+        raise SystemExit(1)
 
 
 @cli.command()

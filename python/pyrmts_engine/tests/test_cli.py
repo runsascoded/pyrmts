@@ -1,13 +1,25 @@
-"""CLI: plan output, s3:// config parsing, `--source module:attr` hook."""
+"""CLI: plan output, s3:// config parsing, `--source module:attr` hook,
+`canonicalize` identity rollup."""
 from __future__ import annotations
 
+import io
+import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
 from click.testing import CliRunner
 
-from pyrmts import FsStorage
+from pyrmts import (
+    FsStorage,
+    parse_pyramid_yaml,
+    pyramid_from_config,
+    shard_periods_covering,
+    substitute_key,
+)
 from pyrmts_engine import empty_long
 from pyrmts_engine.cli import cli
 
@@ -135,6 +147,75 @@ def test_build_fill(tmp_path: Path):
         '0 source-provided rungs skipped, 10 present shards skipped, wall <t>',
         '',
     ]
+
+
+CANON_YAML = """\
+storage:
+  type: s3
+  bucket: unused
+  key: "pyr/{tier}/{shard}/{period}.parquet"
+binCol: dt
+dims:
+  - name: cell
+    type: string
+metrics:
+  - name: rides
+    monoid: count
+tiers:
+  - name: base
+    bin: 1d
+    shards: [1mo]
+identityRollup:
+  col: cell
+  map: id-map.json
+"""
+
+CANON_RANGE = '2026-01-01T00:00/2026-02-01T00:00'
+
+
+def _canon_setup(tmp_path: Path):
+    """One `base@1mo` shard with three raw `s:` leaves (`s:A`+`s:B` mergeable,
+    `s:C` unmerged) + the id-map at the declared storage key."""
+    config = tmp_path / 'canon.yaml'
+    config.write_text(CANON_YAML)
+    data = tmp_path / 'data'
+    pyr = pyramid_from_config(parse_pyramid_yaml(CANON_YAML), FsStorage(data))
+    tr = (datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 2, 1, tzinfo=timezone.utc))
+    (period,) = shard_periods_covering(*tr, '1mo')
+    key = substitute_key(pyr.keyTemplate, {'tier': 'base', 'shard': '1mo', 'period': period.label})
+    buf = io.BytesIO()
+    pq.write_table(pa.table({'dt': [0, 0, 0], 'cell': ['s:A', 's:B', 's:C'], 'rides': [3, 2, 1]}), buf)
+    pyr.storage.put(key, buf.getvalue())
+    pyr.storage.put('id-map.json', json.dumps({'s:A': 'c:X', 's:B': 'c:X'}).encode())
+    return config, data, pyr, key
+
+
+def _canon_rows(pyr, key) -> list[tuple]:
+    d = pq.read_table(io.BytesIO(pyr.storage.get(key))).to_pydict()
+    return sorted(zip(d['cell'], d['dt'], d['rides']))
+
+
+def test_canonicalize_adds_summed_canonical_rows(tmp_path: Path):
+    config, data, pyr, key = _canon_setup(tmp_path)
+    result = CliRunner().invoke(cli, ['canonicalize', '-r', CANON_RANGE, '-R', str(data), str(config)])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == 'canonicalize_shards: wrote 1, skipped 0, errors 0'
+    assert _canon_rows(pyr, key) == [
+        ('c:X', 0, 5),   # s:A + s:B
+        ('s:A', 0, 3),
+        ('s:B', 0, 2),
+        ('s:C', 0, 1),   # unmerged → no c: row
+    ]
+
+
+def test_canonicalize_is_idempotent_across_reruns(tmp_path: Path):
+    config, data, pyr, key = _canon_setup(tmp_path)
+    args = ['canonicalize', '-r', CANON_RANGE, '-R', str(data), str(config)]
+    assert CliRunner().invoke(cli, args).exit_code == 0
+    first = pyr.storage.get(key)
+    assert CliRunner().invoke(cli, args).exit_code == 0
+    # A second pass drops the stale c: row and rebuilds it — same bytes.
+    assert pyr.storage.get(key) == first
 
 
 def test_build_source_rung_flags(tmp_path: Path):

@@ -1,6 +1,6 @@
 # pyrmts engine capability: id-map-keyed identity rollup (canonical `s:` rows)
 
-Status: **core done** (2026-09-14) — Python transform + config + JS config twin landed and tested (Python 180, JS 553); the `pyrmts_engine` fill-driver fast-path and ctbk adoption remain (below). The pyrmts-side half of the one-vocab design accepted by both sessions in [`ctbk-serve-time-canonicalization.md`](./ctbk-serve-time-canonicalization.md). ctbk owns the ingest change (emit raw `s:<raw_id>` instead of canonical) and the serve/audit UI; pyrmts owns exactly **one** capability, quoted from that spec:
+Status: **done** (2026-09-14) — all pyrmts-side deliverables landed and tested: Python transform + config, JS config twin, and the `pyrmts-engine canonicalize` driver (suites green: `pyrmts` 130, `pyrmts_ops` 50, `pyrmts_engine` 124, JS 553). The only open item is ctbk's own adoption (their repo). The pyrmts-side half of the one-vocab design accepted by both sessions in [`../ctbk-serve-time-canonicalization.md`](../ctbk-serve-time-canonicalization.md). ctbk owns the ingest change (emit raw `s:<raw_id>` instead of canonical) and the serve/audit UI; pyrmts owns exactly **one** capability, quoted from that spec:
 
 > given the id-map, emit one summed canonical `s:` row per canonical class present in a shard (a declared pyramid input → DVX dep, shard-scoped invalidation).
 
@@ -56,9 +56,11 @@ The transform needs only the col, the map (`{raw_token: canonical_token}`), and 
 - `yaml.py`: `_parse_identity_rollup`, wired like `_parse_geo`.
 - The `map` field being a declared input is what lets the harness/DVX treat the id-map as a dependency of the canonical rows (shard-scoped invalidation below). The engine loads the map (`pyramid.storage.get` or a passed dict) and passes it to the transform.
 
-### Invalidation (reactive re-derive)
+### Reactive re-derive — a direct pass, NOT the invalidation journal
 
-Reuse the existing time-interval journal (`invalidation.py`, `_invalidations.json`): an id-map change appends `[start, end)` over the **union of the affected stations' active spans**. The fill tick then re-derives canonical rows in overlapping shards. The one engine-package (`pyrmts_engine`) addition is a **fast path**: when the invalidation is map-only (data unchanged), the driver reads each overlapping shard and runs `recanonicalize_table` in place — no source pull, no cascade. (Precise station→shard scoping, vs. the coarse active-span interval, is a later optimization — open question below.)
+An earlier draft here proposed routing an id-map change through the time-interval invalidation journal (`invalidation.py`, `_invalidations.json`) as a "map-only fast path" in the fill tick. **That is wrong** and the engine work corrected it: a journal-driven rebuild of a **finest** rung goes through `raw_fill` in `materialize_extension_shard` (`consolidate.py`) — i.e. a *source re-pull*, the Batch cost we're avoiding. The journal can't distinguish "map changed" from "data changed" anyway (entries are bare `[start, end, requested_at]` intervals).
+
+So the reactive path is a **direct pass** that reads existing shards and re-derives canonical rows from the raw `s:` leaves *already in them* — never touching the source or the fill/journal machinery: `pyrmts-engine canonicalize -r <from>/<to> <config>` → `canonicalize_shards`. Run it after a build to materialize the canonical level, and re-run it over the affected span after an id-map change (idempotent for a fixed map). Precise station→shard scoping (vs. the coarse range) is a later optimization.
 
 ## Deliverables (this repo)
 
@@ -67,7 +69,9 @@ Reuse the existing time-interval journal (`invalidation.py`, `_invalidations.jso
 - `canonicalize.py`: `recanonicalize_table(...)` (pure, idempotent) + `canonicalize_shards(pyramid, id_map, time_range, ...)` (reads each existing shard, recanonicalizes, writes — parallel, mirroring `cascade_tiers`' shard iteration). Exported from `__init__`. ✓
 - Tests (`test_canonicalize.py`, `test_yaml.py`): a merged cluster sums; raw + s2 rows preserved untouched; canonical rows group by `(bin, *other-dims)`; idempotent re-run is byte-identical; a new map replaces (not accumulates) `c:` rows; unmerged station gets no `c:` row; histogram monoid merges maps; `canonicalize_shards` rewrites present shards / skips missing; config parse + defaults + errors. ✓ (10 new)
 
-**`pyrmts_engine` (in-repo) — FOLLOW-UP, not done.** The fill-driver fast path: on a map-only invalidation, read each overlapping shard and run `recanonicalize_table` in place (no source pull, no cascade), and load the declared `identityRollup.map` input. Core exposes the pure transform; this wiring is a separate change.
+**`pyrmts_engine` (in-repo) — DONE (the direct pass).** `pyrmts-engine canonicalize -r <from>/<to> [-m <local-map>] [-j N] [-F k=v] <config>`: loads the declared `identityRollup.map` (an `s3://` URL or a storage key relative to the pyramid's storage; `-m` overrides with a local JSON path), then runs `canonicalize_shards` over the range. `_load_id_map` validates the map is `{raw_token: canonical_token}`. Tests (`test_cli.py`): a merged cluster gains its summed `c:` row while raw/unmerged rows stay; a second pass is byte-identical (idempotent). ✓
+
+*Future optimization (not needed to unblock ctbk):* fold the canonical derive into `materialize_extension_shard`'s write (add `c:` rows to `combined` before `write_tier_parquet`) so a normal build carries canonical rows without a second read/write pass — deferred until it's shown to matter, and gated on preserving any non-schema shard columns.
 
 **JS/TS** — much smaller than first assumed (serve-path survey, 2026-09-14):
 - **No serve change in pyrmts.** pyrmts's `serve.ts`/`planner.ts` never call `vocabCover` — the `s:`-vs-cell (hence canonical-vs-raw) selection lives entirely in `vocabCover`, which the **consumer app (ctbk)** invokes and feeds into `planGeoQuery({ outputCells })`. pyrmts's row-matching (`filterCellsByCover` → `cellInSet` lineage walk) is cover-agnostic. So canonical-by-default / `?raw=1` audit selection is **ctbk-side** (`rides_v1.ts`, `avail_geo.ts` + their `vocabCover` call), not a pyrmts capability.
@@ -82,3 +86,22 @@ Reuse the existing time-interval journal (`invalidation.py`, `_invalidations.jso
 - **Station→shard invalidation scoping**: coarse active-span interval (reuses today's journal, over-invalidates a bit) vs. a station→shard index for exact scoping. Start coarse.
 - **Where the map is loaded**: storage key under the pyramid prefix (travels with the shards, natural DVX dep) vs. a config-relative path. Leaning storage key.
 - **Does `canonicalize_shards` run as an explicit stage, or fold into the engine fill driver's per-shard finalize?** Core exposes the pure transform either way; the driver wiring is a `pyrmts_engine` follow-up.
+
+## ctbk contract answer (2026-09-14, from the ctbk session)
+
+**`station-id-map.json` value convention: bare canonical ids, no prefix** — it's
+`{alias_id: canonical_id}` with values like `6148.02`, `HB102`, `JC115` (3907
+entries). So under adoption ctbk emits raw leaves as `s:<raw_id>` and the
+canonical rollup applies `canonicalPrefix: "c:"` to the map *values* at build
+time → `c:<canonical_id>` rows, disjoint from `s:` as required. Confirmed clean.
+
+Two ctbk-side notes for adoption (not pyrmts's concern, recorded so they're not lost):
+- The map currently contains **identity self-maps** (e.g. `1234.56 → 1234.56`).
+  Per the partial-map contract (unmerged station = its own canonical, no `c:`
+  row), ctbk must strip `k == v` entries before feeding `identityRollup.map`,
+  else the transform emits a `c:` row duplicating one `s:` leaf (harmless sum,
+  but needless row bloat). ctbk owns this filter.
+- ctbk keys must switch: today the pyramid is `s:<canonical>` (canonicalized at
+  ingest); post-adoption the raw leaves are `s:<raw>` and canonical is `c:<canon>`,
+  so the FE/worker canonical-default query targets `c:` tokens (via `vocabCover`),
+  `?raw=1` targets `s:`.

@@ -14,6 +14,11 @@ Row = dict[str, object]
 
 class Monoid(ABC):
     state_suffixes: tuple[str, ...]
+    #: True when `combine` is elementwise addition of the (numeric) state
+    #: columns — i.e. merging a group of rows is `group_by(...).sum()` over
+    #: `state_columns`. Lets callers (e.g. `recanonicalize_table`) take a
+    #: vectorized group-by-sum fast path instead of a per-row Python combine.
+    additive: bool = False
 
     def state_columns(self, metric_name: str) -> tuple[str, ...]:
         return tuple(f"{metric_name}{suf}" for suf in self.state_suffixes)
@@ -28,6 +33,7 @@ class Monoid(ABC):
 
 class _Sum(Monoid):
     state_suffixes = ('_n', '_sum', '_sumsq')
+    additive = True
 
     def combine(self, target: Row, source: Row, metric_name: str) -> None:
         for suf in self.state_suffixes:
@@ -39,6 +45,7 @@ class _Sum(Monoid):
 
 class _Count(Monoid):
     state_suffixes = ('',)
+    additive = True
 
     def combine(self, target: Row, source: Row, metric_name: str) -> None:
         t = target.get(metric_name) or 0

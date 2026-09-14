@@ -55,7 +55,13 @@ def recanonicalize_table(
     keeps only its own leaf, so there is no canonical row and no duplication.
 
     No re-binning: a built shard's bins are already correct, so grouping is on
-    the stored `bin` value directly (unlike `cascade`'s `floor_to_span`)."""
+    the stored `bin` value directly (unlike `cascade`'s `floor_to_span`).
+
+    When every metric's monoid is `additive` (sum/count — merge is elementwise
+    addition of the state columns), this dispatches to a vectorized pyarrow
+    group-by-sum (`_recanonicalize_additive`) that is O(1) Python per shard
+    rather than O(rows); the generic per-row combine below still handles any
+    non-additive monoid (e.g. histogram). Both paths produce the same rows."""
     col = col or _rollup_col(pyramid)
     bin_col = pyramid.binCol
     dim_names = [d.name for d in pyramid.dims]
@@ -64,6 +70,13 @@ def recanonicalize_table(
     other_dims = [d for d in dim_names if d != col]
     metric_specs: list[tuple[Metric, Monoid]] = [(m, get_monoid(m.monoid)) for m in pyramid.metrics]
     state_cols = [c for m, mon in metric_specs for c in mon.state_columns(m.name)]
+
+    if metric_specs and all(mon.additive for _, mon in metric_specs):
+        return _recanonicalize_additive(
+            table, id_map,
+            bin_col=bin_col, col=col, other_dims=other_dims,
+            state_cols=state_cols, canonical_prefix=canonical_prefix,
+        )
 
     n = table.num_rows
     col_arr = table.column(col).to_pylist()
@@ -107,6 +120,61 @@ def recanonicalize_table(
                 mon.combine(agg, src_row, m.name)
 
     return _rows_to_table(kept_rows + list(groups.values()), pyramid)
+
+
+def _recanonicalize_additive(
+    table: pa.Table,
+    id_map: dict[str, str],
+    *,
+    bin_col: str,
+    col: str,
+    other_dims: list[str],
+    state_cols: list[str],
+    canonical_prefix: str,
+) -> pa.Table:
+    """Vectorized `recanonicalize_table` for additive monoids (sum/count): the
+    canonical rows are a pyarrow group-by-sum of the raw leaves the id-map folds
+    together — semantically identical to the generic per-row combine, but the
+    heavy work runs in pyarrow (C++) rather than a Python row loop, so it scales
+    to shards with millions of rows. Raw leaves + s2 cells pass through unchanged
+    and in their original order; only the derived `c:` rows are (re)built.
+
+    `state_cols` are the concatenated `state_columns` of every metric; additive
+    monoids merge each by addition, so a `group_by(bin, canonical, *dims).sum()`
+    reproduces the combine exactly. The canonical rows are sorted deterministically
+    so a re-run over already-canonicalized output is byte-identical (idempotent)."""
+    import pyarrow.compute as pc
+
+    # Drop any stale canonical rows; raw leaves + s2 cells survive verbatim.
+    is_canon = pc.starts_with(table.column(col), canonical_prefix)
+    raw = table.filter(pc.invert(is_canon))
+    if not id_map or raw.num_rows == 0:
+        return raw
+
+    # Map each raw token → its canonical via a left join with the id-map, then
+    # keep only the rows an id-map entry folds (unmapped tokens stay leaf-only).
+    map_tbl = pa.table({
+        col: pa.array(list(id_map.keys()), type=pa.string()),
+        '__canon': pa.array(list(id_map.values()), type=pa.string()),
+    })
+    joined = raw.join(map_tbl, keys=[col], join_type='left outer')
+    to_roll = joined.filter(pc.is_valid(joined.column('__canon')))
+    if to_roll.num_rows == 0:
+        return raw
+
+    grouped = to_roll.group_by([bin_col, '__canon', *other_dims]).aggregate(
+        [(c, 'sum') for c in state_cols]
+    )
+    # `aggregate` names summed columns `<c>_sum`; restore the state names and
+    # promote `__canon` into the rollup column, then match `raw`'s schema exactly
+    # (names, order, and types) so the two tables concatenate.
+    rename = {f'{c}_sum': c for c in state_cols}
+    rename['__canon'] = col
+    grouped = grouped.rename_columns([rename.get(n, n) for n in grouped.column_names])
+    canon = grouped.select(raw.column_names).cast(raw.schema)
+    canon = canon.sort_by([(col, 'ascending'), (bin_col, 'ascending')]
+                          + [(d, 'ascending') for d in other_dims])
+    return pa.concat_tables([raw, canon])
 
 
 @dataclass

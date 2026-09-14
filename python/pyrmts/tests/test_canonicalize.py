@@ -202,3 +202,29 @@ def test_canonicalize_shards_rewrites_present_shards_and_skips_missing():
         ('s:A', 0, 3, 30, 300),
         ('s:B', 0, 2, 20, 200),
     ]
+
+
+def test_additive_fast_path_matches_generic_combine():
+    # The vectorized additive fast path (pyarrow group-by-sum) must reproduce
+    # the generic per-row combine exactly. Mix a merged cluster, an unmapped
+    # leaf, and an s2 cell across two bins and two `dir` values; compare fast
+    # (default) against the generic loop (additive temporarily disabled).
+    from pyrmts.monoids import _Sum
+    p = _sum_pyramid(extra_dim=True)
+    table = _sum_table([
+        (0, 's:A', 'in',  3, 30, 300),
+        (0, 's:B', 'in',  2, 20, 200),
+        (0, 's:A', 'out', 1, 30, 900),
+        (1, 's:A', 'in',  4, 40, 1600),
+        (0, 's:C', 'in',  1, 10, 100),   # unmapped → leaf only
+        (0, 's2', 'in',   5, 50, 500),   # s2 cell → untouched
+    ], extra_dim=True)
+    id_map = {'s:A': 'c:X', 's:B': 'c:X'}
+
+    fast = _parse_sum(recanonicalize_table(table, id_map, pyramid=p), extra_dim=True)
+    _Sum.additive = False
+    try:
+        slow = _parse_sum(recanonicalize_table(table, id_map, pyramid=p), extra_dim=True)
+    finally:
+        _Sum.additive = True
+    assert fast == slow

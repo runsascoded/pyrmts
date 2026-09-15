@@ -153,9 +153,12 @@ def _recanonicalize_additive(
 
     # Map each raw token → its canonical via a left join with the id-map, then
     # keep only the rows an id-map entry folds (unmapped tokens stay leaf-only).
+    # The join key type must match `col`'s stored type exactly (pyarrow rejects
+    # a `string` vs `large_string` key mismatch, which varies shard to shard).
+    col_type = raw.schema.field(col).type
     map_tbl = pa.table({
-        col: pa.array(list(id_map.keys()), type=pa.string()),
-        '__canon': pa.array(list(id_map.values()), type=pa.string()),
+        col: pa.array(list(id_map.keys()), type=col_type),
+        '__canon': pa.array(list(id_map.values()), type=col_type),
     })
     joined = raw.join(map_tbl, keys=[col], join_type='left outer')
     to_roll = joined.filter(pc.is_valid(joined.column('__canon')))

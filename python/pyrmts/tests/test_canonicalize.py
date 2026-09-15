@@ -228,3 +228,21 @@ def test_additive_fast_path_matches_generic_combine():
     finally:
         _Sum.additive = True
     assert fast == slow
+
+
+def test_additive_fast_path_handles_large_string_col():
+    # Built shards may store the rollup column as `large_string` (pyarrow picks
+    # it by size), so the fast path's id-map join key must match that type —
+    # pyarrow rejects a `string` vs `large_string` key mismatch. Cast the column
+    # to `large_string` and confirm the rollup still works.
+    p = _sum_pyramid()
+    table = _sum_table([(0, 's:A', 3, 30, 300), (0, 's:B', 2, 20, 200), (0, 's2cell', 6, 60, 600)])
+    i = table.schema.get_field_index('cell')
+    table = table.set_column(i, 'cell', table.column('cell').cast(pa.large_string()))
+    out = recanonicalize_table(table, {'s:A': 'c:X', 's:B': 'c:X'}, pyramid=p)
+    assert _parse_sum(out) == [
+        ('c:X', 0, 5, 50, 500),
+        ('s2cell', 0, 6, 60, 600),
+        ('s:A', 0, 3, 30, 300),
+        ('s:B', 0, 2, 20, 200),
+    ]

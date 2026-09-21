@@ -75,6 +75,36 @@ An MS reader that speaks the chosen encoding:
 
 This is the "query/fetch code must speak it" half. It slots beside the existing serve planner; the planner's tier selection is unchanged (event-time axis), MS only adds the scan predicate.
 
+## The observation axis, unified: one index, three payoffs
+
+Consolidation (storage) is only the first use of the observation axis. Its representation — the per-`(key)` value **stream across scans**, stored as SCD-2 change-intervals — is the same object three otherwise-separate problems want. A cross-session synthesis (pyrmts + marin-gcs-usage `41e25a3f`, 2026-09-21):
+
+1. **Storage** — fold old contiguous scans into interval-compressed archives (this spec's MS mode). O(#scans) → O(#changes).
+2. **Serve latency (diff-indexing)** — a diff over `(a, b]` is a **range-scan of the interval boundaries in that window**: only keys whose run starts/ends inside `(a, b]` changed, so it reads **O(changes-in-span)**, not two full snapshots. That is the age-diff / diff-treemap (dTM) primitive.
+3. **Ingest compute** — a per-scan changeset (objects added/removed since the previous scan) *is* the increment that maintains the interval store, so ingest becomes O(changes) per scan instead of rebuilding the whole pyramid (the origin's "1h base explode" cost). Same object again.
+
+So "diff-indexing" is not a separate feature from MS — it is the **delta-view read path** of the same observation-axis index, and incremental ingest is its **write path**. Building the index once buys all three.
+
+### Diff-indexing is always-on; MS archival is opt-in — decouple them
+
+The origin session's worry is correct: MS consolidation is opt-in and covers only *old contiguous* ranges, so it can't be the *only* source of diffs (recent/hot scans stay per-scan, and some ranges cross the archive boundary). The resolution: the **diff-index is a first-class serve capability over *all* scans**, reading interval rows where a range is consolidated and falling back to two per-scan `extract`s (the existing 2-index diff) where it is not. Both produce the same changeset shape, so the dTM sees one uniform API. The universal primitive is `diff(state_a, state_b)` over *any* two scan states (raw or extracted); the interval store just makes it sparse where present.
+
+### Invertibility splits the two views (the design crux)
+
+- **Aggregate byte/object totals** are an additive **group** (invertible). A per-scan/per-subtree total telescopes, so `diff = state[b] − state[a]` is exact and O(1) in `d` (the span), and the fleet/subtree **over-time line is a prefix-sum** along the scan axis. No hierarchy needed for the aggregate.
+- **The changeset** (which paths moved, and added-vs-removed churn) is a **non-invertible** set operation — remove-then-re-add across a span nets to zero but is real churn, so you cannot subtract two aggregates to recover it. It is well-defined only from the two **endpoint states** (or a monoid segment-tree of changesets, no subtraction). This is the part the interval-boundary scan serves sparsely.
+
+### Optional: a dyadic delta-hierarchy to bound diffs at O(log d)
+
+The interval-boundary scan is O(changes-in-span), which is spiky when a wide window touches a churny subtree. To bound it at **O(log d) regardless of churn density**, precompute changesets for power-of-2 scan spans and merge O(log d) of them for an arbitrary `(a, b]` — the classic **sparse-table / dyadic decomposition** (with the O(log) *disjoint*-block form, since changesets aren't idempotent; **Fenwick/BIT** for the invertible aggregate; **Bentley–Saxe** for the "merge into logarithmic power-of-2 levels" scheme itself). This is a **pure refinement of the serve layer**, worth building only if the O(changes-in-span) scan proves too spiky on real data — deferred, data-gated.
+
+### Over-time plot = the same index, state-view point read
+
+The "over time" plot (scan × path total size) is a **per-key series along the observation axis** — exactly `series_for(key)`: expand that key's interval rows to one value per scan. The fleet/subtree over-time line is the prefix-sum aggregate above. So the two remaining mgu plots map cleanly onto **two indexed axes**, no third structure:
+
+- **age histograms** → the **event-time** pyramid (built).
+- **over-time line + diff treemap** → the **observation-axis** index (this spec): over-time = state-view point read; dTM = delta-view range read.
+
 ## CLI (in `pyrmts_engine`, mirroring `canonicalize`)
 
 - `pyrmts-engine consolidate -r <scan-lo>/<scan-hi> [--group <stride>] [--encoder a|b] <config>` — consolidate a contiguous scan range into one MS, or, with `--group N`, into a sequence of MS archives each covering N scans (e.g. a year of daily scans grouped 10 at a time → ~36 archives). Storage-agnostic; the project supplies how scan labels map to shard locations.

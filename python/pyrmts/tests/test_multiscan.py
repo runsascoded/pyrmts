@@ -19,8 +19,11 @@ from pyrmts import (
     Pyramid,
     Tier,
     consolidate_tables,
+    diff_scans,
+    diff_tables,
     extract_table,
     scan_digest,
+    series_for,
 )
 
 
@@ -201,3 +204,56 @@ def test_extract_rejects_non_member_scan():
     ms = consolidate_tables(SCANS, pyr, encoder='interval')
     with pytest.raises(ValueError, match='not a member scan'):
         extract_table(ms, 's9', pyr)
+
+
+def _chg(t: pa.Table) -> list[tuple]:
+    d = t.to_pydict()
+    return sorted(zip(d['dt'], d['path'], d['b__a'], d['o__a'], d['b__b'], d['o__b']))
+
+
+def test_diff_tables_changeset_with_births_and_deaths():
+    pyr = _count_pyramid()
+    s0, s1, s2 = (t for _, t in SCANS)
+    # b's value moved 20→30; a unchanged (absent from the changeset).
+    assert _chg(diff_tables(s0, s1, pyr)) == [(0, 'b', 20, 2, 30, 3)]
+    # b died (→ identity 0), c was born (identity 0 →); a still unchanged.
+    assert _chg(diff_tables(s0, s2, pyr)) == [
+        (0, 'b', 20, 2, 0, 0),   # death
+        (0, 'c', 0, 0, 5, 1),    # birth
+    ]
+
+
+@pytest.mark.parametrize('encoder', ['interval', 'densify'])
+def test_diff_scans_matches_extract_diff(encoder: str):
+    pyr = _count_pyramid()
+    ms = consolidate_tables(SCANS, pyr, encoder=encoder)
+    for a in ms.scans:
+        for b in ms.scans:
+            expected = diff_tables(extract_table(ms, a, pyr), extract_table(ms, b, pyr), pyr)
+            assert _chg(diff_scans(ms, a, b, pyr)) == _chg(expected)
+
+
+def test_diff_scans_reads_only_changed_keys_in_span():
+    """One key changes at s3; a window that straddles the change reports just
+    that key, and a window ending before it reports nothing."""
+    pyr = _count_pyramid()
+    scans = []
+    for j in range(5):
+        rows = [(0, f'p{i}', i * 10, i) for i in range(100)]
+        if j >= 3:
+            rows[0] = (0, 'p0', 999, 9)  # p0 moves at s3
+        scans.append((f's{j}', _shard(rows)))
+    ms = consolidate_tables(scans, pyr, encoder='interval')
+    assert _chg(diff_scans(ms, 's0', 's4', pyr)) == [(0, 'p0', 0, 0, 999, 9)]
+    assert _chg(diff_scans(ms, 's0', 's2', pyr)) == []   # change is after s2
+    assert _chg(diff_scans(ms, 's2', 's3', pyr)) == [(0, 'p0', 0, 0, 999, 9)]
+
+
+@pytest.mark.parametrize('encoder', ['interval', 'densify'])
+def test_series_for_is_the_over_time_line(encoder: str):
+    pyr = _count_pyramid()
+    ms = consolidate_tables(SCANS, pyr, encoder=encoder)
+    # `a` constant; `b` present then absent (→ identity 0); `c` absent then born.
+    assert series_for(ms, (0, 'a'), pyr) == [('s0', (10, 1)), ('s1', (10, 1)), ('s2', (10, 1))]
+    assert series_for(ms, (0, 'b'), pyr) == [('s0', (20, 2)), ('s1', (30, 3)), ('s2', (0, 0))]
+    assert series_for(ms, (0, 'c'), pyr) == [('s0', (0, 0)), ('s1', (0, 0)), ('s2', (5, 1))]

@@ -218,6 +218,31 @@ def test_canonicalize_is_idempotent_across_reruns(tmp_path: Path):
     assert pyr.storage.get(key) == first
 
 
+def test_multiscan_bench_sweeps_churn(tmp_path: Path):
+    """`multiscan-bench` reports one row per swept churn fraction, header
+    exact; on low-churn synthetic data the interval encoder wins every row
+    and beats the baseline (ratio > 1)."""
+    result = CliRunner().invoke(
+        cli, ['multiscan-bench', '-k', '2000', '-n', '8', '-c', '0,0.05'],
+    )
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.rstrip().split('\n')
+    assert lines[0].split() == [
+        'churn', 'baseline_B', 'densify_B', 'interval_B',
+        'densify_rows', 'interval_rows', 'win', 'ratio',
+    ]
+    parsed = [
+        {'churn': float(f[0]), 'dns_rows': int(f[4]), 'ivl_rows': int(f[5]),
+         'win': f[6], 'ratio': float(f[7].rstrip('x'))}
+        for f in (ln.split() for ln in lines[1:])
+    ]
+    assert [p['churn'] for p in parsed] == [0.0, 0.05]
+    assert all(p['win'] == 'interval' for p in parsed)   # interval wins the sweep
+    assert all(p['ratio'] > 1 for p in parsed)           # beats the O(N) baseline
+    assert parsed[0]['dns_rows'] == 2000 * 8             # flat densify grid
+    assert parsed[0]['ivl_rows'] < parsed[1]['ivl_rows']  # churn splits intervals
+
+
 def test_build_source_rung_flags(tmp_path: Path):
     """The ctbk footgun — durable base rung is the LARGEST shard dur
     (q@1d) — is gone by default: min-cover discovery reads whatever rung

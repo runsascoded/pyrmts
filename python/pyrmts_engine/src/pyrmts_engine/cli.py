@@ -199,6 +199,88 @@ def canonicalize(
         raise SystemExit(1)
 
 
+def _synth_scans(keys: int, scans: int, churn: float, births: float, seed: int):
+    """Synthetic single-scan (b, o) tiles for the multi-scan benchmark: `keys`
+    keys keyed `(dt=0, path)`, evolved over `scans` observations. Each scan a
+    `churn` fraction of live keys get a new value, and a `births` fraction are
+    (re)born or die — so intervals split and gaps appear, exercising both
+    encoders on a tunable churn regime."""
+    import random
+
+    import pyarrow as pa
+    rng = random.Random(seed)
+    live = {i: (rng.randint(1, 1_000_000), rng.randint(1, 100)) for i in range(keys)}
+    out = []
+    for j in range(scans):
+        if j:
+            for i in list(live):
+                if rng.random() < churn:
+                    live[i] = (live[i][0] + rng.randint(1, 1000), live[i][1] + 1)
+            for i in range(keys):
+                if rng.random() < births:
+                    if i in live:
+                        del live[i]
+                    else:
+                        live[i] = (rng.randint(1, 1_000_000), rng.randint(1, 100))
+        paths = sorted(live)
+        tbl = pa.table({
+            'dt': [0] * len(paths),
+            'path': [f'p{i}' for i in paths],
+            'b': [live[i][0] for i in paths],
+            'o': [live[i][1] for i in paths],
+        })
+        out.append((f's{j}', tbl))
+    return out
+
+
+@cli.command('multiscan-bench')
+@option('-B', '--births', type=float, default=0.0, help="Per-scan birth/death fraction (default 0)")
+@option('-c', '--churn', default='0,0.01,0.05,0.2', help="Comma-separated per-scan value-churn fractions to sweep (default 0,0.01,0.05,0.2)")
+@option('-k', '--keys', type=int, default=100_000, help="Key universe size (default 100000)")
+@option('-n', '--scans', type=int, default=20, help="Number of scans to consolidate (default 20)")
+@option('-s', '--seed', type=int, default=0, help="RNG seed (default 0)")
+def multiscan_bench(births: float, churn: str, keys: int, scans: int, seed: int) -> None:
+    """Benchmark the two multi-scan encoders on synthetic churn
+    (`specs/multi-scan-consolidation.md`): for each churn fraction, report the
+    O(#scans) per-scan baseline vs. densify (a) vs. interval (b), in bytes and
+    rows. Decides the (a)-vs-(b) crossover; the real operating point comes from
+    running `consolidate_tables` on a project's actual scans."""
+    import io
+
+    import pyarrow.parquet as pq
+
+    from pyrmts import Dim, MemStorage, Metric, Pyramid, Tier, consolidate_tables
+
+    pyramid = Pyramid(
+        storage=MemStorage(),
+        keyTemplate='p/{tier}/{shard}/{period}.parquet',
+        binCol='dt',
+        dims=[Dim(name='path', type='string')],
+        metrics=[Metric(name='b', monoid='count'), Metric(name='o', monoid='count')],
+        tiers=[Tier(name='base', bin='1d', shards=('1mo',))],
+    )
+
+    def nbytes(t) -> int:
+        buf = io.BytesIO()
+        pq.write_table(t, buf, compression='snappy')
+        return len(buf.getvalue())
+
+    err(f"multiscan-bench: keys={keys} scans={scans} births={births} seed={seed}")
+    print('churn    baseline_B  densify_B  interval_B  densify_rows  interval_rows  win  ratio')
+    for c in [float(x) for x in churn.split(',')]:
+        scan_tables = _synth_scans(keys, scans, c, births, seed)
+        baseline = sum(nbytes(t) for _, t in scan_tables)
+        dns = consolidate_tables(scan_tables, pyramid, encoder='densify')
+        ivl = consolidate_tables(scan_tables, pyramid, encoder='interval')
+        dns_b, ivl_b = nbytes(dns.table), nbytes(ivl.table)
+        win = 'interval' if ivl_b <= dns_b else 'densify'
+        ratio = baseline / min(dns_b, ivl_b)
+        print(
+            f'{c:<8.3g} {baseline:>10} {dns_b:>10} {ivl_b:>11} {dns.table.num_rows:>13} '
+            f'{ivl.table.num_rows:>14}  {win:<8} {ratio:>5.1f}x'
+        )
+
+
 @cli.command()
 @option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the detected memory limit; 0 disables)")
 @option('-C', '--close-workers', type=int, help="Concurrent close computations (default 2): more overlaps closes with the walk (wall) at the cost of stacked close transients (peak RSS)")

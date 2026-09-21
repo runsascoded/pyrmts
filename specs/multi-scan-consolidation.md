@@ -1,6 +1,8 @@
 # Multi-scan consolidation: fold a re-observation axis into shards for O(N)→O(#changes) archival
 
-Status: **proposed — benchmark-gated** (2026-09-21). Cross-consumer, but narrower than the tier ladder (see "Generality"). Origin: marin-gcs-usage (`wt/cw-s3`, session `41e25a3f`) re-scans a GCS fleet on a 12h cadence and stores **one full pyramid per scan** — each scan ~a duplicate of the last. This spec captures the pyrmts-side capability to compress that redundancy. It is a **storage-layer optimization, opt-in**, orthogonal to tiers / monoids / cascade; the read path must "speak" it too. Not scheduled; the (a)-vs-(b) encoder choice is gated on a benchmark against real scans.
+Status: **Phase 1 landed (2026-09-21); (a)-vs-(b) decided by synthetic benchmark, pending real-scan confirmation.** Cross-consumer, but narrower than the tier ladder (see "Generality"). Origin: marin-gcs-usage (`wt/cw-s3`, session `41e25a3f`) re-scans a GCS fleet on a 12h cadence and stores **one full pyramid per scan** — each scan ~a duplicate of the last. This spec captures the pyrmts-side capability to compress that redundancy. It is a **storage-layer optimization, opt-in**, orthogonal to tiers / monoids / cascade; the read path must "speak" it too.
+
+**Phase 1 result (synthetic sweep, `multiscan-bench`, 50k keys × 30 scans, 0.5%/scan births):** the **interval encoder (b) wins the entire churn sweep** — 27.7× vs. the O(#scans) baseline at 0% value-churn, 22.4× @ 1%, 13.8× @ 5%, still 6.7× @ 20% — and beats densify (a) at every point (e.g. 725 KB vs. 1027 KB at 0%). This confirms the prior below (b > a). The remaining gate is cw-s3 running the same pure `consolidate_tables` on their 79 real scans for the operating point before Phase 2 (read path) is built.
 
 Companion: [`pyrmts-column-cube.md`](./pyrmts-column-cube.md) covers the *other* redundancy (across-tier, within a scan) — different axis, different mechanism; see "Two redundancies" below. Prior art in the origin repo: `specs/storage.md` there raises cross-scan queries + "RLE on repeated paths" but never specs the compaction itself.
 
@@ -84,22 +86,22 @@ Grouping/stride and the encoder are **project-tuned knobs** — pyrmts offers th
 
 The win is empirical — it hinges on the stable long tail dominating the churny dirs (tmp-ttl / ckpt change a lot; the long tail does not). Deliver, in order:
 
-1. **Encode + extract for both (a) and (b)** (the pure algo; no serve path yet).
-2. **Synthetic-churn harness** in pyrmts: a generator with a tunable churn fraction, producing N aligned single-scan shard-sets; measure rows + bytes for (a) vs (b) vs the O(N) baseline across the churn sweep → the crossover curve.
-3. **Real operating point:** cw-s3 runs the same algo against the 79 real scans (they hold the L2 files + the reader) → the actual ratio and the a/b verdict. pyrmts stays dependency-free of their storage.
+1. **Encode + extract for both (a) and (b)** (the pure algo; no serve path yet). ✓ `pyrmts/multiscan.py`.
+2. **Synthetic-churn harness** in pyrmts: a generator with a tunable churn fraction, producing N aligned single-scan shard-sets; measure rows + bytes for (a) vs (b) vs the O(N) baseline across the churn sweep → the crossover curve. ✓ `pyrmts-engine multiscan-bench` (result in Status above — interval wins the sweep).
+3. **Real operating point:** cw-s3 runs the same algo against the 79 real scans (they hold the L2 files + the reader) → the actual ratio and the a/b verdict. pyrmts stays dependency-free of their storage. **← next, cw-s3's to run.**
 4. **Decide a/b**, then build the read path + finalize the CLI.
 
 Measure: total bytes (the O(N) claim), row counts (metadata overhead on the tail), and extract-verify (logical RT holds for both).
 
 ## Deliverables / phasing
 
-- **Phase 0 (this spec).** Commit; keep tabled pending the benchmark verdict, exactly as the column-cube waits on crashes' numbers.
-- **Phase 1 (prototype, unblocks the decision).** `consolidate`/`extract` for both encoders + synthetic harness + digest-verified logical RT. Hand cw-s3 the algo for the real-data run.
-- **Phase 2 (after a/b picked).** Read path (point / diff / range) + `pyrmts_engine` CLI hardening + config surface for the opt-in MS layout.
+- **Phase 0 (this spec).** ✓ Committed.
+- **Phase 1 (prototype, unblocks the decision).** ✓ **Done.** Pure algo (`pyrmts/multiscan.py`: `consolidate_tables` / `extract_table` / `scan_digest` / `MultiScan`, both encoders, exported from `pyrmts`), digest-verified logical RT, and the synthetic `multiscan-bench` harness (`pyrmts_engine`). 13 tests (`test_multiscan.py` + a `test_cli.py` case). cw-s3 wires `consolidate_tables` over their real scans for step 3 — no pyrmts dependency on their storage.
+- **Phase 2 (after a/b confirmed on real data).** Read path (point / diff / range) + `pyrmts_engine consolidate`/`extract` storage driver + config surface for the opt-in MS layout.
 
 ## Open questions
 
-- **Encoder:** (a) densify+RLE vs (b) interval-rows — the benchmark's job. Prior: (b).
+- **Encoder:** ~~(a) densify+RLE vs (b) interval-rows~~ — **decided: (b)**, which wins the whole synthetic churn sweep (see Status). Confirm on cw-s3's real scans before Phase 2 commits to it.
 - **Config surface:** does an MS layout need a new block on `Pyramid` (like `geo:` / `identityRollup:`), or is it purely a `pyrmts_engine` driver + storage-key convention with no pyramid-config change? Leaning driver-only (it changes physical layout, not the logical pyramid) — confirm against the read path's needs.
 - **Digest definition:** canonical sorted-row hash over which columns, and how to make it writer-independent (so it survives a foreign-writer original) — the sorted logical tuples, not the file bytes.
 - **Non-invariant binCol:** for `mtime`-style movable bins, is interval-splitting on key migration acceptable, or do some consumers want a key-identity notion that tracks a moved bin? Start with tuple-keying; revisit only if a consumer needs it.

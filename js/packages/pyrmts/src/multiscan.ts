@@ -240,6 +240,89 @@ export function seriesFor(ms: MultiScan, schema: Schema, key: Row): SeriesPoint[
   return ms.scans.map((scan, j) => ({ scan, state: toRow(byScan.get(j) ?? id) }))
 }
 
+// ── Scan-location manifest (routing) — the TS reader-side twin of
+// `pyrmts_engine.multiscan_index`. Decoding a shard is self-describing, but the
+// reader must first know *which* shard holds a scan (individual vs folded into
+// which archive) — from the manifest, not a footer read. `resolveScan` is the
+// routing decision over a tile's multi-scan entries; a null means "not
+// consolidated — fall back to the single-scan `ShardIndex`".
+
+/** One consolidated-tile row of the routing manifest (`pyramid_multiscans`).
+ * `scans` is the ordered member list — the routing key (fold-index =
+ * `scans.indexOf(S)`). */
+export interface MultiScanIndexEntry {
+  dataset: string
+  tier: string
+  shardDur: string
+  periodStart: number
+  periodEnd: number
+  key: string
+  scans: string[]
+  encoder: MultiScanEncoder
+  writtenAt: number
+  digests?: Record<string, string>
+}
+
+/** Where a scan's data lives: the archive `key` and the scan's fold index within
+ * it. */
+export interface ScanLocation {
+  key: string
+  foldIndex: number
+  encoder: MultiScanEncoder
+}
+
+/** The routing decision: the archive covering `scan`, or null (the caller then
+ * falls back to the single-scan `ShardIndex`). Assumes at most one covering
+ * entry per tile (the driver never double-consolidates a scan). */
+export function resolveScan(entries: MultiScanIndexEntry[], scan: string): ScanLocation | null {
+  for (const e of entries) {
+    const foldIndex = e.scans.indexOf(scan)
+    if (foldIndex >= 0) return { key: e.key, foldIndex, encoder: e.encoder }
+  }
+  return null
+}
+
+interface RawManifestRow {
+  dataset: string
+  tier: string
+  shard_dur: string
+  period_start: number
+  period_end: number
+  key: string
+  scans: string[]
+  encoder: MultiScanEncoder
+  written_at: number
+  digests?: Record<string, string>
+}
+
+function entryFromRow(r: RawManifestRow): MultiScanIndexEntry {
+  return {
+    dataset: r.dataset,
+    tier: r.tier,
+    shardDur: r.shard_dur,
+    periodStart: r.period_start,
+    periodEnd: r.period_end,
+    key: r.key,
+    scans: r.scans,
+    encoder: r.encoder,
+    writtenAt: r.written_at,
+    ...(r.digests ? { digests: r.digests } : {}),
+  }
+}
+
+/** Parse the JSONL routing manifest (as `pyrmts_engine.StorageJsonlMultiScanIndex`
+ * writes it), optionally filtering to one `dataset` scope. */
+export function parseMultiScanIndex(bytes: Uint8Array, dataset?: string): MultiScanIndexEntry[] {
+  const text = new TextDecoder().decode(bytes)
+  const entries: MultiScanIndexEntry[] = []
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    const entry = entryFromRow(JSON.parse(line) as RawManifestRow)
+    if (dataset === undefined || entry.dataset === dataset) entries.push(entry)
+  }
+  return entries
+}
+
 function normalizeRow(row: Record<string, unknown>): Row {
   const out: Row = {}
   for (const k in row) {

@@ -132,10 +132,19 @@ export {
   extractScan,
   identities,
   keyStateCols,
+  parseMultiScanIndex,
   readMultiScan,
+  resolveScan,
   seriesFor,
 } from './multiscan.js'
-export type { MultiScan, MultiScanEncoder, SeriesPoint, State } from './multiscan.js'
+export type {
+  MultiScan,
+  MultiScanEncoder,
+  MultiScanIndexEntry,
+  ScanLocation,
+  SeriesPoint,
+  State,
+} from './multiscan.js'
 
 export { buildQueryUrl, fetchPyramidQuery } from './query.js'
 export type {

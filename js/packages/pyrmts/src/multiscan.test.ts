@@ -11,7 +11,9 @@ import {
   diffScans,
   diffTables,
   extractScan,
+  parseMultiScanIndex,
   readMultiScan,
+  resolveScan,
   seriesFor,
   type MultiScan,
 } from './multiscan.js'
@@ -144,5 +146,38 @@ describe('readMultiScan', () => {
   test('rejects a parquet with no multiscan metadata', async () => {
     const buf = parquetWriteBuffer({ columnData: [{ name: 'dt', type: 'INT64', data: [0n] }] })
     await expect(readMultiScan(new Uint8Array(buf))).rejects.toThrow(/no pyrmts.multiscan metadata/)
+  })
+})
+
+describe('routing manifest', () => {
+  // The exact JSONL row shape `pyrmts_engine.StorageJsonlMultiScanIndex` writes
+  // (snake_case keys), so the two sides speak the same on-disk manifest.
+  const jsonl = [
+    JSON.stringify({
+      dataset: 'usage', tier: 'base', shard_dur: '1mo',
+      period_start: 0, period_end: 1, key: 'p/base/1mo/2026-01.parquet',
+      scans: ['s0', 's1', 's2'], encoder: 'interval', written_at: 7,
+      digests: { s0: 'd0', s1: 'd1', s2: 'd2' },
+    }),
+    JSON.stringify({
+      dataset: 'other', tier: 'base', shard_dur: '1mo',
+      period_start: 0, period_end: 1, key: 'k2', scans: ['x'], encoder: 'interval', written_at: 8,
+    }),
+  ].join('\n') + '\n'
+
+  test('parses + dataset-scopes the manifest', () => {
+    const all = parseMultiScanIndex(new TextEncoder().encode(jsonl))
+    expect(all.map(e => e.dataset)).toEqual(['usage', 'other'])
+    const usage = parseMultiScanIndex(new TextEncoder().encode(jsonl), 'usage')
+    expect(usage).toHaveLength(1)
+    expect(usage[0]).toMatchObject({ shardDur: '1mo', periodStart: 0, key: 'p/base/1mo/2026-01.parquet' })
+  })
+
+  test('resolveScan routes to the archive with fold index, else null', () => {
+    const usage = parseMultiScanIndex(new TextEncoder().encode(jsonl), 'usage')
+    expect(resolveScan(usage, 's2')).toEqual({
+      key: 'p/base/1mo/2026-01.parquet', foldIndex: 2, encoder: 'interval',
+    })
+    expect(resolveScan(usage, 's9')).toBeNull() // not consolidated → caller falls back
   })
 })

@@ -213,3 +213,32 @@ def test_multiscan_cli_consolidate_then_extract(tmp_path: Path):
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == 's1: 2 rows, digest verified'
     assert _rows(pq.read_table(ext)) == _rows(_shard(SCANS['s1']))
+
+
+def test_multiscan_cli_indexed_consolidate_drops_and_routes(tmp_path: Path):
+    """`--index`/`--dataset`/`--drop`: records the routing manifest, then deletes
+    the individuals — extract still works from the archive afterward."""
+    from pyrmts_engine.multiscan_index import StorageJsonlMultiScanIndex, resolve_scan
+
+    root = _seed_scans(tmp_path)
+    config = tmp_path / 'pyr.yaml'
+    config.write_text(CONFIG_YAML)
+    out = tmp_path / 'ms'
+    rng = '2026-01-01T00:00/2026-02-01T00:00'
+    key = substitute_key(KEY_TEMPLATE, {'tier': 'base', 'shard': '1mo', 'period': _period()})
+
+    result = CliRunner().invoke(cli, [
+        'multiscan', 'consolidate', '-o', str(out), '-r', rng, '-R', str(root),
+        '-s', 's0', '-s', 's1', '-s', 's2', '-S', '1mo', '-t', 'base',
+        '-D', 'usage', '-i', 'ms.jsonl', '-x', str(config),
+    ])
+    assert result.exit_code == 0, result.output
+    # Manifest routes s2 → the archive key at fold-index 2.
+    recs = StorageJsonlMultiScanIndex(FsStorage(out), 'ms.jsonl').list_multiscans('usage')
+    assert resolve_scan(recs, 's2').key == key
+    assert resolve_scan(recs, 's2').fold_index('s2') == 2
+    # Individuals dropped; the archive still extracts every scan.
+    assert all(not (root / label / key).exists() for label in SCANS)
+    for label, rows in SCANS.items():
+        got = extract_scan(FsStorage(out), key, label, _pyramid(root))
+        assert _rows(got) == _rows(_shard(rows))

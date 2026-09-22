@@ -291,38 +291,61 @@ def multiscan() -> None:
 
 
 @multiscan.command('consolidate')
+@option('-D', '--dataset', help="Scan-family scope for the routing manifest (required with --index)")
 @option('-e', '--engine', type=Choice(['python', 'duckdb']), default='python', help="Consolidation backend: in-memory reference (python) or out-of-core (duckdb, needs the [duckdb] extra)")
+@option('-i', '--index', help="Manifest JSONL key (under --out) recording each consolidated tile for routing; needs --dataset")
 @option('-o', '--out', required=True, help="Output root for the consolidated multi-scan shards")
 @option('-r', '--range', 'range_', required=True, help="Half-open scan range <from-iso>/<to-iso> (UTC) selecting shard periods")
 @option('-R', '--root', required=True, help="Scans root; each member scan is a subdir <root>/<label>/")
 @option('-s', '--scan', 'scan_labels', multiple=True, required=True, help="Member scan subdir label, in observation order (repeatable)")
 @option('-S', '--shard', required=True, help="Shard duration to consolidate (e.g. 1mo)")
 @option('-t', '--tier', required=True, help="Tier name to consolidate")
+@option('-x', '--drop', is_flag=True, help="After recording the manifest, digest-verify then delete the individual per-scan shards (needs --index)")
 @argument('config')
 def multiscan_consolidate(
+    dataset: str | None,
     engine: str,
+    index: str | None,
     out: str,
     range_: str,
     root: str,
     scan_labels: tuple[str, ...],
     shard: str,
     tier: str,
+    drop: bool,
     config: str,
 ) -> None:
     """Consolidate the member scans' `tier`@`shard` tiles over the range into
     multi-scan shards at `--out`. The `python` engine folds in memory (peak
     O(#keys per tile)); `duckdb` reads the shards out-of-core (byte-identical
-    output) for fleet scale."""
-    from .multiscan_driver import consolidate_range
+    output) for fleet scale. With `--index`/`--dataset`, records each tile in a
+    routing manifest; add `--drop` to safely delete the individuals after."""
+    from .multiscan_driver import consolidate_range, drop_consolidated_scans
+    from .multiscan_index import StorageJsonlMultiScanIndex
+
+    if index and not dataset:
+        raise SystemExit("multiscan consolidate: --index needs --dataset")
+    if drop and not index:
+        raise SystemExit("multiscan consolidate: --drop needs --index (reads must route to the archive first)")
 
     pyramid = _load_pyramid(config, None)
     scans = [(label, FsStorage(Path(root) / label)) for label in scan_labels]
+    out_storage = FsStorage(out)
+    ms_index = StorageJsonlMultiScanIndex(out_storage, index) if index else None
     written = consolidate_range(
-        scans, pyramid, tier, shard, _parse_range(range_), FsStorage(out), engine=engine,
+        scans, pyramid, tier, shard, _parse_range(range_), out_storage,
+        engine=engine, ms_index=ms_index, dataset=dataset,
     )
     for key, rows, n in written:
         print(f"{key}\t{rows} rows\t{n} scans")
-    err(f"multiscan consolidate: {len(written)} tiles, {len(scan_labels)} scans ({engine})")
+    dropped = 0
+    if drop:
+        for key, _, _ in written:
+            dropped += len(drop_consolidated_scans(scans, out_storage, key, pyramid))
+    err(
+        f"multiscan consolidate: {len(written)} tiles, {len(scan_labels)} scans "
+        f"({engine}{', indexed' if index else ''}{f', dropped {dropped}' if drop else ''})"
+    )
 
 
 @multiscan.command('extract')

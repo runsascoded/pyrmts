@@ -447,6 +447,7 @@ def bench() -> None:
 @option('-j', '--json', 'json_out', is_flag=True, help="Print the results as JSON on stdout (human table always on stderr)")
 @option('-l', '--listing', type=Choice(['filter', 'bisect']), default='filter', help="Walk: search a decoded row group by a vectorized filter (wins at small RGs) or by bisection over its sorted keys (wins at 64K+-row RGs)")
 @option('-n', '--repeat', type=int, default=2, help="Walk runs (first = cold footer, rest = warm)")
+@option('-O', '--order', type=Choice(['level', 'bestfirst']), default='level', help="Walk order: level-synchronous (one dependent round per tree level) or best-first (largest |Δ| first, sequential)")
 @option('-p', '--parallel', type=int, default=8, help="In-flight requests for the modelled wall time")
 @option('-r', '--root', default='', help="View root path ('' = the scan root)")
 @option('-t', '--rtt', default='0,30', help="Modelled per-request latencies (ms), comma-separated")
@@ -454,7 +455,7 @@ def bench() -> None:
 def bench_diff(
     scan_a: str, scan_b: str, budget: int, cell_px: float, cols: str, engine: str,
     no_footer_cache: bool, no_rg_cache: bool, height: int, json_out: bool, listing: str, repeat: int,
-    parallel: int, root: str, rtt: str, width: int,
+    order: str, parallel: int, root: str, rtt: str, width: int,
 ) -> None:
     """Index-free diff walk vs. materialized pairwise diff, on two real scans:
     per-stage CPU, requests, bytes, and modelled wall time at each RTT."""
@@ -493,7 +494,7 @@ def bench_diff(
             t0 = time.perf_counter()
             ra = SnapshotReader(scan_a, c, stats=stats, footer_cache=footer_cache, rg_cache=not no_rg_cache, listing=listing)
             rb = SnapshotReader(scan_b, c, stats=stats, footer_cache=footer_cache, rg_cache=not no_rg_cache, listing=listing)
-            res = walk_diff(ra, rb, root, floor=floor, budget=budget)
+            res = walk_diff(ra, rb, root, floor=floor, budget=budget, order=order)
             wall = (time.perf_counter() - t0) * 1000
             run = {
                 'run': k, 'rows': len(res.rows), 'expansions': res.expansions, 'truncated': res.truncated,
@@ -504,7 +505,7 @@ def bench_diff(
             err(
                 f"walk run {k}: {len(res.rows)} rows, {res.expansions} expansions, {stats.listings} listings, "
                 f"{stats.requests} RG reads in {stats.gets} GETs / {stats.bytes/1e6:.1f} MB, rg decodes {stats.rg_decodes} (cache hits {stats.rg_cache_hits}), "
-                f"footer parses {stats.footer_parses}; cpu {stats.cpu_ms:.0f} ms "
+                f"footer parses {stats.footer_parses}; {stats.round_trips} dependent rounds; cpu {stats.cpu_ms:.0f} ms "
                 f"(footer {stats.ms['footer']:.0f}, locate {stats.ms['locate']:.0f}, read {stats.ms['read']:.0f}, post {stats.ms['post']:.0f}); "
                 f"local wall {wall:.0f} ms; modelled @rtt " + ', '.join(f"{r:g}ms→{stats.wall_model(r, parallel):.0f}ms" for r in rtts)
                 + (" [budget-cut]" if res.truncated else "")

@@ -114,7 +114,9 @@ def test_rg_cache_and_footer_cache_are_counted(tmp_path: Path):
     assert s3.rg_cache_hits == 0 and s3.requests == s1.requests + s1.rg_cache_hits
     assert s3.bytes > s1.bytes
     assert 0 < s1.gets <= s1.requests
-    assert s1.wall_model(30, 8) == s1.cpu_ms + s1.gets / 8 * 30
+    assert sum(s1.rounds) == s1.gets
+    trips = sum(-(-n // 8) for n in s1.rounds if n)
+    assert s1.wall_model(30, 8) == s1.cpu_ms + trips * 30
 
 
 def test_filter_listing_matches_bisect(tmp_path: Path):
@@ -138,6 +140,24 @@ def test_view_slice_collapses_added_and_removed_subtrees(tmp_path: Path):
     assert 'r/n' in paths and 'r/n/y' not in paths and 'r/n/z' not in paths
     walk = walk_diff(SnapshotReader(a), SnapshotReader(b), '')
     assert {r.path for r in walk.rows if r.path.startswith('r/q') or r.path.startswith('r/n')} == {'r/q', 'r/n'}
+
+
+def test_level_order_rounds_equal_expanded_depth_and_match_bestfirst(tmp_path: Path):
+    a = _write(_tree_a(), tmp_path / 'a.parquet')
+    b = _write(_tree_b(), tmp_path / 'b.parquet')
+    s_level = Stats()
+    r_level = walk_diff(SnapshotReader(a, stats=s_level), SnapshotReader(b, stats=s_level), '', order='level')
+    s_best = Stats()
+    r_best = walk_diff(SnapshotReader(a, stats=s_best), SnapshotReader(b, stats=s_best), '', order='bestfirst')
+    key = lambda res: sorted((r.path, r.status, r.size_a, r.size_b, r.pruned) for r in res.rows)
+    assert key(r_level) == key(r_best)
+    # Expanded levels: '' (0), r (1), r/b + r/z (2), r/b/sub (3), big.bin (4) → 5 rounds, one per depth.
+    assert len(s_level.rounds) == 5
+    assert s_level.round_trips <= 5
+    assert sum(s_level.rounds) == s_level.gets
+    # Best-first records one round per expansion: 6 sequential rounds.
+    assert len(s_best.rounds) == 6
+    assert s_level.round_trips <= s_best.round_trips
 
 
 def test_node_lookup_and_missing_root(tmp_path: Path):

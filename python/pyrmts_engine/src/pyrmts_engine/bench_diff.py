@@ -6,9 +6,9 @@ The question: can a diff-treemap view between any two scans be served by a
 rendering-bounded best-first walk over two random-access snapshots (no extra
 index), and how does that compare to materializing the full pairwise diff?
 
-**Walk** (`walk_diff`): pop the dir with the largest |Δ|, list its children in
-both scans (one row-group-pruned read per side), merge-join by name, push the
-changed subdirs. It stops at the **render floor** — a dir whose size on both
+**Walk** (`walk_diff`): expand pending dirs level by level (or largest-|Δ|
+first), list each one's children in both scans (one row-group-pruned read per
+side), merge-join by name, push the changed subdirs. It stops at the **render floor** — a dir whose size on both
 sides and |Δ| are all below `floor` bytes cannot be drawn, so it is never
 expanded — plus an expansion `budget` as a backstop. Levers, each a flag:
 `footer_cache` (decoded parquet metadata reused across opens), `rg_cache`
@@ -62,6 +62,7 @@ class Stats:
     footer_parses: int = 0
     listings: int = 0
     expansions: int = 0
+    rounds: list[int] = field(default_factory=list)   # GETs issued per dependent round (level-synchronous walk)
     ms: dict[str, float] = field(default_factory=lambda: {'locate': 0.0, 'read': 0.0, 'post': 0.0, 'footer': 0.0})
 
     @property
@@ -69,15 +70,27 @@ class Stats:
         return sum(self.ms.values())
 
     def wall_model(self, rtt_ms: float, parallel: int = 8) -> float:
-        """Modelled wall time: CPU plus one round trip per range GET at `rtt_ms`,
-        up to `parallel` in flight (the walk batches expansions)."""
-        return self.cpu_ms + (self.gets / max(1, parallel)) * rtt_ms
+        """Modelled wall time: CPU plus the dependent round trips. A dir can only
+        be expanded after its parent's listing returned, so the walk's GETs
+        happen in `rounds` (one per tree level in level-synchronous order); a
+        round with more GETs than `parallel` in flight takes ⌈n / parallel⌉
+        trips. Without recorded rounds (best-first order) the optimistic
+        `gets / parallel` is used."""
+        if self.rounds:
+            trips = sum(-(-n // max(1, parallel)) for n in self.rounds if n)
+        else:
+            trips = self.gets / max(1, parallel)
+        return self.cpu_ms + trips * rtt_ms
+
+    @property
+    def round_trips(self) -> int:
+        return sum(1 for n in self.rounds if n)
 
     def as_dict(self) -> dict:
         return {
             'requests': self.requests, 'gets': self.gets, 'bytes': self.bytes, 'rg_decodes': self.rg_decodes,
             'rg_cache_hits': self.rg_cache_hits, 'footer_parses': self.footer_parses,
-            'listings': self.listings, 'expansions': self.expansions,
+            'listings': self.listings, 'expansions': self.expansions, 'rounds': list(self.rounds),
             'ms': {k: round(v, 1) for k, v in self.ms.items()}, 'cpu_ms': round(self.cpu_ms, 1),
         }
 
@@ -257,10 +270,20 @@ def walk_diff(
     *,
     floor: int = 0,
     budget: int = 10_000,
+    order: str = 'level',
 ) -> WalkResult:
-    """Best-first pruned recursive diff between two snapshots under `root`, bounded
-    by the render `floor` (bytes) and an expansion `budget`. Returns every
-    changed row met plus `pruned` marks where change may hide below."""
+    """Pruned recursive diff between two snapshots under `root`, bounded by the
+    render `floor` (bytes) and an expansion `budget`. Returns every changed row
+    met plus `pruned` marks where change may hide below.
+
+    `order='level'`: level-synchronous — every pending expansion at one depth is
+    listed in the same round (they are independent; only a parent → child
+    edge is a dependency), so the number of dependent round trips equals the
+    depth of the expanded tree. Rounds are recorded in `ra.stats.rounds`.
+    `order='bestfirst'`: pop the largest-|Δ| dir first, one at a time — the
+    right order under a budget cut, but its round trips are sequential."""
+    if order not in ('level', 'bestfirst'):
+        raise ValueError(f"walk_diff: order must be 'level' or 'bestfirst', got {order!r}")
     root_depth = 0 if root in ('', '.') else root.count('/') + 1
     rows: list[DeltaRow] = []
     by_path: dict[str, DeltaRow] = {}
@@ -269,44 +292,60 @@ def walk_diff(
     expansions = 0
     truncated = False
     stats = ra.stats
+    stats.rounds = []
+
+    def gets() -> int:
+        return stats.gets + (rb.stats.gets if rb.stats is not stats else 0)
+
     while heap:
         if expansions >= budget:
             truncated = True
             break
-        _, d, _, rel = heapq.heappop(heap)
-        ca = ra.children(rel, d)
-        cb = rb.children(rel, d)
-        expansions += 1
-        stats.expansions += 1
-        if rel in by_path:
-            by_path[rel].expanded = True
-        for name in sorted(set(ca) | set(cb)):
-            sa, na = ca.get(name, (0, 0))
-            sb, nb = cb.get(name, (0, 0))
-            in_a, in_b = name in ca, name in cb
-            row = DeltaRow(name, d + 1, '', sa, sb, na, nb)
-            if not in_a:
-                row.status = 'added'
-            elif not in_b:
-                row.status = 'removed'
-            elif sa != sb or na != nb:
-                row.status = 'changed'
-            else:
-                row.status = 'unchanged'
-            by_path[name] = row
-            if row.status == 'changed':
-                # Only a changed node present on both sides can hide change
-                # below it; added/removed rows already tell the whole story.
-                if max(sa, sb) < floor and abs(row.delta) < floor:
-                    row.pruned = True     # below the render floor: not drawable
+        if order == 'level':
+            # The whole shallowest level is one round (never past the budget).
+            level = min(h[1] for h in heap)
+            at_level = [h for h in heap if h[1] == level]
+            batch = at_level[:budget - expansions]
+            heap = [h for h in heap if h[1] != level] + at_level[len(batch):]
+            heapq.heapify(heap)
+        else:
+            batch = [heapq.heappop(heap)]
+        gets_before = gets()
+        for _, d, _, rel in batch:
+            ca = ra.children(rel, d)
+            cb = rb.children(rel, d)
+            expansions += 1
+            stats.expansions += 1
+            if rel in by_path:
+                by_path[rel].expanded = True
+            for name in sorted(set(ca) | set(cb)):
+                sa, na = ca.get(name, (0, 0))
+                sb, nb = cb.get(name, (0, 0))
+                in_a, in_b = name in ca, name in cb
+                row = DeltaRow(name, d + 1, '', sa, sb, na, nb)
+                if not in_a:
+                    row.status = 'added'
+                elif not in_b:
+                    row.status = 'removed'
+                elif sa != sb or na != nb:
+                    row.status = 'changed'
                 else:
-                    # No `kind` column in general (a prefix with one object and
-                    # the object itself both carry count 1), so a leaf is found
-                    # by an empty listing — one locate, usually no read.
-                    seq += 1
-                    heapq.heappush(heap, (-abs(row.delta), d + 1, seq, name))
-            if row.status != 'unchanged':
-                rows.append(row)
+                    row.status = 'unchanged'
+                by_path[name] = row
+                if row.status == 'changed':
+                    # Only a changed node present on both sides can hide change
+                    # below it; added/removed rows already tell the whole story.
+                    if max(sa, sb) < floor and abs(row.delta) < floor:
+                        row.pruned = True     # below the render floor: not drawable
+                    else:
+                        # No `kind` column in general (a prefix with one object and
+                        # the object itself both carry count 1), so a leaf is found
+                        # by an empty listing — one locate, usually no read.
+                        seq += 1
+                        heapq.heappush(heap, (-abs(row.delta), d + 1, seq, name))
+                if row.status != 'unchanged':
+                    rows.append(row)
+        stats.rounds.append(gets() - gets_before)
     for _, _, _, rel in heap:            # budget-cut: queued but never expanded
         r = by_path.get(rel)
         if r is not None:

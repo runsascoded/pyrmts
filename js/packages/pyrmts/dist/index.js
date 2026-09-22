@@ -21,6 +21,7 @@ export { ManifestShardIndex } from './manifest-shard-index.js';
 export { memStorage } from './storage.js';
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js';
 export { MULTISCAN_META_KEY, SCAN_COL, SCAN_HI, SCAN_LO, diffScans, diffTables, extractScan, identities, keyStateCols, parseMultiScanIndex, readMultiScan, resolveScan, seriesAcrossGroups, seriesFor, } from './multiscan.js';
+export { changesetBetween, changesetFromRows, changesetToRows, composeChangesets, diffOverSpan, jumps, parseDiffIndexManifest, readChangesetNode, } from './diffindex.js';
 export { buildQueryUrl, fetchPyramidQuery } from './query.js';
 export const VERSION = '0.0.0';
 //# sourceMappingURL=index.js.map

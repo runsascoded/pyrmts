@@ -323,6 +323,30 @@ export function parseMultiScanIndex(bytes: Uint8Array, dataset?: string): MultiS
   return entries
 }
 
+/** Stitch a key's over-time line across capped-K sealed groups: order the tile's
+ * manifest entries by scan span, load each group's shard (via `load` — the
+ * consumer's footer-pruned fetch), `seriesFor` within it, and concat in scan
+ * order. Keeps the IO in the consumer and the routing/ordering in pyrmts. Pass
+ * only one tile's entries (one dataset + tier + period lineage). */
+export async function seriesAcrossGroups(
+  entries: MultiScanIndexEntry[],
+  schema: Schema,
+  key: Row,
+  load: (archiveKey: string) => Promise<MultiScan>,
+): Promise<SeriesPoint[]> {
+  const ordered = [...entries].sort((a, b) => {
+    if (a.periodStart !== b.periodStart) return a.periodStart - b.periodStart
+    const [a0, b0] = [a.scans[0] ?? '', b.scans[0] ?? '']
+    return a0 < b0 ? -1 : a0 > b0 ? 1 : 0
+  })
+  const out: SeriesPoint[] = []
+  for (const e of ordered) {
+    const ms = await load(e.key)
+    out.push(...seriesFor(ms, schema, key))
+  }
+  return out
+}
+
 function normalizeRow(row: Record<string, unknown>): Row {
   const out: Row = {}
   for (const k in row) {

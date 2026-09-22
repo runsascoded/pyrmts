@@ -293,6 +293,7 @@ def multiscan() -> None:
 @multiscan.command('consolidate')
 @option('-D', '--dataset', help="Scan-family scope for the routing manifest (required with --index)")
 @option('-e', '--engine', type=Choice(['python', 'duckdb']), default='python', help="Consolidation backend: in-memory reference (python) or out-of-core (duckdb, needs the [duckdb] extra)")
+@option('-g', '--group-size', type=int, default=0, help="Seal every K consecutive scans into a separate immutable archive (capped-K), one manifest row each; 0 = one archive over all scans")
 @option('-i', '--index', help="Manifest JSONL key (under --out) recording each consolidated tile for routing; needs --dataset")
 @option('-o', '--out', required=True, help="Output root for the consolidated multi-scan shards")
 @option('-r', '--range', 'range_', required=True, help="Half-open scan range <from-iso>/<to-iso> (UTC) selecting shard periods")
@@ -305,6 +306,7 @@ def multiscan() -> None:
 def multiscan_consolidate(
     dataset: str | None,
     engine: str,
+    group_size: int,
     index: str | None,
     out: str,
     range_: str,
@@ -318,9 +320,10 @@ def multiscan_consolidate(
     """Consolidate the member scans' `tier`@`shard` tiles over the range into
     multi-scan shards at `--out`. The `python` engine folds in memory (peak
     O(#keys per tile)); `duckdb` reads the shards out-of-core (byte-identical
-    output) for fleet scale. With `--index`/`--dataset`, records each tile in a
-    routing manifest; add `--drop` to safely delete the individuals after."""
-    from .multiscan_driver import consolidate_range, drop_consolidated_scans
+    output) for fleet scale. With `--group-size K`, seals every K scans into a
+    separate immutable archive (capped-K). With `--index`/`--dataset`, records
+    each tile in a routing manifest; add `--drop` to safely delete individuals."""
+    from .multiscan_driver import consolidate_groups, consolidate_range
     from .multiscan_index import StorageJsonlMultiScanIndex
 
     if index and not dataset:
@@ -332,19 +335,22 @@ def multiscan_consolidate(
     scans = [(label, FsStorage(Path(root) / label)) for label in scan_labels]
     out_storage = FsStorage(out)
     ms_index = StorageJsonlMultiScanIndex(out_storage, index) if index else None
-    written = consolidate_range(
-        scans, pyramid, tier, shard, _parse_range(range_), out_storage,
-        engine=engine, ms_index=ms_index, dataset=dataset,
-    )
+    common = dict(engine=engine, ms_index=ms_index, dataset=dataset, drop=drop)
+    if group_size:
+        written = consolidate_groups(
+            scans, pyramid, tier, shard, _parse_range(range_), out_storage,
+            group_size=group_size, **common,
+        )
+    else:
+        written = consolidate_range(
+            scans, pyramid, tier, shard, _parse_range(range_), out_storage, **common,
+        )
     for key, rows, n in written:
         print(f"{key}\t{rows} rows\t{n} scans")
-    dropped = 0
-    if drop:
-        for key, _, _ in written:
-            dropped += len(drop_consolidated_scans(scans, out_storage, key, pyramid))
+    grouping = f", groups of {group_size}" if group_size else ""
     err(
-        f"multiscan consolidate: {len(written)} tiles, {len(scan_labels)} scans "
-        f"({engine}{', indexed' if index else ''}{f', dropped {dropped}' if drop else ''})"
+        f"multiscan consolidate: {len(written)} archives, {len(scan_labels)} scans "
+        f"({engine}{grouping}{', indexed' if index else ''}{', dropped' if drop else ''})"
     )
 
 

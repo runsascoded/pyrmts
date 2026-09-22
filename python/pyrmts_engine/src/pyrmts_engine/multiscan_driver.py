@@ -15,6 +15,7 @@ O(#keys in a tile), not O(#keys × #scans).
 from __future__ import annotations
 
 import io
+import re
 from collections.abc import Iterator, Sequence
 
 import pyarrow as pa
@@ -105,6 +106,7 @@ def consolidate_range(
     compression: str = 'snappy',
     ms_index=None,
     dataset: str | None = None,
+    drop: bool = False,
 ) -> list[tuple[str, int, int]]:
     """Consolidate every `shard`-period tile of `tier` overlapping `range_` and
     write the self-describing multi-scan shard (with `pyrmts.multiscan`
@@ -123,34 +125,94 @@ def consolidate_range(
         raise ValueError(f"consolidate_range: unknown engine {engine!r}; want one of {ENGINES}")
     if (ms_index is None) != (dataset is None):
         raise ValueError("consolidate_range: pass both ms_index and dataset, or neither")
-    from .multiscan_index import MultiScanRecord, now_ms
-
     frm, to = range_
     written: list[tuple[str, int, int]] = []
     for period in shard_periods_covering(frm, to, shard):
         key = _tile_key(pyramid, tier, shard, period.label)
-        if engine == 'duckdb':
-            ms = _consolidate_tile_duckdb(scans, pyramid, key)
-        else:
-            ms = consolidate_scans(_scan_tiles(scans, key), pyramid)
-        buf = io.BytesIO()
-        pq.write_table(to_arrow(ms), buf, compression=compression)
-        out_storage.put(key, buf.getvalue())
-        if ms_index is not None:
-            ms_index.record_multiscan(MultiScanRecord(
-                dataset=dataset,
-                tier=tier,
-                shard_dur=shard,
-                period_start_ms=int(period.start.timestamp() * 1000),
-                period_end_ms=int(period.end.timestamp() * 1000),
-                key=key,
-                scans=list(ms.scans),
-                encoder=ms.encoder,
-                written_at_ms=now_ms(),
-                digests=ms.digests,
-            ))
-        written.append((key, ms.table.num_rows, len(ms.scans)))
+        written.append(_consolidate_one(
+            scans, pyramid, tier, shard, period, key, out_storage,
+            engine=engine, compression=compression, ms_index=ms_index, dataset=dataset, drop=drop,
+        ))
     return written
+
+
+def consolidate_groups(
+    scans: Sequence[tuple[str, Storage]],
+    pyramid: Pyramid,
+    tier: str,
+    shard: str,
+    range_: tuple,
+    out_storage: Storage,
+    *,
+    group_size: int,
+    engine: str = 'python',
+    compression: str = 'snappy',
+    ms_index=None,
+    dataset: str | None = None,
+    drop: bool = False,
+) -> list[tuple[str, int, int]]:
+    """Capped-K consolidation: partition `scans` into consecutive groups of
+    `group_size` and consolidate each group *separately* into its own sealed,
+    immutable archive — the model that avoids the O(K²) rewrite of appending into
+    a running MS. Each group's shard is keyed by the tile period plus the group's
+    first-scan label (so groups sharing a `(tier, period)` don't collide), and
+    gets its own manifest row. Returns `[(key, num_rows, num_scans), ...]`, one
+    per (period, group)."""
+    if group_size < 1:
+        raise ValueError(f"consolidate_groups: group_size must be ≥ 1, got {group_size}")
+    if engine not in ENGINES:
+        raise ValueError(f"consolidate_groups: unknown engine {engine!r}; want one of {ENGINES}")
+    if (ms_index is None) != (dataset is None):
+        raise ValueError("consolidate_groups: pass both ms_index and dataset, or neither")
+    groups = [scans[i:i + group_size] for i in range(0, len(scans), group_size)]
+    frm, to = range_
+    written: list[tuple[str, int, int]] = []
+    for period in shard_periods_covering(frm, to, shard):
+        in_key = _tile_key(pyramid, tier, shard, period.label)
+        for group in groups:
+            glabel = re.sub(r'[^A-Za-z0-9_.-]', '-', group[0][0])
+            out_key = _tile_key(pyramid, tier, shard, f"{period.label}--{glabel}")
+            written.append(_consolidate_one(
+                group, pyramid, tier, shard, period, out_key, out_storage,
+                engine=engine, compression=compression, ms_index=ms_index, dataset=dataset,
+                drop=drop, in_key=in_key,
+            ))
+    return written
+
+
+def _consolidate_one(
+    scans, pyramid, tier, shard, period, out_key, out_storage,
+    *, engine, compression, ms_index, dataset, drop, in_key=None,
+) -> tuple[str, int, int]:
+    """Consolidate one (period, scan-group) → write shard at `out_key`, record
+    the manifest row, and (if `drop`) verify-then-delete the individuals. `in_key`
+    is where the members' individual shards live (defaults to `out_key`)."""
+    from .multiscan_index import MultiScanRecord, now_ms
+
+    read_key = in_key if in_key is not None else out_key
+    if engine == 'duckdb':
+        ms = _consolidate_tile_duckdb(scans, pyramid, read_key)
+    else:
+        ms = consolidate_scans(_scan_tiles(scans, read_key), pyramid)
+    buf = io.BytesIO()
+    pq.write_table(to_arrow(ms), buf, compression=compression)
+    out_storage.put(out_key, buf.getvalue())
+    if ms_index is not None:
+        ms_index.record_multiscan(MultiScanRecord(
+            dataset=dataset,
+            tier=tier,
+            shard_dur=shard,
+            period_start_ms=int(period.start.timestamp() * 1000),
+            period_end_ms=int(period.end.timestamp() * 1000),
+            key=out_key,
+            scans=list(ms.scans),
+            encoder=ms.encoder,
+            written_at_ms=now_ms(),
+            digests=ms.digests,
+        ))
+    if drop:
+        drop_consolidated_scans(scans, out_storage, out_key, pyramid, read_key=read_key)
+    return (out_key, ms.table.num_rows, len(ms.scans))
 
 
 def drop_consolidated_scans(
@@ -160,17 +222,20 @@ def drop_consolidated_scans(
     pyramid: Pyramid,
     *,
     verify: bool = True,
+    read_key: str | None = None,
 ) -> list[str]:
-    """Delete each member scan's individual shard at `key`, once the multi-scan
-    archive is proven to recover it. The safe tail of the consolidation flow:
-    with `verify` (default), extract each scan from the archive and assert its
-    content digest matches the one stored at consolidation — only then delete the
-    original. Returns the dropped scan labels. Never call before the archive is
-    written and (if used) its manifest row recorded."""
+    """Delete each member scan's individual shard, once the multi-scan archive at
+    `key` is proven to recover it. The safe tail of the consolidation flow: with
+    `verify` (default), extract each scan from the archive and assert its content
+    digest matches the one stored at consolidation — only then delete the
+    original (at `read_key`, defaulting to `key` when the archive shares the tile
+    key; distinct for capped-K groups). Returns the dropped scan labels. Never
+    call before the archive is written and (if used) its manifest row recorded."""
     data = ms_storage.get(key)
     if data is None:
         raise ValueError(f"drop_consolidated_scans: no multi-scan shard at {key!r}")
     ms = from_arrow(pq.read_table(io.BytesIO(data)))
+    individual_key = read_key if read_key is not None else key
     dropped: list[str] = []
     for label, storage in scans:
         if verify:
@@ -183,7 +248,7 @@ def drop_consolidated_scans(
                     f"drop_consolidated_scans: digest mismatch for {label!r} "
                     f"(extracted {got}, expected {want}); refusing to drop"
                 )
-        storage.delete(key)
+        storage.delete(individual_key)
         dropped.append(label)
     return dropped
 

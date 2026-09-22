@@ -135,6 +135,7 @@ export {
   parseMultiScanIndex,
   readMultiScan,
   resolveScan,
+  seriesAcrossGroups,
   seriesFor,
 } from './multiscan.js'
 export type {

@@ -14,13 +14,17 @@ import pytest
 
 from pyrmts import Dim, FsStorage, Metric, Pyramid, Tier, from_arrow, substitute_key, to_arrow
 from pyrmts_engine.multiscan_driver import (
+    consolidate_groups,
     consolidate_range,
     drop_consolidated_scans,
+    extract_scan,
 )
 from pyrmts_engine.multiscan_index import (
     MemMultiScanIndex,
     MultiScanRecord,
     StorageJsonlMultiScanIndex,
+    multiscan_d1_ddl,
+    multiscan_d1_row,
     resolve_scan,
 )
 
@@ -49,6 +53,11 @@ def _shard(rows: list[tuple]) -> pa.Table:
     for dt, path, b, o in rows:
         cols['dt'].append(dt); cols['path'].append(path); cols['b'].append(b); cols['o'].append(o)
     return pa.table(cols)
+
+
+def _rows(t: pa.Table) -> list[tuple]:
+    d = t.to_pydict()
+    return sorted(zip(d['dt'], d['path'], d['b'], d['o']))
 
 
 def _key() -> str:
@@ -152,3 +161,48 @@ def test_drop_refuses_on_digest_mismatch(tmp_path: Path):
 
 def _to_bytes(t: pa.Table) -> bytes:
     buf = io.BytesIO(); pq.write_table(t, buf); return buf.getvalue()
+
+
+# ── Capped-K grouping.
+
+
+def test_consolidate_groups_seals_capped_k(tmp_path: Path):
+    """`--group-size 2` over 3 scans → two sealed archives ([s0,s1], [s2]) at
+    distinct keys, each with its own manifest row; routing sends a scan to its
+    group; each archive extracts its members."""
+    root, scans = _seed(tmp_path)
+    pyr = _pyramid(root)
+    out = FsStorage(tmp_path / 'ms')
+    idx = MemMultiScanIndex()
+    written = consolidate_groups(
+        scans, pyr, 'base', '1mo', RANGE, out,
+        group_size=2, ms_index=idx, dataset='usage',
+    )
+    assert [n for _, _, n in written] == [2, 1]              # group sizes: [s0,s1], [s2]
+    recs = idx.list_multiscans('usage')
+    assert [r.scans for r in recs] == [['s0', 's1'], ['s2']]
+    assert len({r.key for r in recs}) == 2                   # distinct group keys, no collision
+    # Routing: each scan resolves to its own group's archive.
+    assert resolve_scan(recs, 's1').scans == ['s0', 's1']
+    assert resolve_scan(recs, 's2').scans == ['s2']
+    # Each archive extracts its members (b's 20→30 change lives inside group 0).
+    g0 = resolve_scan(recs, 's0').key
+    assert _rows(extract_scan(out, g0, 's1', pyr)) == _rows(_shard(SCANS['s1']))
+
+
+# ── D1 schema + row shape (pyrmts owns; the consumer writes via its CF-D1 path).
+
+
+def test_multiscan_d1_ddl_and_row_shape():
+    ddl = multiscan_d1_ddl()
+    assert ddl.startswith('CREATE TABLE IF NOT EXISTS "pyramid_multiscans"')
+    assert 'PRIMARY KEY (dataset, key)' in ddl               # unique per sealed group
+    rec = MultiScanRecord('usage', 'base', '1mo', 0, 1, 'k', ['s0', 's1'], 'interval', 7, {'s0': 'd0'})
+    assert multiscan_d1_row(rec) == {
+        'dataset': 'usage', 'tier': 'base', 'shard_dur': '1mo',
+        'period_start': 0, 'period_end': 1, 'key': 'k',
+        'scans': '["s0", "s1"]',                             # JSON array (D1 has no array type)
+        'encoder': 'interval', 'digests': '{"s0": "d0"}', 'written_at': 7,
+    }
+    # digests omitted → SQL NULL.
+    assert multiscan_d1_row(MultiScanRecord('u', 'base', '1mo', 0, 1, 'k', ['s0'], 'interval', 7))['digests'] is None

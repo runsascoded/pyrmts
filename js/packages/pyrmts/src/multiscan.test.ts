@@ -14,8 +14,10 @@ import {
   parseMultiScanIndex,
   readMultiScan,
   resolveScan,
+  seriesAcrossGroups,
   seriesFor,
   type MultiScan,
+  type MultiScanIndexEntry,
 } from './multiscan.js'
 import type { Metric, Pyramid, Row } from './types.js'
 
@@ -179,5 +181,34 @@ describe('routing manifest', () => {
       key: 'p/base/1mo/2026-01.parquet', foldIndex: 2, encoder: 'interval',
     })
     expect(resolveScan(usage, 's9')).toBeNull() // not consolidated → caller falls back
+  })
+})
+
+describe('seriesAcrossGroups (capped-K stitching)', () => {
+  // Two sealed groups covering a path 'a' over four scans.
+  const groupA: MultiScan = {
+    scans: ['s0', 's1'], encoder: 'interval',
+    rows: [{ dt: 0, path: 'a', b: 10, o: 1, __scan_lo: 0, __scan_hi: 1 }],
+  }
+  const groupB: MultiScan = {
+    scans: ['s2', 's3'], encoder: 'interval',
+    rows: [
+      { dt: 0, path: 'a', b: 20, o: 2, __scan_lo: 0, __scan_hi: 0 },
+      { dt: 0, path: 'a', b: 30, o: 3, __scan_lo: 1, __scan_hi: 1 },
+    ],
+  }
+  const entry = (key: string, periodStart: number, scans: string[]): MultiScanIndexEntry => ({
+    dataset: 'ot', tier: 'base', shardDur: '1mo', periodStart, periodEnd: periodStart + 1,
+    key, scans, encoder: 'interval', writtenAt: 0,
+  })
+
+  test('orders groups by scan span and concatenates each group series', async () => {
+    // Entries deliberately out of order — seriesAcrossGroups sorts by periodStart.
+    const entries = [entry('B', 100, ['s2', 's3']), entry('A', 0, ['s0', 's1'])]
+    const load = async (k: string) => (k === 'A' ? groupA : groupB)
+    const line = await seriesAcrossGroups(entries, SCHEMA, { dt: 0, path: 'a' }, load)
+    expect(line.map(p => [p.scan, p.state.b, p.state.o])).toEqual([
+      ['s0', 10, 1], ['s1', 10, 1], ['s2', 20, 2], ['s3', 30, 3],
+    ])
   })
 })

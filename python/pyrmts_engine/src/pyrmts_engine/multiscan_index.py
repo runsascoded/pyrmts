@@ -131,5 +131,52 @@ def resolve_scan(records: list[MultiScanRecord], scan: str) -> MultiScanRecord |
     return None
 
 
+# ── D1 (`pyramid_multiscans`) — pyrmts owns the DDL + row shape; a consumer
+# writes via its own Cloudflare-D1 HTTP machinery (creds / retry / local
+# wrangler) and reads via `pyrmts-cfw`'s `MultiScanD1Index`. PK is `(dataset,
+# key)` — `key` is the archive's storage path, unique per sealed group, so
+# multiple groups share a (tier, shard, period) without colliding.
+
+MULTISCAN_D1_TABLE = 'pyramid_multiscans'
+
+
+def multiscan_d1_ddl(table: str = MULTISCAN_D1_TABLE) -> str:
+    """`CREATE TABLE` for the routing manifest — mirrors the `pyramid_shards`
+    style, with a scan axis (`scans`, a JSON array) and `encoder`."""
+    return (
+        f'CREATE TABLE IF NOT EXISTS "{table}" (\n'
+        '  dataset TEXT NOT NULL,\n'
+        '  tier TEXT NOT NULL,\n'
+        '  shard_dur TEXT NOT NULL,\n'
+        '  period_start INTEGER NOT NULL,\n'
+        '  period_end INTEGER NOT NULL,\n'
+        '  key TEXT NOT NULL,\n'
+        '  scans TEXT NOT NULL,\n'      # JSON array of ordered member-scan labels
+        '  encoder TEXT NOT NULL,\n'
+        '  digests TEXT,\n'             # JSON object {scan: digest}, nullable
+        '  written_at INTEGER NOT NULL,\n'
+        '  PRIMARY KEY (dataset, key)\n'
+        ')'
+    )
+
+
+def multiscan_d1_row(record: MultiScanRecord) -> dict:
+    """The `pyramid_multiscans` row for `record` — `scans`/`digests` JSON-encoded
+    (D1 has no array/object type). Feed to a consumer's D1 `INSERT OR REPLACE`
+    (idempotent on the `(dataset, key)` PK)."""
+    return {
+        'dataset': record.dataset,
+        'tier': record.tier,
+        'shard_dur': record.shard_dur,
+        'period_start': record.period_start_ms,
+        'period_end': record.period_end_ms,
+        'key': record.key,
+        'scans': json.dumps(record.scans),
+        'encoder': record.encoder,
+        'digests': json.dumps(record.digests) if record.digests is not None else None,
+        'written_at': record.written_at_ms,
+    }
+
+
 def now_ms() -> int:
     return int(datetime.now(tz=timezone.utc).timestamp() * 1000)

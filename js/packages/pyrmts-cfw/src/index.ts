@@ -10,6 +10,9 @@ export type { ServeOptions } from './serve.js'
 export { D1ShardIndex } from './shard-index.js'
 export type { D1ShardIndexOptions, SchemaDiff, SchemaObject } from './shard-index.js'
 
+export { MultiScanD1Index, multiScanDdl, multiScanEntryFromRow } from './multiscan-index.js'
+export type { ListMultiScansFilter, MultiScanD1IndexOptions } from './multiscan-index.js'
+
 export {
   PENDING_GRACE_MS,
   computeAndStoreSnapshot,

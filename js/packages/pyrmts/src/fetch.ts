@@ -24,6 +24,21 @@ export interface FetchOptions extends FetchOptionsBase {
   // sizes, gaps) so callers can spot RG-prune misses, over-fetched
   // columns, footer-read churn, etc.
   trace?: FetchTrace[]
+  // Decoded-footer cache. Without it every call pays a footer range fetch
+  // plus a full metadata decode (O(#RGs × #cols) Thrift) per shard. Entries
+  // are keyed by `key@etag` (falling back to size), so a rewritten shard
+  // misses naturally; the `head` call stays, which is what validates the
+  // key. A module-level `new Map()` in a Worker is a per-isolate cache that
+  // survives across requests on a warm isolate; wrap the Cache API / KV
+  // behind the same two methods for a cross-isolate one.
+  metadataCache?: MetadataCache
+}
+
+/** Map-like store for decoded parquet footers (`Map<string, FileMetaData>`
+ * satisfies it). */
+export interface MetadataCache {
+  get(key: string): FileMetaData | undefined
+  set(key: string, metadata: FileMetaData): void
 }
 
 /** One observed `slice(start, end)` against a parquet file. */
@@ -73,7 +88,12 @@ export async function fetchShardData(
     : asyncBufferFromStorage(storage, key, head.size)
 
   const initialFetchSize = opts?.initialFetchSize ?? DEFAULT_INITIAL_FETCH_SIZE
-  const metadata = await parquetMetadataAsync(file, { initialFetchSize })
+  const cacheKey = `${key}@${head.etag ?? head.size}`
+  let metadata = opts?.metadataCache?.get(cacheKey)
+  if (metadata === undefined) {
+    metadata = await parquetMetadataAsync(file, { initialFetchSize })
+    opts?.metadataCache?.set(cacheKey, metadata)
+  }
   phaseRef.current = 'data'
 
   const hasBinPrune = opts?.binCol !== undefined && opts.range !== undefined

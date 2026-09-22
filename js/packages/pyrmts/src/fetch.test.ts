@@ -2,7 +2,8 @@
 
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { describe, expect, test } from 'vitest'
-import { fetchShardData, parquetBackend } from './fetch.js'
+import { fetchShardData, parquetBackend, type FetchTrace } from './fetch.js'
+import type { FileMetaData } from 'hyparquet'
 import { memStorage } from './storage.js'
 import type { FetchSegment, Storage, Tier } from './types.js'
 
@@ -18,13 +19,13 @@ const ms = (iso: string): number => new Date(iso).getTime()
 // 10,000 rows of 1-minute data starting 2026-01-01T00:00Z, split into 4 RGs
 // of 2500 rows each. Big enough that metadata overhead doesn't dominate and
 // RG-skipping byte savings are observable.
-function multiRgParquet(): Uint8Array {
+function multiRgParquet(scale = 1): Uint8Array {
   const baseMs = ms('2026-01-01T00:00:00Z')
   const ts: bigint[] = []
   const value: number[] = []
   for (let i = 0; i < 10_000; i++) {
     ts.push(BigInt(baseMs + i * 60_000))
-    value.push(i)
+    value.push(i * scale)
   }
   const buf = parquetWriteBuffer({
     columnData: [
@@ -336,5 +337,35 @@ describe('fetchShardData: arbitrary-column filters', () => {
     const prunedBytes = inst2.bytesRead()
     // 1 RG out of 4 → ~1/4 the data column bytes. Allow 60% to cover metadata.
     expect(prunedBytes).toBeLessThan(fullBytes * 0.6)
+  })
+})
+
+describe('fetchShardData: metadataCache', () => {
+  test('a shared cache skips the footer fetch + decode on the second read', async () => {
+    const KEY = 'shard.parquet'
+    const storage = memStorage()
+    await storage.put(KEY, multiRgParquet())
+    const metadataCache = new Map<string, FileMetaData>()
+    const trace1: FetchTrace[] = []
+    const rows1 = await fetchShardData(storage, KEY, { trace: trace1, metadataCache })
+    const trace2: FetchTrace[] = []
+    const rows2 = await fetchShardData(storage, KEY, { trace: trace2, metadataCache })
+    expect(rows2).toEqual(rows1)
+    expect(trace1.filter(t => t.phase === 'metadata').length).toBeGreaterThan(0)
+    expect(trace2.filter(t => t.phase === 'metadata')).toEqual([])
+    expect([...metadataCache.keys()]).toEqual([`${KEY}@${(await storage.head(KEY))!.etag}`])
+  })
+
+  test('a rewritten shard (new etag) misses the cache', async () => {
+    const KEY = 'shard.parquet'
+    const storage = memStorage()
+    await storage.put(KEY, multiRgParquet())
+    const metadataCache = new Map<string, FileMetaData>()
+    await fetchShardData(storage, KEY, { metadataCache })
+    await storage.put(KEY, multiRgParquet(2))
+    const trace: FetchTrace[] = []
+    await fetchShardData(storage, KEY, { trace, metadataCache })
+    expect(trace.filter(t => t.phase === 'metadata').length).toBeGreaterThan(0)
+    expect(metadataCache.size).toBe(2)
   })
 })

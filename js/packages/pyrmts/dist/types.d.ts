@@ -21,12 +21,15 @@ export interface Metric {
     monoid: MonoidName;
     config?: Record<string, unknown>;
 }
+export interface GetRangeOptions {
+    ifMatch?: string;
+}
 export interface Storage {
     head(key: string): Promise<{
         size: number;
         etag?: string;
     } | null>;
-    getRange(key: string, start: number, end: number): Promise<Uint8Array>;
+    getRange(key: string, start: number, end: number, opts?: GetRangeOptions): Promise<Uint8Array>;
     get(key: string): Promise<Uint8Array | null>;
     put(key: string, bytes: Uint8Array): Promise<void>;
     list(prefix: string): AsyncIterable<string>;

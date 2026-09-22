@@ -7,6 +7,7 @@
 // the worker fetches only the relevant byte ranges; smaller payload +
 // smaller decode cost.
 import { parquetMetadataAsync, parquetReadObjects } from 'hyparquet';
+import { EtagConflict } from './types.js';
 const DEFAULT_INITIAL_FETCH_SIZE = 64 * 1024;
 // Read rows from a single parquet shard, optionally pruning row groups by
 // the bin column's statistics.
@@ -16,6 +17,19 @@ const DEFAULT_INITIAL_FETCH_SIZE = 64 * 1024;
 // `Number.MAX_SAFE_INTEGER` (≈ 9e15); callers with larger ints need to
 // access hyparquet output directly.
 export async function fetchShardData(storage, key, opts) {
+    const cache = opts?.metadataCache;
+    const cached = cache?.get(key);
+    if (cached !== undefined) {
+        // Warm path: no `head`, no footer; every data range carries If-Match.
+        try {
+            return await readShard(storage, key, cached.size, cached.metadata, opts, cached.etag);
+        }
+        catch (e) {
+            if (!(e instanceof EtagConflict))
+                throw e;
+            cache?.delete?.(key);
+        }
+    }
     const head = await storage.head(key);
     if (head === null) {
         if (opts?.tolerate404)
@@ -30,13 +44,23 @@ export async function fetchShardData(storage, key, opts) {
         ? asyncBufferFromStorageTraced(storage, key, head.size, opts.trace, phaseRef)
         : asyncBufferFromStorage(storage, key, head.size);
     const initialFetchSize = opts?.initialFetchSize ?? DEFAULT_INITIAL_FETCH_SIZE;
-    const cacheKey = `${key}@${head.etag ?? head.size}`;
-    let metadata = opts?.metadataCache?.get(cacheKey);
-    if (metadata === undefined) {
-        metadata = await parquetMetadataAsync(file, { initialFetchSize });
-        opts?.metadataCache?.set(cacheKey, metadata);
+    const metadata = await parquetMetadataAsync(file, { initialFetchSize });
+    if (cache !== undefined && head.etag !== undefined) {
+        cache.set(key, { etag: head.etag, size: head.size, metadata });
     }
     phaseRef.current = 'data';
+    return readRows(file, metadata, opts);
+}
+// Read a shard whose footer is already decoded: data ranges only, each with
+// `If-Match: etag` so a rewrite since the footer was cached fails loudly.
+async function readShard(storage, key, size, metadata, opts, etag) {
+    const phaseRef = { current: 'data' };
+    const file = opts?.trace !== undefined
+        ? asyncBufferFromStorageTraced(storage, key, size, opts.trace, phaseRef, etag)
+        : asyncBufferFromStorage(storage, key, size, etag);
+    return readRows(file, metadata, opts);
+}
+async function readRows(file, metadata, opts) {
     const hasBinPrune = opts?.binCol !== undefined && opts.range !== undefined;
     const hasFilters = opts?.filters !== undefined && opts.filters.length > 0;
     if (!hasBinPrune && !hasFilters) {
@@ -219,13 +243,14 @@ function normalizeRow(row) {
     }
     return out;
 }
-function asyncBufferFromStorageTraced(storage, key, byteLength, trace, phaseRef) {
+function asyncBufferFromStorageTraced(storage, key, byteLength, trace, phaseRef, ifMatch) {
+    const rangeOpts = ifMatch !== undefined ? { ifMatch } : undefined;
     return {
         byteLength,
         async slice(start, end) {
             const effectiveEnd = end ?? byteLength;
             const t0 = performance.now();
-            const bytes = await storage.getRange(key, start, effectiveEnd);
+            const bytes = await storage.getRange(key, start, effectiveEnd, rangeOpts);
             const ms = performance.now() - t0;
             trace.push({
                 key,
@@ -239,12 +264,13 @@ function asyncBufferFromStorageTraced(storage, key, byteLength, trace, phaseRef)
         },
     };
 }
-function asyncBufferFromStorage(storage, key, byteLength) {
+function asyncBufferFromStorage(storage, key, byteLength, ifMatch) {
+    const rangeOpts = ifMatch !== undefined ? { ifMatch } : undefined;
     return {
         byteLength,
         async slice(start, end) {
             const effectiveEnd = end ?? byteLength;
-            const bytes = await storage.getRange(key, start, effectiveEnd);
+            const bytes = await storage.getRange(key, start, effectiveEnd, rangeOpts);
             return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
         },
     };

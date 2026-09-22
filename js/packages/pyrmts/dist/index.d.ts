@@ -1,4 +1,4 @@
-export type { Axis, Bin, ColumnFilter, Dim, Duration, FetchOptionsBase, FetchSegment, GeoSpec, IdentityRollup, Metric, MonoidName, Pyramid, Row, RunBoundary, Shard, StepCount, StepUnit, Storage, StorageBackend, Tier, TimeUnit, } from './types.js';
+export type { Axis, Bin, ColumnFilter, Dim, Duration, FetchOptionsBase, GetRangeOptions, FetchSegment, GeoSpec, IdentityRollup, Metric, MonoidName, Pyramid, Row, RunBoundary, Shard, StepCount, StepUnit, Storage, StorageBackend, Tier, TimeUnit, } from './types.js';
 export { EtagConflict, NotSupported, PlanLimitError } from './types.js';
 export type { PlanLimits } from './types.js';
 export type { PyramidCoverRung, PyramidCoverSegment, PyramidCoverStatus, PyramidTierCoverStatus, } from './cover-status.js';
@@ -14,7 +14,7 @@ export type { StitchInput } from './stitch.js';
 export { pivotTallToHistogram } from './pivot.js';
 export type { PivotTallToHistogramOptions } from './pivot.js';
 export { fetchShardData, parquetBackend } from './fetch.js';
-export type { FetchOptions, FetchTrace } from './fetch.js';
+export type { CachedMetadata, FetchOptions, FetchTrace, MetadataCache } from './fetch.js';
 export { validateLadders } from './ladder.js';
 export type { ValidatedTierLadder } from './ladder.js';
 export { CachedShardIndex, WATERMARK_KEY_SEPARATOR, decodeWatermarkKey, encodeWatermarkKey, } from './shard-index.js';

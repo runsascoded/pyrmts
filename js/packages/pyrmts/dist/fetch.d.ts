@@ -1,7 +1,15 @@
+import { type FileMetaData } from 'hyparquet';
 import type { FetchOptionsBase, Row, Storage, StorageBackend } from './types.js';
 export interface FetchOptions extends FetchOptionsBase {
     initialFetchSize?: number;
     trace?: FetchTrace[];
+    metadataCache?: MetadataCache;
+}
+/** Map-like store for decoded parquet footers (`Map<string, FileMetaData>`
+ * satisfies it). */
+export interface MetadataCache {
+    get(key: string): FileMetaData | undefined;
+    set(key: string, metadata: FileMetaData): void;
 }
 /** One observed `slice(start, end)` against a parquet file. */
 export interface FetchTrace {

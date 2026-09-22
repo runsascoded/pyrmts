@@ -21,20 +21,29 @@ export declare function changesetBetween(rowsA: Row[], rowsB: Row[], schema: Sch
  * that cancels); a key in one passes through. Not invertible: compose only
  * disjoint spans. Mirrors Python `compose_changesets`. */
 export declare function composeChangesets(left: Changeset, right: Changeset): Changeset;
-/** The disjoint dyadic blocks composing `(i, j]` as `[level, start]` pairs —
- * block `(level, start)` = net change from scan `start` to `start + 2^level`.
- * popcount(j−i) = O(log) blocks. Mirrors Python `jumps`. */
-export declare function jumps(i: number, j: number): Array<[number, number]>;
-/** Diff between any two scans, composed from only the O(log) jump nodes.
- * `scans` is the index's ordered label list (from `index.json`); `loadNode`
- * fetches node `(level, i)` as changeset rows (the consumer's storage read). If
- * `a` is after `b`, the forward changeset is computed and each before/after
- * swapped (a single changeset reverses; only composition is non-invertible). */
-export declare function diffOverSpan(scans: string[], schema: Schema, a: string, b: string, loadNode: (level: number, i: number) => Promise<Row[]>): Promise<Row[]>;
+/** The disjoint aligned dyadic blocks covering `(i, j]` as `[level, start]`
+ * pairs — block `(level, start)`, `start` a multiple of `2^level`, `level ≤
+ * levels` = net change from scan `start` to `start + 2^level`. Greedy largest
+ * aligned block at each position: ≤ 2·log2(j−i)+1 blocks when the cap allows,
+ * the `j−i` adjacency blocks at `levels = 0`. Mirrors Python `aligned_blocks`. */
+export declare function alignedBlocks(i: number, j: number, levels?: number): Array<[number, number]>;
+/** Diff between any two scans, composed from only the aligned nodes covering
+ * the span. `scans` and `levels` come from the index manifest
+ * (`parseDiffIndexManifest`); `loadNode` fetches node `(level, start)` as
+ * changeset rows (the consumer's storage read). If `a` is after `b`, the forward
+ * changeset is computed and each before/after swapped (a single changeset
+ * reverses; only composition is non-invertible). */
+export declare function diffOverSpan(scans: string[], schema: Schema, a: string, b: string, loadNode: (level: number, start: number) => Promise<Row[]>, levels?: number): Promise<Row[]>;
 /** Parse a persisted node parquet (as `DiffIndexStore` writes it) into
  * changeset rows, int64 normalized to number like the fetch path. */
 export declare function readChangesetNode(bytes: Uint8Array): Promise<Row[]>;
-/** Parse the store's `index.json` → ordered scan labels. */
-export declare function parseDiffIndexManifest(bytes: Uint8Array, dataset?: string): string[];
+export interface DiffIndexManifest {
+    /** Ordered scan labels; position = scan index. */
+    scans: string[];
+    /** Hierarchy cap: aligned nodes exist for levels `1..levels` (0 = events log only). */
+    levels: number;
+}
+/** Parse the store's `index.json` → ordered scan labels + hierarchy cap. */
+export declare function parseDiffIndexManifest(bytes: Uint8Array, dataset?: string): DiffIndexManifest;
 export {};
 //# sourceMappingURL=diffindex.d.ts.map

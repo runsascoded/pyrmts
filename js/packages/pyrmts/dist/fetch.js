@@ -30,7 +30,12 @@ export async function fetchShardData(storage, key, opts) {
         ? asyncBufferFromStorageTraced(storage, key, head.size, opts.trace, phaseRef)
         : asyncBufferFromStorage(storage, key, head.size);
     const initialFetchSize = opts?.initialFetchSize ?? DEFAULT_INITIAL_FETCH_SIZE;
-    const metadata = await parquetMetadataAsync(file, { initialFetchSize });
+    const cacheKey = `${key}@${head.etag ?? head.size}`;
+    let metadata = opts?.metadataCache?.get(cacheKey);
+    if (metadata === undefined) {
+        metadata = await parquetMetadataAsync(file, { initialFetchSize });
+        opts?.metadataCache?.set(cacheKey, metadata);
+    }
     phaseRef.current = 'data';
     const hasBinPrune = opts?.binCol !== undefined && opts.range !== undefined;
     const hasFilters = opts?.filters !== undefined && opts.filters.length > 0;

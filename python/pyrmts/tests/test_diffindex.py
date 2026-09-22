@@ -113,6 +113,30 @@ def test_compose_is_associative():
     assert left == right == changeset_between(scans[0], scans[4], pyr)
 
 
+def test_append_is_incremental_and_append_only():
+    """Appending scans one at a time yields the same index as a from-scratch
+    build, creates exactly one new node per level, and never touches existing
+    nodes — so a persisted store is append-only / immutable per node."""
+    pyr = _pyr()
+    scans = _history()
+    deltas = [changeset_between(scans[k], scans[k + 1], pyr) for k in range(len(scans) - 1)]
+    full = SparseDiffIndex(deltas)
+    inc = SparseDiffIndex()
+    for k, d in enumerate(deltas):
+        before = [list(level) for level in inc.table]        # snapshot existing nodes
+        new = inc.append(d)
+        m = k + 1                                            # deltas so far
+        # One new node per level L with 2**L ≤ m, at index m − 2**L.
+        assert [(lvl, i) for lvl, i, _ in new] == [(lvl, m - (1 << lvl)) for lvl in range(m.bit_length()) if (1 << lvl) <= m]
+        for lvl, nodes in enumerate(before):                 # existing nodes untouched
+            assert inc.table[lvl][:len(nodes)] == nodes
+    assert inc.table == full.table
+    assert inc.n == full.n == len(scans)
+    for i in range(len(scans)):
+        for j in range(i, len(scans)):
+            assert inc.diff(i, j) == full.diff(i, j)
+
+
 def test_diff_rejects_out_of_range():
     index = _build_index(_history(), _pyr())
     with pytest.raises(ValueError, match='out of range'):

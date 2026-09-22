@@ -22,6 +22,8 @@ query is cheap instead of every query paying O(fleet).
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pyarrow as pa
 
 from .multiscan import _changeset_table, _identities, _key_state_cols, _scan_rows
@@ -75,6 +77,39 @@ def changeset_to_table(changeset: Changeset, pyramid: Pyramid) -> pa.Table:
     return _changeset_table(rows, key_cols, state_cols, pyramid)
 
 
+def changeset_from_table(table: pa.Table, pyramid: Pyramid) -> Changeset:
+    """Inverse of :func:`changeset_to_table` — parse a persisted changeset node
+    (`key_cols` + `{c}__a`/`{c}__b`) back into a dict."""
+    key_cols, state_cols, _ = _key_state_cols(pyramid)
+    cols = {c: table.column(c).to_pylist() for c in key_cols}
+    a_cols = {c: table.column(f'{c}__a').to_pylist() for c in state_cols}
+    b_cols = {c: table.column(f'{c}__b').to_pylist() for c in state_cols}
+    out: Changeset = {}
+    for i in range(table.num_rows):
+        key = tuple(cols[c][i] for c in key_cols)
+        out[key] = (
+            tuple(a_cols[c][i] for c in state_cols),
+            tuple(b_cols[c][i] for c in state_cols),
+        )
+    return out
+
+
+def jumps(i: int, j: int) -> list[tuple[int, int]]:
+    """The disjoint dyadic blocks composing `(i, j]`, as `[(level, start), ...]`
+    — block `(level, start)` is the net change from scan `start` to scan
+    `start + 2**level`. Binary lifting on `j − i`: popcount(j−i) = O(log) blocks.
+    The reader fetches exactly these nodes; nothing else."""
+    out: list[tuple[int, int]] = []
+    pos, remaining, level = i, j - i, 0
+    while remaining:
+        if remaining & 1:
+            out.append((level, pos))
+            pos += 1 << level
+        remaining >>= 1
+        level += 1
+    return out
+
+
 class SparseDiffIndex:
     """Binary-lifting hierarchy over per-scan adjacency changesets, for O(log)
     diffs between any two scans.
@@ -84,34 +119,46 @@ class SparseDiffIndex:
     O(log(j−i)) compositions. Build is O(N log N) stored changesets (each tiny on
     low-churn data); appending a scan is O(log N) (see :meth:`append`)."""
 
-    def __init__(self, deltas: list[Changeset]) -> None:
-        self.n = len(deltas) + 1
-        # table[level][i] = composed changeset over [i, i + 2**level) — i.e. the
-        # net change from scan i to scan i + 2**level.
-        self.table: list[list[Changeset]] = [list(deltas)] if deltas else [[]]
-        width = 1
-        while width * 2 <= len(deltas):
-            prev = self.table[-1]
-            nxt = [
-                compose_changesets(prev[i], prev[i + width])
-                for i in range(len(deltas) - width * 2 + 1)
-            ]
-            self.table.append(nxt)
-            width *= 2
+    def __init__(self, deltas: Sequence[Changeset] = ()) -> None:
+        # table[level][i] = composed changeset over [i, i + 2**level) — the net
+        # change from scan i to scan i + 2**level. Built by repeated `append`, so
+        # a from-scratch build and an incremental one are identical.
+        self.table: list[list[Changeset]] = [[]]
+        self.n = 1  # scans; one scan has zero deltas
+        for d in deltas:
+            self.append(d)
+
+    def append(self, delta: Changeset) -> list[tuple[int, int, Changeset]]:
+        """Append the adjacency changeset from the current last scan to a new
+        scan. **Append-only**: this creates exactly one new node per level
+        `L` with `2**L ≤ #deltas` (each the composition of two existing nodes)
+        and never touches an existing node — so persisted nodes are immutable.
+        O(log N) compositions. Returns the new nodes as `[(level, i, changeset)]`,
+        which is precisely what a store must persist."""
+        self.table[0].append(delta)
+        self.n += 1
+        m = len(self.table[0])
+        new: list[tuple[int, int, Changeset]] = [(0, m - 1, delta)]
+        level = 1
+        while (1 << level) <= m:
+            i = m - (1 << level)
+            prev = self.table[level - 1]
+            node = compose_changesets(prev[i], prev[i + (1 << (level - 1))])
+            if level == len(self.table):
+                self.table.append([])
+            self.table[level].append(node)
+            new.append((level, i, node))
+            level += 1
+        return new
 
     def diff(self, i: int, j: int) -> Changeset:
-        """Net changeset from scan `i` to scan `j` (`i ≤ j`), composing O(log)
-        disjoint power-of-2 jumps. `diff(i, i)` is empty."""
+        """Net changeset from scan `i` to scan `j` (`i ≤ j`), composing the O(log)
+        disjoint blocks from :func:`jumps`. `diff(i, i)` is empty."""
         if not 0 <= i <= j < self.n:
             raise ValueError(f"SparseDiffIndex.diff: ({i}, {j}) out of range [0, {self.n})")
         result: Changeset = {}
-        pos, remaining, level = i, j - i, 0
-        while remaining:
-            if remaining & 1:
-                result = compose_changesets(result, self.table[level][pos])
-                pos += 1 << level
-            remaining >>= 1
-            level += 1
+        for level, pos in jumps(i, j):
+            result = compose_changesets(result, self.table[level][pos])
         return result
 
     def blocks_composed(self, i: int, j: int) -> int:

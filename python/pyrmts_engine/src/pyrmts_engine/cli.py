@@ -428,6 +428,72 @@ def multiscan_seal(
     err(f"multiscan seal: wrote {len(written)} archive(s), {p.scheme} ({detail}), dataset {p.dataset}, {engine}")
 
 
+@cli.group()
+def diffindex() -> None:
+    """Always-on dyadic diff-index (`specs/multi-scan-consolidation.md`, Phase 3):
+    O(log N) diffs between ANY two scans. `update` is the idempotent per-scan
+    ingest stage (one adjacency changeset + O(log N) immutable nodes per new
+    scan); `diff` composes only the popcount(|j−i|) jump nodes at query time."""
+
+
+def _scan_tables(root: str, tile_key: str, labels: list[str]):
+    """Each scan's snapshot at `tile_key` from `<root>/<label>/`, in order."""
+    import io
+
+    import pyarrow.parquet as pq
+
+    out = []
+    for label in labels:
+        data = FsStorage(Path(root) / label).get(tile_key)
+        if data is None:
+            raise SystemExit(f"diffindex: scan {label!r} has no shard at {tile_key!r}")
+        out.append((label, pq.read_table(io.BytesIO(data))))
+    return out
+
+
+@diffindex.command('update')
+@option('-D', '--dataset', required=True, help="Dataset scope (the index lives at <out>/diffidx/<dataset>/)")
+@option('-k', '--key', 'tile_key', required=True, help="Tile key of the snapshot within each scan (e.g. p/base/1mo/2026-01.parquet)")
+@option('-o', '--out', required=True, help="Index root")
+@option('-R', '--root', required=True, help="Scans root; each scan is a subdir <root>/<label>/")
+@option('-s', '--scan', 'scan_labels', multiple=True, help="Ordered scan labels (default: <root>'s subdirs, sorted)")
+@argument('config')
+def diffindex_update(dataset: str, tile_key: str, out: str, root: str, scan_labels: tuple[str, ...], config: str) -> None:
+    """Idempotent ingest: append every scan not yet in the index, in order. A
+    cron fires this each cycle; it no-ops when nothing is new."""
+    from .diffindex_store import DiffIndexStore
+
+    pyramid = _load_pyramid(config, None)
+    labels = list(scan_labels) or sorted(p.name for p in Path(root).iterdir() if p.is_dir())
+    store = DiffIndexStore(FsStorage(out), f'diffidx/{dataset}', pyramid, dataset)
+    appended = store.update(_scan_tables(root, tile_key, labels))
+    for label in appended:
+        print(label)
+    err(f"diffindex update: appended {len(appended)} scan(s); index now {len(store.scans())} scans (dataset {dataset})")
+
+
+@diffindex.command('diff')
+@option('-a', '--from', 'scan_a', required=True, help="From-scan label")
+@option('-b', '--to', 'scan_b', required=True, help="To-scan label")
+@option('-D', '--dataset', required=True, help="Dataset scope")
+@option('-o', '--out', required=True, help="Index root (a `diffindex update --out`)")
+@option('-w', '--write', 'write_path', help="Write the changeset parquet here (default: report row count only)")
+@argument('config')
+def diffindex_diff(scan_a: str, scan_b: str, dataset: str, out: str, write_path: str | None, config: str) -> None:
+    """The changeset between any two scans, composed from O(log) jump nodes —
+    no snapshot read."""
+    import pyarrow.parquet as pq
+
+    from .diffindex_store import DiffIndexStore
+
+    pyramid = _load_pyramid(config, None)
+    store = DiffIndexStore(FsStorage(out), f'diffidx/{dataset}', pyramid, dataset)
+    table = store.diff_table(scan_a, scan_b)
+    print(f"{scan_a} -> {scan_b}: {table.num_rows} changed keys")
+    if write_path:
+        pq.write_table(table, write_path)
+
+
 @cli.command()
 @option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the detected memory limit; 0 disables)")
 @option('-C', '--close-workers', type=int, help="Concurrent close computations (default 2): more overlaps closes with the walk (wall) at the cost of stacked close transients (peak RSS)")

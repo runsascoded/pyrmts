@@ -147,6 +147,18 @@ export type {
   State,
 } from './multiscan.js'
 
+export {
+  changesetBetween,
+  changesetFromRows,
+  changesetToRows,
+  composeChangesets,
+  diffOverSpan,
+  jumps,
+  parseDiffIndexManifest,
+  readChangesetNode,
+} from './diffindex.js'
+export type { ChangeEntry, Changeset } from './diffindex.js'
+
 export { buildQueryUrl, fetchPyramidQuery } from './query.js'
 export type {
   FetchPyramidQueryInput,

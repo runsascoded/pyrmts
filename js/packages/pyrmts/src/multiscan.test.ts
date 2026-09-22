@@ -1,0 +1,148 @@
+// Multi-scan read primitives — the TS twin of `pyrmts.multiscan`'s read path.
+// The expected values mirror the Python `test_multiscan.py` fixture exactly
+// (three scans: `a` constant, `b` changes then vanishes, `c` appears late), so
+// the two implementations are pinned to the same behavior. A parquet round-trip
+// (write with `pyrmts.multiscan` KV-metadata, read via `readMultiScan`) proves
+// the self-describing on-disk contract the Python writer produces.
+
+import { parquetWriteBuffer } from 'hyparquet-writer'
+import { describe, expect, test } from 'vitest'
+import {
+  diffScans,
+  diffTables,
+  extractScan,
+  readMultiScan,
+  seriesFor,
+  type MultiScan,
+} from './multiscan.js'
+import type { Metric, Pyramid, Row } from './types.js'
+
+const SCHEMA: Pick<Pyramid, 'binCol' | 'dims' | 'metrics'> = {
+  binCol: 'dt',
+  dims: [{ name: 'path', type: 'string' }],
+  metrics: [
+    { name: 'b', monoid: 'count' } as Metric,
+    { name: 'o', monoid: 'count' } as Metric,
+  ],
+}
+
+// The interval-encoded MultiScan for the shared fixture: `a` spans [0,2]; `b`
+// splits at its change then ends before s2; `c` only s2 (O(#changes) rows).
+const MS: MultiScan = {
+  scans: ['s0', 's1', 's2'],
+  encoder: 'interval',
+  rows: [
+    { dt: 0, path: 'a', b: 10, o: 1, __scan_lo: 0, __scan_hi: 2 },
+    { dt: 0, path: 'b', b: 20, o: 2, __scan_lo: 0, __scan_hi: 0 },
+    { dt: 0, path: 'b', b: 30, o: 3, __scan_lo: 1, __scan_hi: 1 },
+    { dt: 0, path: 'c', b: 5, o: 1, __scan_lo: 2, __scan_hi: 2 },
+  ],
+}
+
+const rows = (rs: Row[]): Row[] =>
+  [...rs].sort((x, y) => `${x.path}${x.dt}`.localeCompare(`${y.path}${y.dt}`))
+
+describe('extractScan', () => {
+  test('reconstructs each member scan', () => {
+    expect(rows(extractScan(MS, SCHEMA, 's0'))).toEqual([
+      { dt: 0, path: 'a', b: 10, o: 1 },
+      { dt: 0, path: 'b', b: 20, o: 2 },
+    ])
+    expect(rows(extractScan(MS, SCHEMA, 's1'))).toEqual([
+      { dt: 0, path: 'a', b: 10, o: 1 },
+      { dt: 0, path: 'b', b: 30, o: 3 },
+    ])
+    expect(rows(extractScan(MS, SCHEMA, 's2'))).toEqual([
+      { dt: 0, path: 'a', b: 10, o: 1 },
+      { dt: 0, path: 'c', b: 5, o: 1 },
+    ])
+  })
+
+  test('rejects a non-member scan', () => {
+    expect(() => extractScan(MS, SCHEMA, 's9')).toThrow(/not a member scan/)
+  })
+})
+
+describe('seriesFor (over-time line)', () => {
+  test('constant, dies, born-late', () => {
+    const line = (path: string) => seriesFor(MS, SCHEMA, { dt: 0, path }).map(p => [p.scan, p.state.b, p.state.o])
+    // `a` constant; `b` present then absent (→ identity 0); `c` absent then born.
+    expect(line('a')).toEqual([['s0', 10, 1], ['s1', 10, 1], ['s2', 10, 1]])
+    expect(line('b')).toEqual([['s0', 20, 2], ['s1', 30, 3], ['s2', 0, 0]])
+    expect(line('c')).toEqual([['s0', 0, 0], ['s1', 0, 0], ['s2', 5, 1]])
+  })
+})
+
+describe('diff', () => {
+  test('diffTables changeset: births and deaths', () => {
+    const s0 = extractScan(MS, SCHEMA, 's0')
+    const s2 = extractScan(MS, SCHEMA, 's2')
+    expect(diffTables(s0, s2, SCHEMA)).toEqual([
+      { dt: 0, path: 'b', b__a: 20, o__a: 2, b__b: 0, o__b: 0 }, // death
+      { dt: 0, path: 'c', b__a: 0, o__a: 0, b__b: 5, o__b: 1 }, // birth
+    ])
+  })
+
+  test('diffScans matches extract-diff for every pair', () => {
+    for (const a of MS.scans) {
+      for (const b of MS.scans) {
+        const viaScans = diffScans(MS, SCHEMA, a, b)
+        const viaExtract = diffTables(extractScan(MS, SCHEMA, a), extractScan(MS, SCHEMA, b), SCHEMA)
+        expect(viaScans).toEqual(viaExtract)
+      }
+    }
+  })
+
+  test('diffScans reads only changed keys in the span', () => {
+    // s0→s1: only `b` changed (20,2)→(30,3); `a` constant is excluded.
+    expect(diffScans(MS, SCHEMA, 's0', 's1')).toEqual([
+      { dt: 0, path: 'b', b__a: 20, o__a: 2, b__b: 30, o__b: 3 },
+    ])
+  })
+})
+
+describe('readMultiScan', () => {
+  // Write the interval table with the same columns + `pyrmts.multiscan`
+  // KV-metadata the Python writer attaches, then read it back.
+  function shard(): Uint8Array {
+    const col = (name: string, type: 'INT64', data: unknown[]) => ({ name, type, data })
+    const buf = parquetWriteBuffer({
+      columnData: [
+        { name: 'dt', type: 'INT64', data: MS.rows.map(r => BigInt(r.dt as number)) },
+        { name: 'path', type: 'STRING', data: MS.rows.map(r => r.path as string) },
+        { name: 'b', type: 'INT64', data: MS.rows.map(r => BigInt(r.b as number)) },
+        { name: 'o', type: 'INT64', data: MS.rows.map(r => BigInt(r.o as number)) },
+        col('__scan_lo', 'INT64', MS.rows.map(r => BigInt(r.__scan_lo as number))),
+        col('__scan_hi', 'INT64', MS.rows.map(r => BigInt(r.__scan_hi as number))),
+      ],
+      kvMetadata: [
+        {
+          key: 'pyrmts.multiscan',
+          value: JSON.stringify({ encoder: 'interval', scans: MS.scans, digests: { s0: 'x', s1: 'y', s2: 'z' } }),
+        },
+      ],
+    })
+    return new Uint8Array(buf)
+  }
+
+  test('round-trips rows + metadata, and the primitives work off it', async () => {
+    const ms = await readMultiScan(shard())
+    expect(ms.encoder).toBe('interval')
+    expect(ms.scans).toEqual(['s0', 's1', 's2'])
+    expect(ms.digests).toEqual({ s0: 'x', s1: 'y', s2: 'z' })
+    expect(ms.rows.length).toBe(4)
+    // int64 normalized to number, so primitives behave identically to in-memory.
+    expect(rows(extractScan(ms, SCHEMA, 's1'))).toEqual([
+      { dt: 0, path: 'a', b: 10, o: 1 },
+      { dt: 0, path: 'b', b: 30, o: 3 },
+    ])
+    expect(diffScans(ms, SCHEMA, 's0', 's1')).toEqual([
+      { dt: 0, path: 'b', b__a: 20, o__a: 2, b__b: 30, o__b: 3 },
+    ])
+  })
+
+  test('rejects a parquet with no multiscan metadata', async () => {
+    const buf = parquetWriteBuffer({ columnData: [{ name: 'dt', type: 'INT64', data: [0n] }] })
+    await expect(readMultiScan(new Uint8Array(buf))).rejects.toThrow(/no pyrmts.multiscan metadata/)
+  })
+})

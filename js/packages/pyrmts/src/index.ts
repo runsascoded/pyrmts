@@ -122,6 +122,21 @@ export { memStorage } from './storage.js'
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js'
 export type { PyramidConfig } from './yaml.js'
 
+export {
+  MULTISCAN_META_KEY,
+  SCAN_COL,
+  SCAN_HI,
+  SCAN_LO,
+  diffScans,
+  diffTables,
+  extractScan,
+  identities,
+  keyStateCols,
+  readMultiScan,
+  seriesFor,
+} from './multiscan.js'
+export type { MultiScan, MultiScanEncoder, SeriesPoint, State } from './multiscan.js'
+
 export { buildQueryUrl, fetchPyramidQuery } from './query.js'
 export type {
   FetchPyramidQueryInput,

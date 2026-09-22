@@ -20,12 +20,15 @@ from .keys import substitute_key
 from .monoids import Monoid, Row, get_monoid, state_columns
 from .multiscan import (
     MultiScan,
+    consolidate_scans,
     consolidate_tables,
     diff_scans,
     diff_tables,
     extract_table,
+    from_arrow,
     scan_digest,
     series_for,
+    to_arrow,
 )
 from .storage import EtagConflict, FsStorage, MemStorage, S3Storage, storage_from_cfg
 from .types import (
@@ -61,8 +64,9 @@ __all__ = [
     'ExpectedShard', 'list_expected_shards',
     'substitute_key',
     'Monoid', 'Row', 'get_monoid', 'state_columns',
-    'MultiScan', 'consolidate_tables', 'diff_scans', 'diff_tables',
-    'extract_table', 'scan_digest', 'series_for',
+    'MultiScan', 'consolidate_scans', 'consolidate_tables', 'diff_scans',
+    'diff_tables', 'extract_table', 'from_arrow', 'scan_digest', 'series_for',
+    'to_arrow',
     'EtagConflict', 'FsStorage', 'MemStorage', 'S3Storage', 'storage_from_cfg',
     'write_tier_parquet',
     'PyramidConfig', 'merge_lambda_shards', 'parse_pyramid_yaml',

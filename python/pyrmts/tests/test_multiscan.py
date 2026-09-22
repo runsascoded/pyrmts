@@ -18,12 +18,15 @@ from pyrmts import (
     Metric,
     Pyramid,
     Tier,
+    consolidate_scans,
     consolidate_tables,
     diff_scans,
     diff_tables,
     extract_table,
+    from_arrow,
     scan_digest,
     series_for,
+    to_arrow,
 )
 
 
@@ -257,3 +260,68 @@ def test_series_for_is_the_over_time_line(encoder: str):
     assert series_for(ms, (0, 'a'), pyr) == [('s0', (10, 1)), ('s1', (10, 1)), ('s2', (10, 1))]
     assert series_for(ms, (0, 'b'), pyr) == [('s0', (20, 2)), ('s1', (30, 3)), ('s2', (0, 0))]
     assert series_for(ms, (0, 'c'), pyr) == [('s0', (0, 0)), ('s1', (0, 0)), ('s2', (5, 1))]
+
+
+# ── Streaming fold (`consolidate_scans`) + self-describing shards (`to_arrow`).
+
+
+def test_consolidate_scans_matches_eager_interval():
+    """The streaming fold is byte-identical to the eager interval encoder — same
+    table, and it also carries per-scan digests (which the eager path now sets
+    too). This is the fleet-scale path: O(#keys) memory, not O(#keys×#scans)."""
+    pyr = _count_pyramid()
+    eager = consolidate_tables(SCANS, pyr, encoder='interval')
+    streamed = consolidate_scans(iter(SCANS), pyr)
+    assert streamed.table.equals(eager.table)
+    assert streamed.scans == eager.scans == ['s0', 's1', 's2']
+    assert streamed.digests == {label: scan_digest(t, pyr) for label, t in SCANS}
+    assert streamed.digests == eager.digests
+
+
+def test_consolidate_scans_consumes_a_one_shot_iterator():
+    """It folds a lazily-yielded generator (each scan read once, discarded) — it
+    never indexes or re-iterates the input, so a one-shot generator suffices."""
+    pyr = _count_pyramid()
+    consumed: list[str] = []
+
+    def gen():
+        for label, t in SCANS:
+            consumed.append(label)
+            yield label, t
+
+    ms = consolidate_scans(gen(), pyr)
+    assert consumed == ['s0', 's1', 's2']              # each yielded exactly once, in order
+    assert _rows(extract_table(ms, 's1', pyr)) == _rows(SCANS[1][1])
+
+
+def test_consolidate_scans_rejects_densify_and_empty():
+    pyr = _count_pyramid()
+    with pytest.raises(ValueError, match="only 'interval'"):
+        consolidate_scans(iter(SCANS), pyr, encoder='densify')
+    with pytest.raises(ValueError, match='at least one scan'):
+        consolidate_scans(iter([]), pyr)
+    with pytest.raises(ValueError, match='duplicate scan label'):
+        consolidate_scans(iter([SCANS[0], SCANS[0]]), pyr)
+
+
+def test_to_from_arrow_round_trips_metadata():
+    """A consolidated shard is self-describing: `to_arrow` attaches encoder /
+    member scans / digests as KV-metadata, `from_arrow` recovers the MultiScan
+    with the metadata stripped back off the carried table."""
+    pyr = _count_pyramid()
+    ms = consolidate_scans(iter(SCANS), pyr)
+    persisted = to_arrow(ms)
+    assert persisted.schema.metadata[b'pyrmts.multiscan']       # metadata present
+    back = from_arrow(persisted)
+    assert back.encoder == 'interval'
+    assert back.scans == ['s0', 's1', 's2']
+    assert back.digests == ms.digests
+    assert back.table.equals(ms.table)                          # stripped clean
+    for label, original in SCANS:
+        assert _rows(extract_table(back, label, pyr)) == _rows(original)
+
+
+def test_from_arrow_rejects_plain_table():
+    pyr = _count_pyramid()
+    with pytest.raises(ValueError, match='no pyrmts.multiscan metadata'):
+        from_arrow(consolidate_scans(iter(SCANS), pyr).table)  # the bare table, no to_arrow

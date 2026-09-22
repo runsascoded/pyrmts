@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -48,15 +49,24 @@ SCAN_HI = '__scan_hi'
 
 ENCODERS = ('densify', 'interval')
 
+#: KV-metadata key under which a written multi-scan shard carries its own
+#: encoder / member-scan list / per-scan digests, so it is self-describing and
+#: digest-verifiable on extract (`to_arrow` / `from_arrow`).
+META_KEY = b'pyrmts.multiscan'
+
 
 @dataclass
 class MultiScan:
     """One consolidated `(tier, period)` tile plus the ordered member-scan
     labels its folded indices refer to. `table` carries the reserved scan
-    column(s) for `encoder`; everything else is the original shard schema."""
+    column(s) for `encoder`; everything else is the original shard schema.
+    `digests` (when present) maps each member scan to its writer-independent
+    content hash, so `extract` can prove recovery before the original is
+    dropped."""
     table: pa.Table
     scans: list[str]
     encoder: str
+    digests: dict[str, str] | None = None
 
 
 def _key_state_cols(pyramid: Pyramid) -> tuple[list[str], list[str], list[tuple]]:
@@ -119,7 +129,98 @@ def consolidate_tables(
         table = _encode_densify(all_keys, per_scan, pyramid, key_cols, state_cols)
     else:
         table = _encode_interval(all_keys, per_scan, pyramid, key_cols, state_cols)
-    return MultiScan(table=table, scans=scans, encoder=encoder)
+    digests = {label: scan_digest(t, pyramid) for label, t in scan_tables}
+    return MultiScan(table=table, scans=scans, encoder=encoder, digests=digests)
+
+
+def consolidate_scans(
+    scan_tables: Iterable[tuple[str, pa.Table]],
+    pyramid: Pyramid,
+    *,
+    encoder: str = 'interval',
+) -> MultiScan:
+    """Streaming interval consolidation over an *iterable* of `(scan_label,
+    shard_table)` yielded lazily — the fleet-scale Phase-2 path.
+
+    Folds one scan at a time and discards it, so peak memory is O(#keys in the
+    tile) (the open-run frontier plus the current scan), *not* the eager
+    :func:`consolidate_tables`' O(#keys × #scans) — which materializes every
+    scan's key-dict at once and OOMs at fleet scale (81 scans × ~6 M keys; see
+    `specs/multi-scan-consolidation.md`, real-scan operating point). The result
+    is byte-identical to `consolidate_tables(..., encoder='interval')` on the
+    same scans. `densify` is not streamable (it needs the full grid up front,
+    and loses the benchmark), so only `'interval'` is supported here."""
+    if encoder != 'interval':
+        raise ValueError(
+            f"consolidate_scans: streaming supports only 'interval', not {encoder!r} "
+            "(use consolidate_tables for densify)"
+        )
+    key_cols, state_cols, _ = _key_state_cols(pyramid)
+    rows, scans, digests = _fold_interval(scan_tables, pyramid, key_cols, state_cols)
+    table = _multiscan_table(rows, pyramid, key_cols, state_cols, [SCAN_LO, SCAN_HI])
+    return MultiScan(table=table, scans=scans, encoder='interval', digests=digests)
+
+
+def _fold_interval(scan_tables, pyramid, key_cols, state_cols):
+    """One-pass fold: maintain `open_runs[key] = (run_start, state)` and emit a
+    closed interval row whenever a key's state changes or it goes absent. Memory
+    is the open-run frontier + one scan's rows; the emitted rows (O(#changes))
+    are sorted once at materialization for determinism."""
+    scans: list[str] = []
+    digests: dict[str, str] = {}
+    open_runs: dict[tuple, tuple[int, tuple]] = {}
+    closed: list[Row] = []
+    j = -1
+    for j, (label, table) in enumerate(scan_tables):
+        if label in digests:
+            raise ValueError(f"consolidate_scans: duplicate scan label {label!r}")
+        scans.append(label)
+        digests[label] = scan_digest(table, pyramid)
+        cur = _scan_rows(table, key_cols, state_cols)
+        for key, state in cur.items():
+            run = open_runs.get(key)
+            if run is None:
+                open_runs[key] = (j, state)
+            elif run[1] != state:
+                closed.append(_interval_row(key, run[1], run[0], j - 1, key_cols, state_cols))
+                open_runs[key] = (j, state)
+            # else: state unchanged → the open run continues (hi extends implicitly)
+        for key in [k for k in open_runs if k not in cur]:  # absent this scan → close
+            lo, st = open_runs.pop(key)
+            closed.append(_interval_row(key, st, lo, j - 1, key_cols, state_cols))
+    if j < 0:
+        raise ValueError("consolidate_scans: need at least one scan")
+    for key, (lo, st) in open_runs.items():
+        closed.append(_interval_row(key, st, lo, j, key_cols, state_cols))
+    return closed, scans, digests
+
+
+def to_arrow(ms: MultiScan) -> pa.Table:
+    """The consolidated table with its :class:`MultiScan` metadata (encoder,
+    ordered member scans, per-scan digests) attached as parquet KV-metadata
+    under :data:`META_KEY`. A shard written from this is self-describing:
+    :func:`from_arrow` reconstructs the `MultiScan` and `extract` can verify a
+    scan's digest before its original is deleted."""
+    meta = {'encoder': ms.encoder, 'scans': ms.scans, 'digests': ms.digests or {}}
+    existing = ms.table.schema.metadata or {}
+    return ms.table.replace_schema_metadata({**existing, META_KEY: json.dumps(meta).encode()})
+
+
+def from_arrow(table: pa.Table) -> MultiScan:
+    """Inverse of :func:`to_arrow`: read the `pyrmts.multiscan` KV-metadata off
+    a written multi-scan table and return the :class:`MultiScan`, with the
+    metadata stripped from the carried table."""
+    md = table.schema.metadata or {}
+    raw = md.get(META_KEY)
+    if raw is None:
+        raise ValueError("from_arrow: table has no pyrmts.multiscan metadata")
+    meta = json.loads(raw)
+    rest = {k: v for k, v in md.items() if k != META_KEY}
+    clean = table.replace_schema_metadata(rest or None)
+    return MultiScan(
+        table=clean, scans=meta['scans'], encoder=meta['encoder'],
+        digests=meta.get('digests') or None,
+    )
 
 
 def _encode_densify(all_keys, per_scan, pyramid, key_cols, state_cols) -> pa.Table:

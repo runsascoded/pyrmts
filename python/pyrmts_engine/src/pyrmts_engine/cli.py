@@ -281,6 +281,79 @@ def multiscan_bench(births: float, churn: str, keys: int, scans: int, seed: int)
         )
 
 
+@cli.group()
+def multiscan() -> None:
+    """Multi-scan consolidation storage driver — Phase 2 of
+    `specs/multi-scan-consolidation.md`. Fold a contiguous range of per-scan
+    shards into interval (SCD-2) multi-scan shards and extract any scan back,
+    digest-verified. Reference driver over the config's storage; each member
+    scan is a subdir `<root>/<label>/` in the config's keyTemplate layout."""
+
+
+@multiscan.command('consolidate')
+@option('-o', '--out', required=True, help="Output root for the consolidated multi-scan shards")
+@option('-r', '--range', 'range_', required=True, help="Half-open scan range <from-iso>/<to-iso> (UTC) selecting shard periods")
+@option('-R', '--root', required=True, help="Scans root; each member scan is a subdir <root>/<label>/")
+@option('-s', '--scan', 'scan_labels', multiple=True, required=True, help="Member scan subdir label, in observation order (repeatable)")
+@option('-S', '--shard', required=True, help="Shard duration to consolidate (e.g. 1mo)")
+@option('-t', '--tier', required=True, help="Tier name to consolidate")
+@argument('config')
+def multiscan_consolidate(
+    out: str,
+    range_: str,
+    root: str,
+    scan_labels: tuple[str, ...],
+    shard: str,
+    tier: str,
+    config: str,
+) -> None:
+    """Stream-consolidate the member scans' `tier`@`shard` tiles over the range
+    into multi-scan shards at `--out`. Peak memory is O(#keys per tile), not
+    O(#keys × #scans)."""
+    from .multiscan_driver import consolidate_range
+
+    pyramid = _load_pyramid(config, None)
+    scans = [(label, FsStorage(Path(root) / label)) for label in scan_labels]
+    written = consolidate_range(scans, pyramid, tier, shard, _parse_range(range_), FsStorage(out))
+    for key, rows, n in written:
+        print(f"{key}\t{rows} rows\t{n} scans")
+    err(f"multiscan consolidate: {len(written)} tiles, {len(scan_labels)} scans")
+
+
+@multiscan.command('extract')
+@option('-N', '--no-verify', is_flag=True, help="Skip per-scan digest verification")
+@option('-o', '--out', help="Write the extracted scan's parquet here (default: report row count only)")
+@option('-p', '--period', required=True, help="Shard period label (e.g. 2026-01)")
+@option('-R', '--root', required=True, help="Multi-scan shards root (a `consolidate --out`)")
+@option('-s', '--scan', required=True, help="Member scan label to extract")
+@option('-S', '--shard', required=True, help="Shard duration (e.g. 1mo)")
+@option('-t', '--tier', required=True, help="Tier name")
+@argument('config')
+def multiscan_extract(
+    no_verify: bool,
+    out: str | None,
+    period: str,
+    root: str,
+    scan: str,
+    shard: str,
+    tier: str,
+    config: str,
+) -> None:
+    """Reconstruct member `scan`'s original shard from the multi-scan shard,
+    digest-verified (unless `-N`), and optionally write it to `--out`."""
+    import pyarrow.parquet as pq
+
+    from .multiscan_driver import _tile_key, extract_scan
+
+    pyramid = _load_pyramid(config, None)
+    key = _tile_key(pyramid, tier, shard, period)
+    table = extract_scan(FsStorage(root), key, scan, pyramid, verify=not no_verify)
+    verified = '' if no_verify else ', digest verified'
+    print(f"{scan}: {table.num_rows} rows{verified}")
+    if out:
+        pq.write_table(table, out)
+
+
 @cli.command()
 @option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the detected memory limit; 0 disables)")
 @option('-C', '--close-workers', type=int, help="Concurrent close computations (default 2): more overlaps closes with the walk (wall) at the cost of stacked close transients (peak RSS)")

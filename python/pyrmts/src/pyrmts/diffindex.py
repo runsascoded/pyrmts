@@ -1,24 +1,31 @@
-"""Dyadic changeset-hierarchy: sublinear diffs between *any* two scans.
+"""Flat-changeset diff-index: the changeset between *any* two scans, composed
+from disjoint aligned dyadic blocks.
 
-The multi-scan store (`multiscan.py`) compresses storage and makes *within-archive*
-and *adjacent* diffs cheap, but a diff between two arbitrary scans in different
-archives still costs O(fleet) (a junction between two archives has no stored
-delta, so detecting which keys changed there needs a full-state comparison). This
-module builds the **serve-side** index that makes an arbitrary-pair diff cheap and
-on-by-default — the piece storage consolidation does *not* give you.
+What this answers: "every key whose state differs between scan i and scan j",
+as a flat `{key: (before, after)}` dict — the audit / changelog primitive, the
+gross-churn input (Σ|Δ| per subtree, which net rollups cannot give), and the
+build input for a materialized pairwise diff on a non-adjacent pair. It is
+**not** the diff-treemap engine: a treemap needs O(rendered) work, which is a
+best-first tandem walk over two random-access snapshots (see the spec); a flat
+changeset over a long span is O(changes-in-span), far more than rendered cells.
 
 Model: a **changeset** is `{key: (state_a, state_b)}` over the keys that differ
 across a span (a birth is `identity → v`, a death `v → identity`). Composition is
 associative but **not invertible** (remove-then-re-add across the span nets to
-zero yet is real churn), so a range must be covered by *disjoint* dyadic blocks,
-never overlapping ones. :class:`SparseDiffIndex` stores composed changesets over
-power-of-2 spans (binary lifting) so `diff(a, b)` composes O(log(b−a)) disjoint
-blocks — O(log N + changes-in-span), vs. O(fleet) for a 2-snapshot diff or
-O(#groups) for composing across capped-K archives.
+zero yet is real churn), so a span is covered by *disjoint* blocks only.
 
-Cost moves to ingest: appending scan N computes one adjacency changeset (from the
-two newest snapshots) and updates O(log N) hierarchy nodes, so every later diff
-query is cheap instead of every query paying O(fleet).
+Layout: **level 0** is the events log — one adjacency changeset per scan pair
+(k → k+1), O(total changes) storage, strictly smaller than an interval archive.
+Optional higher levels (`levels` ≥ 1) hold **aligned** power-of-2 blocks: node
+`(L, start)` with `start` a multiple of `2**L` is the net change from scan
+`start` to `start + 2**L` (segment-tree / Fenwick layout, not a sparse table —
+sliding windows would cost O(N) storage per level with changeset-valued nodes).
+Storage per level is bounded by the level-0 total, so the whole index is at
+most `(levels + 1) ×` the events log, and netting makes higher levels smaller
+still. Ingest is append-only: scan m creates one level-0 node and one node at
+each level L ≤ levels that divides m, ~2 nodes per scan amortized, never
+touching an existing node. `diff(i, j)` composes the ≤ 2·log2(j−i) aligned
+blocks of :func:`aligned_blocks` (with `levels=0`, the j−i adjacency nodes).
 """
 from __future__ import annotations
 
@@ -94,74 +101,83 @@ def changeset_from_table(table: pa.Table, pyramid: Pyramid) -> Changeset:
     return out
 
 
-def jumps(i: int, j: int) -> list[tuple[int, int]]:
-    """The disjoint dyadic blocks composing `(i, j]`, as `[(level, start), ...]`
-    — block `(level, start)` is the net change from scan `start` to scan
-    `start + 2**level`. Binary lifting on `j − i`: popcount(j−i) = O(log) blocks.
-    The reader fetches exactly these nodes; nothing else."""
+def aligned_blocks(i: int, j: int, levels: int = 0) -> list[tuple[int, int]]:
+    """The disjoint aligned dyadic blocks covering `(i, j]`, as
+    `[(level, start), ...]` — block `(level, start)` is the net change from scan
+    `start` to scan `start + 2**level`, with `start` a multiple of `2**level`
+    and `level ≤ levels`. Greedy: at each position take the largest aligned
+    block that fits before `j`. At most `2·log2(j−i) + 1` blocks when the cap
+    allows; with `levels=0` it is the `j−i` adjacency blocks. The reader fetches
+    exactly these nodes; nothing else."""
+    if levels < 0:
+        raise ValueError(f"aligned_blocks: levels must be ≥ 0, got {levels}")
     out: list[tuple[int, int]] = []
-    pos, remaining, level = i, j - i, 0
-    while remaining:
-        if remaining & 1:
-            out.append((level, pos))
-            pos += 1 << level
-        remaining >>= 1
-        level += 1
+    pos = i
+    while pos < j:
+        level = 0
+        while level < levels and pos % (1 << (level + 1)) == 0 and pos + (1 << (level + 1)) <= j:
+            level += 1
+        out.append((level, pos))
+        pos += 1 << level
     return out
 
 
 class SparseDiffIndex:
-    """Binary-lifting hierarchy over per-scan adjacency changesets, for O(log)
-    diffs between any two scans.
+    """Aligned dyadic hierarchy over per-scan adjacency changesets.
 
-    `deltas[k]` is the changeset from scan `k` to scan `k+1` (length `N−1` for `N`
-    scans). `diff(i, j)` composes the disjoint dyadic blocks of `(i, j]` —
-    O(log(j−i)) compositions. Build is O(N log N) stored changesets (each tiny on
-    low-churn data); appending a scan is O(log N) (see :meth:`append`)."""
+    `table[level][start]` is the net changeset from scan `start` to scan
+    `start + 2**level`; level 0 holds every adjacency changeset (the events
+    log), level `L ≥ 1` only starts that are multiples of `2**L`. `levels` caps
+    the hierarchy (0 = events log only). `diff(i, j)` composes the aligned
+    blocks of `(i, j]`; building by repeated :meth:`append` is canonical."""
 
-    def __init__(self, deltas: Sequence[Changeset] = ()) -> None:
-        # table[level][i] = composed changeset over [i, i + 2**level) — the net
-        # change from scan i to scan i + 2**level. Built by repeated `append`, so
-        # a from-scratch build and an incremental one are identical.
-        self.table: list[list[Changeset]] = [[]]
+    def __init__(self, deltas: Sequence[Changeset] = (), *, levels: int = 0) -> None:
+        if levels < 0:
+            raise ValueError(f"SparseDiffIndex: levels must be ≥ 0, got {levels}")
+        self.levels = levels
+        self.table: list[dict[int, Changeset]] = [{} for _ in range(levels + 1)]
         self.n = 1  # scans; one scan has zero deltas
         for d in deltas:
             self.append(d)
 
     def append(self, delta: Changeset) -> list[tuple[int, int, Changeset]]:
         """Append the adjacency changeset from the current last scan to a new
-        scan. **Append-only**: this creates exactly one new node per level
-        `L` with `2**L ≤ #deltas` (each the composition of two existing nodes)
-        and never touches an existing node — so persisted nodes are immutable.
-        O(log N) compositions. Returns the new nodes as `[(level, i, changeset)]`,
-        which is precisely what a store must persist."""
-        self.table[0].append(delta)
+        scan. **Append-only**: writes the level-0 node at `m−1` (`m` = deltas
+        after the append) plus, for each level `L ≤ levels` with `2**L | m`, the
+        aligned node at `m − 2**L` composed from two level-`L−1` nodes; never
+        touches an existing node. ~2 nodes per scan amortized. Returns the new
+        nodes as `[(level, start, changeset)]` — what a store must persist."""
+        m = len(self.table[0]) + 1
+        self.table[0][m - 1] = delta
         self.n += 1
-        m = len(self.table[0])
         new: list[tuple[int, int, Changeset]] = [(0, m - 1, delta)]
-        level = 1
-        while (1 << level) <= m:
-            i = m - (1 << level)
+        for level in range(1, self.levels + 1):
+            width = 1 << level
+            if m % width:
+                break
+            start = m - width
             prev = self.table[level - 1]
-            node = compose_changesets(prev[i], prev[i + (1 << (level - 1))])
-            if level == len(self.table):
-                self.table.append([])
-            self.table[level].append(node)
-            new.append((level, i, node))
-            level += 1
+            node = compose_changesets(prev[start], prev[start + (width >> 1)])
+            self.table[level][start] = node
+            new.append((level, start, node))
         return new
 
     def diff(self, i: int, j: int) -> Changeset:
-        """Net changeset from scan `i` to scan `j` (`i ≤ j`), composing the O(log)
-        disjoint blocks from :func:`jumps`. `diff(i, i)` is empty."""
+        """Net changeset from scan `i` to scan `j` (`i ≤ j`), composing the
+        disjoint blocks from :func:`aligned_blocks`. `diff(i, i)` is empty."""
         if not 0 <= i <= j < self.n:
             raise ValueError(f"SparseDiffIndex.diff: ({i}, {j}) out of range [0, {self.n})")
         result: Changeset = {}
-        for level, pos in jumps(i, j):
-            result = compose_changesets(result, self.table[level][pos])
+        for level, start in aligned_blocks(i, j, self.levels):
+            result = compose_changesets(result, self.table[level][start])
         return result
 
     def blocks_composed(self, i: int, j: int) -> int:
-        """The number of dyadic blocks a `diff(i, j)` composes — popcount(j−i),
-        i.e. O(log). For asserting the log bound in tests."""
-        return bin(j - i).count('1')
+        """The number of blocks a `diff(i, j)` composes — ≤ 2·log2(j−i) + 1 with
+        enough levels, `j − i` with `levels=0`. For asserting bounds in tests."""
+        return len(aligned_blocks(i, j, self.levels))
+
+    def entries(self) -> list[int]:
+        """Total stored changeset entries per level — the storage cost. Each
+        level is bounded by level 0 (netting only shrinks composed nodes)."""
+        return [sum(len(node) for node in level.values()) for level in self.table]

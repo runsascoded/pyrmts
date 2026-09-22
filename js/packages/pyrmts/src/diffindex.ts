@@ -1,16 +1,23 @@
-// Dyadic diff-index — the TS reader for `pyrmts.diffindex` / `DiffIndexStore`:
-// O(log N) diffs between ANY two scans, on by default. See
-// ../../../../specs/multi-scan-consolidation.md (Phase 3).
+// Flat-changeset diff-index — the TS reader for `pyrmts.diffindex` /
+// `DiffIndexStore`: the changeset between ANY two scans, composed from disjoint
+// aligned dyadic nodes. See ../../../../specs/multi-scan-consolidation.md
+// (Phase 3).
 //
 // A changeset is `{key → (before, after)}` over the keys that differ across a
 // span (birth = identity→v, death = v→identity). Composition is associative but
 // NOT invertible (remove-then-re-add nets to zero yet is real churn), so a span
-// is covered by *disjoint* power-of-2 blocks. The store persists one immutable
-// node per `(level, i)` = the net change from scan `i` to scan `i + 2^level`;
-// `diffOverSpan` fetches only the popcount(|j−i|) nodes named by `jumps` and
-// composes them — no snapshot is read at query time. Node rows are the standard
-// changeset shape (`key_cols` + `{c}__a`/`{c}__b`), identical to `diffTables`
-// output and to what the Python `DiffIndexStore` writes.
+// is covered by *disjoint* blocks. Level 0 is the events log: one adjacency
+// node per scan pair. Levels 1..L (the index's `levels` cap, in its manifest)
+// hold aligned power-of-2 nodes: `(level, start)` with `start` a multiple of
+// `2^level` = the net change from scan `start` to `start + 2^level`.
+// `diffOverSpan` fetches only the nodes named by `alignedBlocks` (≤ 2·log2(span)+1
+// with enough levels, `span` adjacency nodes at `levels = 0`) and composes them —
+// no snapshot is read at query time. Node rows are the standard changeset shape
+// (`key_cols` + `{c}__a`/`{c}__b`), identical to `diffTables` output.
+//
+// This is the audit / changelog / gross-churn primitive, not the diff-treemap
+// engine: a treemap needs O(rendered) work (a best-first tandem walk over two
+// random-access snapshots), while a flat changeset is O(changes-in-span).
 
 import { parquetMetadata, parquetReadObjects, type AsyncBuffer } from 'hyparquet'
 import { identities, keyStateCols, type State } from './multiscan.js'
@@ -121,36 +128,37 @@ export function composeChangesets(left: Changeset, right: Changeset): Changeset 
   return out
 }
 
-/** The disjoint dyadic blocks composing `(i, j]` as `[level, start]` pairs —
- * block `(level, start)` = net change from scan `start` to `start + 2^level`.
- * popcount(j−i) = O(log) blocks. Mirrors Python `jumps`. */
-export function jumps(i: number, j: number): Array<[number, number]> {
+/** The disjoint aligned dyadic blocks covering `(i, j]` as `[level, start]`
+ * pairs — block `(level, start)`, `start` a multiple of `2^level`, `level ≤
+ * levels` = net change from scan `start` to `start + 2^level`. Greedy largest
+ * aligned block at each position: ≤ 2·log2(j−i)+1 blocks when the cap allows,
+ * the `j−i` adjacency blocks at `levels = 0`. Mirrors Python `aligned_blocks`. */
+export function alignedBlocks(i: number, j: number, levels = 0): Array<[number, number]> {
+  if (levels < 0) throw new Error(`alignedBlocks: levels must be ≥ 0, got ${levels}`)
   const out: Array<[number, number]> = []
   let pos = i
-  let remaining = j - i
-  let level = 0
-  while (remaining) {
-    if (remaining & 1) {
-      out.push([level, pos])
-      pos += 1 << level
-    }
-    remaining >>= 1
-    level += 1
+  while (pos < j) {
+    let level = 0
+    while (level < levels && pos % (1 << (level + 1)) === 0 && pos + (1 << (level + 1)) <= j) level++
+    out.push([level, pos])
+    pos += 1 << level
   }
   return out
 }
 
-/** Diff between any two scans, composed from only the O(log) jump nodes.
- * `scans` is the index's ordered label list (from `index.json`); `loadNode`
- * fetches node `(level, i)` as changeset rows (the consumer's storage read). If
- * `a` is after `b`, the forward changeset is computed and each before/after
- * swapped (a single changeset reverses; only composition is non-invertible). */
+/** Diff between any two scans, composed from only the aligned nodes covering
+ * the span. `scans` and `levels` come from the index manifest
+ * (`parseDiffIndexManifest`); `loadNode` fetches node `(level, start)` as
+ * changeset rows (the consumer's storage read). If `a` is after `b`, the forward
+ * changeset is computed and each before/after swapped (a single changeset
+ * reverses; only composition is non-invertible). */
 export async function diffOverSpan(
   scans: string[],
   schema: Schema,
   a: string,
   b: string,
-  loadNode: (level: number, i: number) => Promise<Row[]>,
+  loadNode: (level: number, start: number) => Promise<Row[]>,
+  levels = 0,
 ): Promise<Row[]> {
   let i = scans.indexOf(a)
   let j = scans.indexOf(b)
@@ -159,8 +167,8 @@ export async function diffOverSpan(
   const reverse = i > j
   if (reverse) [i, j] = [j, i]
   let result: Changeset = new Map()
-  for (const [level, pos] of jumps(i, j)) {
-    result = composeChangesets(result, changesetFromRows(await loadNode(level, pos), schema))
+  for (const [level, start] of alignedBlocks(i, j, levels)) {
+    result = composeChangesets(result, changesetFromRows(await loadNode(level, start), schema))
   }
   if (reverse) {
     for (const [k, e] of result) result.set(k, { keyRow: e.keyRow, sa: e.sb, sb: e.sa })
@@ -194,11 +202,18 @@ export async function readChangesetNode(bytes: Uint8Array): Promise<Row[]> {
   })
 }
 
-/** Parse the store's `index.json` → ordered scan labels. */
-export function parseDiffIndexManifest(bytes: Uint8Array, dataset?: string): string[] {
-  const meta = JSON.parse(new TextDecoder().decode(bytes)) as { dataset: string; scans: string[] }
+export interface DiffIndexManifest {
+  /** Ordered scan labels; position = scan index. */
+  scans: string[]
+  /** Hierarchy cap: aligned nodes exist for levels `1..levels` (0 = events log only). */
+  levels: number
+}
+
+/** Parse the store's `index.json` → ordered scan labels + hierarchy cap. */
+export function parseDiffIndexManifest(bytes: Uint8Array, dataset?: string): DiffIndexManifest {
+  const meta = JSON.parse(new TextDecoder().decode(bytes)) as { dataset: string; scans: string[]; levels: number }
   if (dataset !== undefined && meta.dataset !== dataset) {
     throw new Error(`parseDiffIndexManifest: manifest is for dataset '${meta.dataset}', not '${dataset}'`)
   }
-  return meta.scans
+  return { scans: meta.scans, levels: meta.levels }
 }

@@ -21,7 +21,7 @@ from .diffindex import (
     changeset_from_table,
     changeset_to_table,
     compose_changesets,
-    jumps,
+    aligned_blocks,
 )
 from .gap_discovery import ExpectedShard, list_expected_shards
 from .keys import substitute_key
@@ -71,7 +71,7 @@ __all__ = [
     'CanonicalizeResult', 'canonicalize_shards', 'recanonicalize_table',
     'CascadeResult', 'cascade_tiers',
     'SparseDiffIndex', 'changeset_between', 'changeset_from_table', 'changeset_to_table',
-    'compose_changesets', 'jumps',
+    'compose_changesets', 'aligned_blocks',
     'ExpectedShard', 'list_expected_shards',
     'substitute_key',
     'Monoid', 'Row', 'get_monoid', 'state_columns',

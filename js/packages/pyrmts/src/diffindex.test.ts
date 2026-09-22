@@ -1,18 +1,19 @@
-// Dyadic diff-index reader — the TS twin of `pyrmts.diffindex` / `DiffIndexStore`.
-// Builds the same immutable node set the Python store persists (one node per
-// (level, i), composed per level), then proves `diffOverSpan` equals the direct
-// 2-snapshot `changesetBetween` for EVERY pair while loading only popcount(j−i)
-// nodes; plus a parquet round-trip of a node and the manifest parse.
+// Flat-changeset diff-index reader — the TS twin of `pyrmts.diffindex` /
+// `DiffIndexStore`. Builds the same aligned node set the Python store persists
+// (level 0 = every adjacency; level L = aligned starts only), then proves
+// `diffOverSpan` equals the direct 2-snapshot `changesetBetween` for EVERY pair
+// at several hierarchy caps while loading only the aligned blocks covering the
+// span; plus a parquet round-trip of a node and the manifest parse.
 
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { describe, expect, test } from 'vitest'
 import {
+  alignedBlocks,
   changesetBetween,
   changesetFromRows,
   changesetToRows,
   composeChangesets,
   diffOverSpan,
-  jumps,
   parseDiffIndexManifest,
   readChangesetNode,
   type Changeset,
@@ -40,63 +41,93 @@ function history(): Row[][] {
 }
 
 // Build the store's node set the way `DiffIndexStore.append_scan` does:
-// level 0 = adjacency changesets, level L = compose of two level L−1 nodes.
-function buildNodes(scans: Row[][]): Map<string, Changeset> {
+// level 0 = adjacency changesets; level L = compose of the two level L−1
+// nodes at aligned starts (multiples of 2^L) only.
+function buildNodes(scans: Row[][], levels: number): Map<string, Changeset> {
   const nodes = new Map<string, Changeset>()
-  const deltas: Changeset[] = []
-  for (let k = 0; k + 1 < scans.length; k++) deltas.push(changesetBetween(scans[k]!, scans[k + 1]!, SCHEMA))
-  let level = 0
-  let cur = deltas
-  while (cur.length) {
-    cur.forEach((cs, i) => nodes.set(`${level}/${i}`, cs))
+  const n = scans.length - 1
+  for (let k = 0; k < n; k++) nodes.set(`0/${k}`, changesetBetween(scans[k]!, scans[k + 1]!, SCHEMA))
+  for (let level = 1; level <= levels; level++) {
     const width = 1 << level
-    const next: Changeset[] = []
-    for (let i = 0; i + 2 * width <= deltas.length; i++) next.push(composeChangesets(cur[i]!, cur[i + width]!))
-    cur = next
-    level++
+    for (let start = 0; start + width <= n; start += width) {
+      nodes.set(`${level}/${start}`, composeChangesets(nodes.get(`${level - 1}/${start}`)!, nodes.get(`${level - 1}/${start + width / 2}`)!))
+    }
   }
   return nodes
 }
 
 const rowsOf = (cs: Changeset) => changesetToRows(cs, SCHEMA)
 
-describe('diffOverSpan', () => {
-  const scans = history()
-  const labels = scans.map((_, k) => `s${k}`)
-  const nodes = buildNodes(scans)
-  const loads: string[] = []
-  const loadNode = async (level: number, i: number) => {
-    loads.push(`${level}/${i}`)
-    return changesetToRows(nodes.get(`${level}/${i}`)!, SCHEMA)
-  }
-
-  test('equals the 2-snapshot diff for every pair, both directions', async () => {
-    for (let i = 0; i < scans.length; i++) {
-      for (let j = 0; j < scans.length; j++) {
-        const got = await diffOverSpan(labels, SCHEMA, labels[i]!, labels[j]!, loadNode)
-        expect(got).toEqual(rowsOf(changesetBetween(scans[i]!, scans[j]!, SCHEMA)))
+describe('alignedBlocks', () => {
+  test('aligned, disjoint, capped', () => {
+    expect(alignedBlocks(0, 8, 3)).toEqual([[3, 0]])
+    expect(alignedBlocks(0, 7, 3)).toEqual([[2, 0], [1, 4], [0, 6]])
+    expect(alignedBlocks(3, 10, 3)).toEqual([[0, 3], [2, 4], [1, 8]])
+    expect(alignedBlocks(0, 8, 1)).toEqual([[1, 0], [1, 2], [1, 4], [1, 6]])
+    expect(alignedBlocks(3, 10, 0)).toEqual([3, 4, 5, 6, 7, 8, 9].map(k => [0, k]))
+    expect(alignedBlocks(4, 4, 3)).toEqual([])
+    for (const levels of [0, 1, 2, 3, 4]) {
+      for (let i = 0; i < 20; i++) {
+        for (let j = i; j < 20; j++) {
+          let pos = i
+          for (const [level, start] of alignedBlocks(i, j, levels)) {
+            expect(start).toBe(pos)
+            expect(start % (1 << level)).toBe(0)
+            expect(level).toBeLessThanOrEqual(levels)
+            pos += 1 << level
+          }
+          expect(pos).toBe(j)
+        }
       }
     }
   })
+})
 
-  test('loads only the popcount(j−i) jump nodes', async () => {
+describe('diffOverSpan', () => {
+  const scans = history()
+  const labels = scans.map((_, k) => `s${k}`)
+
+  for (const levels of [0, 1, 3]) {
+    test(`equals the 2-snapshot diff for every pair, both directions (levels=${levels})`, async () => {
+      const nodes = buildNodes(scans, levels)
+      const loadNode = async (level: number, start: number) => changesetToRows(nodes.get(`${level}/${start}`)!, SCHEMA)
+      for (let i = 0; i < scans.length; i++) {
+        for (let j = 0; j < scans.length; j++) {
+          const got = await diffOverSpan(labels, SCHEMA, labels[i]!, labels[j]!, loadNode, levels)
+          expect(got).toEqual(rowsOf(changesetBetween(scans[i]!, scans[j]!, SCHEMA)))
+        }
+      }
+    })
+  }
+
+  test('loads only the aligned blocks covering the span', async () => {
+    const nodes = buildNodes(scans, 3)
+    const loads: string[] = []
+    const loadNode = async (level: number, start: number) => {
+      loads.push(`${level}/${start}`)
+      return changesetToRows(nodes.get(`${level}/${start}`)!, SCHEMA)
+    }
+    await diffOverSpan(labels, SCHEMA, 's0', 's8', loadNode, 3)
+    expect(loads).toEqual(['3/0'])                       // one aligned 2^3 node
     loads.length = 0
-    await diffOverSpan(labels, SCHEMA, 's0', 's8', loadNode)
-    expect(loads).toEqual(['3/0'])                       // one 2^3 node
+    await diffOverSpan(labels, SCHEMA, 's3', 's10', loadNode, 3)
+    expect(loads).toEqual(['0/3', '2/4', '1/8'])         // 1 + 4 + 2, aligned + disjoint
     loads.length = 0
-    await diffOverSpan(labels, SCHEMA, 's3', 's10', loadNode)
-    expect(loads).toEqual(['0/3', '1/4', '2/6'])         // 7 = 1+2+4, disjoint
-    expect(jumps(0, 7)).toEqual([[0, 0], [1, 1], [2, 3]])
+    await diffOverSpan(labels, SCHEMA, 's3', 's7', loadNode, 0)
+    expect(loads).toEqual(['0/3', '0/4', '0/5', '0/6'])  // events log only: the span's adjacencies
   })
 
   test('remove-then-re-add nets out across an even→even span', async () => {
-    const d02 = await diffOverSpan(labels, SCHEMA, 's0', 's2', loadNode)
+    const nodes = buildNodes(scans, 3)
+    const loadNode = async (level: number, start: number) => changesetToRows(nodes.get(`${level}/${start}`)!, SCHEMA)
+    const d02 = await diffOverSpan(labels, SCHEMA, 's0', 's2', loadNode, 3)
     expect(d02.some(r => r.path === 'blink')).toBe(false)
-    const d01 = await diffOverSpan(labels, SCHEMA, 's0', 's1', loadNode)
+    const d01 = await diffOverSpan(labels, SCHEMA, 's0', 's1', loadNode, 3)
     expect(d01.some(r => r.path === 'blink')).toBe(true) // present → absent: a death
   })
 
   test('rejects unknown scans', async () => {
+    const loadNode = async () => []
     await expect(diffOverSpan(labels, SCHEMA, 's0', 'nope', loadNode)).rejects.toThrow(/not in the index/)
   })
 })
@@ -119,9 +150,9 @@ describe('node parquet + manifest', () => {
     expect(rowsOf(changesetFromRows(back, SCHEMA))).toEqual(rows)
   })
 
-  test('parses index.json and checks the dataset scope', () => {
-    const bytes = new TextEncoder().encode(JSON.stringify({ dataset: 'dt', scans: ['s0', 's1'] }))
-    expect(parseDiffIndexManifest(bytes, 'dt')).toEqual(['s0', 's1'])
+  test('parses index.json (scans + levels) and checks the dataset scope', () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ dataset: 'dt', scans: ['s0', 's1'], levels: 2 }))
+    expect(parseDiffIndexManifest(bytes, 'dt')).toEqual({ scans: ['s0', 's1'], levels: 2 })
     expect(() => parseDiffIndexManifest(bytes, 'other')).toThrow(/not 'other'/)
   })
 })

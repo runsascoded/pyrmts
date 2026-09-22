@@ -1,8 +1,9 @@
 """`pyrmts-engine diffindex update|diff`: the idempotent ingest stage + the
-O(log)-node query, end to end over an FsStorage scan root."""
+aligned-node query, end to end over an FsStorage scan root."""
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 import pyarrow as pa
@@ -72,15 +73,21 @@ def test_diffindex_cli_update_then_diff(tmp_path: Path):
     common = ['-D', 'dt', '-o', str(out), str(config)]
 
     # First update appends every scan (labels printed in order); a rerun is a no-op.
-    result = CliRunner().invoke(cli, ['diffindex', 'update', '-k', _key(), '-R', str(root), *common])
+    result = CliRunner().invoke(cli, ['diffindex', 'update', '-k', _key(), '-L', '1', '-R', str(root), *common])
     assert result.exit_code == 0, result.output
     assert result.stdout.split('\n') == ['s0', 's1', 's2', 's3', '']
     result = CliRunner().invoke(cli, ['diffindex', 'update', '-k', _key(), '-R', str(root), *common])
     assert result.exit_code == 0, result.output
     assert result.stdout == ''
-    # Append-only node layout: L0 has 3 adjacency nodes, L1 two composed nodes.
+    # Aligned layout: L0 has the 3 adjacency nodes; L1 only the aligned pair at 0
+    # (a sliding layout would also have L1/1). The manifest records the cap.
     assert sorted(p.name for p in (out / 'diffidx/dt/L0').iterdir()) == ['0.parquet', '1.parquet', '2.parquet']
-    assert sorted(p.name for p in (out / 'diffidx/dt/L1').iterdir()) == ['0.parquet', '1.parquet']
+    assert sorted(p.name for p in (out / 'diffidx/dt/L1').iterdir()) == ['0.parquet']
+    assert json.loads((out / 'diffidx/dt/index.json').read_text()) == {'dataset': 'dt', 'scans': ['s0', 's1', 's2', 's3'], 'levels': 1}
+    # A conflicting cap on an existing index is refused.
+    result = CliRunner().invoke(cli, ['diffindex', 'update', '-k', _key(), '-L', '2', '-R', str(root), *common])
+    assert result.exit_code != 0
+    assert 'has levels=1, not 2' in str(result.exception)
 
     # Any-pair diff equals the 2-snapshot oracle; the changeset is written out.
     written = tmp_path / 'd.parquet'

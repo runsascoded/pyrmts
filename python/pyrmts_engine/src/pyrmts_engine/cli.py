@@ -430,10 +430,11 @@ def multiscan_seal(
 
 @cli.group()
 def diffindex() -> None:
-    """Always-on dyadic diff-index (`specs/multi-scan-consolidation.md`, Phase 3):
-    O(log N) diffs between ANY two scans. `update` is the idempotent per-scan
-    ingest stage (one adjacency changeset + O(log N) immutable nodes per new
-    scan); `diff` composes only the popcount(|j−i|) jump nodes at query time."""
+    """Flat-changeset diff-index (`specs/multi-scan-consolidation.md`, Phase 3):
+    the changeset between ANY two scans from disjoint aligned dyadic nodes.
+    `update` is the idempotent per-scan ingest stage (one adjacency changeset at
+    L0 + ~1 aligned node amortized per new scan); `diff` composes only the
+    nodes covering the span at query time — no snapshot read."""
 
 
 def _scan_tables(root: str, tile_key: str, labels: list[str]):
@@ -454,18 +455,21 @@ def _scan_tables(root: str, tile_key: str, labels: list[str]):
 @diffindex.command('update')
 @option('-D', '--dataset', required=True, help="Dataset scope (the index lives at <out>/diffidx/<dataset>/)")
 @option('-k', '--key', 'tile_key', required=True, help="Tile key of the snapshot within each scan (e.g. p/base/1mo/2026-01.parquet)")
+@option('-L', '--levels', type=int, default=None, help="Hierarchy cap for a NEW index: 0 = events log only (default); L adds aligned 2^1..2^L nodes (≤(L+1)× storage, ≤2·log2(span)+1 reads). On an existing index, must match its cap")
 @option('-o', '--out', required=True, help="Index root")
 @option('-R', '--root', required=True, help="Scans root; each scan is a subdir <root>/<label>/")
 @option('-s', '--scan', 'scan_labels', multiple=True, help="Ordered scan labels (default: <root>'s subdirs, sorted)")
 @argument('config')
-def diffindex_update(dataset: str, tile_key: str, out: str, root: str, scan_labels: tuple[str, ...], config: str) -> None:
+def diffindex_update(dataset: str, tile_key: str, levels: int | None, out: str, root: str, scan_labels: tuple[str, ...], config: str) -> None:
     """Idempotent ingest: append every scan not yet in the index, in order. A
     cron fires this each cycle; it no-ops when nothing is new."""
     from .diffindex_store import DiffIndexStore
 
     pyramid = _load_pyramid(config, None)
     labels = list(scan_labels) or sorted(p.name for p in Path(root).iterdir() if p.is_dir())
-    store = DiffIndexStore(FsStorage(out), f'diffidx/{dataset}', pyramid, dataset)
+    # `--levels` sizes a NEW index; an existing index keeps its own cap (an
+    # explicit different value is rejected by the store).
+    store = DiffIndexStore(FsStorage(out), f'diffidx/{dataset}', pyramid, dataset, levels=levels)
     appended = store.update(_scan_tables(root, tile_key, labels))
     for label in appended:
         print(label)
@@ -480,8 +484,8 @@ def diffindex_update(dataset: str, tile_key: str, out: str, root: str, scan_labe
 @option('-w', '--write', 'write_path', help="Write the changeset parquet here (default: report row count only)")
 @argument('config')
 def diffindex_diff(scan_a: str, scan_b: str, dataset: str, out: str, write_path: str | None, config: str) -> None:
-    """The changeset between any two scans, composed from O(log) jump nodes —
-    no snapshot read."""
+    """The changeset between any two scans, composed from the aligned nodes
+    covering the span — no snapshot read."""
     import pyarrow.parquet as pq
 
     from .diffindex_store import DiffIndexStore

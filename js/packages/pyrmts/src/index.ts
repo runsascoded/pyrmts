@@ -8,6 +8,7 @@ export type {
   Dim,
   Duration,
   FetchOptionsBase,
+  GetRangeOptions,
   FetchSegment,
   GeoSpec,
   IdentityRollup,
@@ -69,7 +70,7 @@ export { pivotTallToHistogram } from './pivot.js'
 export type { PivotTallToHistogramOptions } from './pivot.js'
 
 export { fetchShardData, parquetBackend } from './fetch.js'
-export type { FetchOptions, FetchTrace } from './fetch.js'
+export type { CachedMetadata, FetchOptions, FetchTrace, MetadataCache } from './fetch.js'
 
 export { validateLadders } from './ladder.js'
 export type { ValidatedTierLadder } from './ladder.js'

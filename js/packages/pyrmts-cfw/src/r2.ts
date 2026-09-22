@@ -23,16 +23,25 @@ export function r2Storage(bucket: R2Bucket): Storage {
       return { size: obj.size, etag: obj.etag }
     },
 
-    async getRange(key, start, end) {
+    async getRange(key, start, end, opts) {
       const length = end - start
       if (length <= 0) {
         throw new Error(`r2Storage.getRange: empty range [${start}, ${end})`)
       }
-      const body = await bucket.get(key, { range: { offset: start, length } })
-      if (body === null) {
+      // `onlyIf.etagMatches` is R2's If-Match: on a mismatch R2 returns the
+      // object's metadata without a body (an `R2Object`, not `R2ObjectBody`).
+      const obj = await bucket.get(key, {
+        range: { offset: start, length },
+        ...(opts?.ifMatch !== undefined ? { onlyIf: { etagMatches: opts.ifMatch } } : {}),
+      })
+      if (obj === null) {
         throw new Error(`r2Storage.getRange: object not found: ${key}`)
       }
-      return new Uint8Array(await body.arrayBuffer())
+      // An `R2Object` (precondition failed) has no `arrayBuffer`; an `R2ObjectBody` does.
+      if (!('arrayBuffer' in obj)) {
+        throw new EtagConflict(`r2Storage.getRange: etag mismatch for ${key} (If-Match ${opts?.ifMatch})`)
+      }
+      return new Uint8Array(await (obj as R2ObjectBody).arrayBuffer())
     },
 
     async get(key) {

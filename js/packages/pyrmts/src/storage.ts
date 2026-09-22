@@ -35,10 +35,13 @@ export function memStorage(
       return { size: bytes.byteLength, etag: etagOf(bytes) }
     },
 
-    async getRange(key, start, end) {
+    async getRange(key, start, end, opts) {
       const bytes = data.get(key)
       if (bytes === undefined) {
         throw new Error(`memStorage.getRange: not found: ${key}`)
+      }
+      if (opts?.ifMatch !== undefined && etagOf(bytes) !== opts.ifMatch) {
+        throw new EtagConflict(`memStorage.getRange: etag mismatch for ${key} (If-Match ${opts.ifMatch})`)
       }
       if (end <= start) {
         throw new Error(`memStorage.getRange: empty range [${start}, ${end})`)

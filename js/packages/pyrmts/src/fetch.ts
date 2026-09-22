@@ -8,7 +8,7 @@
 // smaller decode cost.
 
 import { parquetMetadataAsync, parquetReadObjects, type AsyncBuffer, type FileMetaData } from 'hyparquet'
-import type { ColumnFilter, FetchOptionsBase, FetchSegment, Row, Storage, StorageBackend } from './types.js'
+import { EtagConflict, type ColumnFilter, type FetchOptionsBase, type FetchSegment, type Row, type Storage, type StorageBackend } from './types.js'
 
 // Parquet-backend-specific options. Extends the shared `FetchOptionsBase`
 // (binCol / range / filters / tolerate404) with parquet-only knobs.
@@ -24,21 +24,30 @@ export interface FetchOptions extends FetchOptionsBase {
   // sizes, gaps) so callers can spot RG-prune misses, over-fetched
   // columns, footer-read churn, etc.
   trace?: FetchTrace[]
-  // Decoded-footer cache. Without it every call pays a footer range fetch
-  // plus a full metadata decode (O(#RGs × #cols) Thrift) per shard. Entries
-  // are keyed by `key@etag` (falling back to size), so a rewritten shard
-  // misses naturally; the `head` call stays, which is what validates the
-  // key. A module-level `new Map()` in a Worker is a per-isolate cache that
-  // survives across requests on a warm isolate; wrap the Cache API / KV
+  // Decoded-footer cache. Without it every call pays a `head` round trip, a
+  // footer range fetch and a full metadata decode (O(#RGs × #cols) Thrift)
+  // per shard. On a hit the `head` is skipped too: data ranges are read with
+  // `If-Match: <cached etag>`, so a rewritten shard surfaces as an
+  // `EtagConflict`, the entry is dropped and the call falls back to the cold
+  // path. A module-level `new Map()` in a Worker is a per-isolate cache that
+  // survives across requests on a warm isolate; wrap the Cache API / KV / D1
   // behind the same two methods for a cross-isolate one.
   metadataCache?: MetadataCache
 }
 
-/** Map-like store for decoded parquet footers (`Map<string, FileMetaData>`
- * satisfies it). */
+/** A cached decoded footer plus what validates it. */
+export interface CachedMetadata {
+  etag: string
+  size: number
+  metadata: FileMetaData
+}
+
+/** Map-like store for decoded parquet footers, keyed by storage key
+ * (`Map<string, CachedMetadata>` satisfies it). */
 export interface MetadataCache {
-  get(key: string): FileMetaData | undefined
-  set(key: string, metadata: FileMetaData): void
+  get(key: string): CachedMetadata | undefined
+  set(key: string, entry: CachedMetadata): void
+  delete?(key: string): void
 }
 
 /** One observed `slice(start, end)` against a parquet file. */
@@ -74,6 +83,17 @@ export async function fetchShardData(
   key: string,
   opts?: FetchOptions,
 ): Promise<Row[]> {
+  const cache = opts?.metadataCache
+  const cached = cache?.get(key)
+  if (cached !== undefined) {
+    // Warm path: no `head`, no footer; every data range carries If-Match.
+    try {
+      return await readShard(storage, key, cached.size, cached.metadata, opts, cached.etag)
+    } catch (e) {
+      if (!(e instanceof EtagConflict)) throw e
+      cache?.delete?.(key)
+    }
+  }
   const head = await storage.head(key)
   if (head === null) {
     if (opts?.tolerate404) return []
@@ -86,16 +106,33 @@ export async function fetchShardData(
   const file = opts?.trace !== undefined
     ? asyncBufferFromStorageTraced(storage, key, head.size, opts.trace, phaseRef)
     : asyncBufferFromStorage(storage, key, head.size)
-
   const initialFetchSize = opts?.initialFetchSize ?? DEFAULT_INITIAL_FETCH_SIZE
-  const cacheKey = `${key}@${head.etag ?? head.size}`
-  let metadata = opts?.metadataCache?.get(cacheKey)
-  if (metadata === undefined) {
-    metadata = await parquetMetadataAsync(file, { initialFetchSize })
-    opts?.metadataCache?.set(cacheKey, metadata)
+  const metadata = await parquetMetadataAsync(file, { initialFetchSize })
+  if (cache !== undefined && head.etag !== undefined) {
+    cache.set(key, { etag: head.etag, size: head.size, metadata })
   }
   phaseRef.current = 'data'
+  return readRows(file, metadata, opts)
+}
 
+// Read a shard whose footer is already decoded: data ranges only, each with
+// `If-Match: etag` so a rewrite since the footer was cached fails loudly.
+async function readShard(
+  storage: Storage,
+  key: string,
+  size: number,
+  metadata: FileMetaData,
+  opts: FetchOptions | undefined,
+  etag: string,
+): Promise<Row[]> {
+  const phaseRef: { current: 'metadata' | 'data' } = { current: 'data' }
+  const file = opts?.trace !== undefined
+    ? asyncBufferFromStorageTraced(storage, key, size, opts.trace, phaseRef, etag)
+    : asyncBufferFromStorage(storage, key, size, etag)
+  return readRows(file, metadata, opts)
+}
+
+async function readRows(file: AsyncBuffer, metadata: FileMetaData, opts: FetchOptions | undefined): Promise<Row[]> {
   const hasBinPrune = opts?.binCol !== undefined && opts.range !== undefined
   const hasFilters = opts?.filters !== undefined && opts.filters.length > 0
   if (!hasBinPrune && !hasFilters) {
@@ -302,13 +339,15 @@ function asyncBufferFromStorageTraced(
   byteLength: number,
   trace: FetchTrace[],
   phaseRef: { current: 'metadata' | 'data' },
+  ifMatch?: string,
 ): AsyncBuffer {
+  const rangeOpts = ifMatch !== undefined ? { ifMatch } : undefined
   return {
     byteLength,
     async slice(start: number, end?: number): Promise<ArrayBuffer> {
       const effectiveEnd = end ?? byteLength
       const t0 = performance.now()
-      const bytes = await storage.getRange(key, start, effectiveEnd)
+      const bytes = await storage.getRange(key, start, effectiveEnd, rangeOpts)
       const ms = performance.now() - t0
       trace.push({
         key,
@@ -330,12 +369,14 @@ function asyncBufferFromStorage(
   storage: Storage,
   key: string,
   byteLength: number,
+  ifMatch?: string,
 ): AsyncBuffer {
+  const rangeOpts = ifMatch !== undefined ? { ifMatch } : undefined
   return {
     byteLength,
     async slice(start: number, end?: number): Promise<ArrayBuffer> {
       const effectiveEnd = end ?? byteLength
-      const bytes = await storage.getRange(key, start, effectiveEnd)
+      const bytes = await storage.getRange(key, start, effectiveEnd, rangeOpts)
       return bytes.buffer.slice(
         bytes.byteOffset,
         bytes.byteOffset + bytes.byteLength,

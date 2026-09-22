@@ -28,10 +28,14 @@ class FakeR2Bucket {
     key: string,
     opts?: {
       range?: { offset: number; length: number }
+      onlyIf?: { etagMatches?: string }
     },
-  ): Promise<{ arrayBuffer: () => Promise<ArrayBuffer>; etag: string } | null> {
+  ): Promise<{ arrayBuffer: () => Promise<ArrayBuffer>; etag: string } | { etag: string } | null> {
     const e = this.data.get(key)
     if (!e) return null
+    // R2 conditional-read semantics: a failed precondition yields the object's
+    // metadata without a body (no `arrayBuffer`).
+    if (opts?.onlyIf?.etagMatches !== undefined && opts.onlyIf.etagMatches !== e.etag) return { etag: e.etag }
     let slice = e.body
     if (opts?.range) {
       const { offset, length } = opts.range
@@ -261,5 +265,18 @@ describe('r2Storage.listWithMtime', () => {
       'a/0.parquet', 'a/1.parquet', 'a/2.parquet', 'a/3.parquet', 'a/4.parquet',
     ])
     expect(out.every(p => p[1]!.getTime() === t.getTime())).toBe(true)
+  })
+})
+
+describe('r2Storage.getRange: If-Match', () => {
+  test('serves the range when the etag matches and throws EtagConflict when it does not', async () => {
+    const bucket = new FakeR2Bucket()
+    const storage = r2Storage(bucket as unknown as R2Bucket)
+    await storage.put('k', new Uint8Array([1, 2, 3, 4]))
+    const { etag } = (await storage.head('k'))!
+    expect(await storage.getRange('k', 1, 3, { ifMatch: etag })).toEqual(new Uint8Array([2, 3]))
+    await storage.put('k', new Uint8Array([9, 9, 9, 9]))
+    await expect(storage.getRange('k', 1, 3, { ifMatch: etag })).rejects.toBeInstanceOf(EtagConflict)
+    expect(await storage.getRange('k', 1, 3)).toEqual(new Uint8Array([9, 9]))
   })
 })

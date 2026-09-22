@@ -52,11 +52,19 @@ export interface Metric {
 // Byte-level storage interface. Wraps a blob store (R2, in-memory, FS, ...).
 // Used internally by `parquetBackend` to fetch parquet bytes / row-group
 // ranges; not used directly by the planner or stitch.
+export interface GetRangeOptions {
+  ifMatch?: string
+}
+
 export interface Storage {
   head(key: string): Promise<{ size: number; etag?: string } | null>
   // Fetch the half-open byte range [start, end). Returns exactly `end - start`
   // bytes; throws if the object doesn't exist or the range is out of bounds.
-  getRange(key: string, start: number, end: number): Promise<Uint8Array>
+  // `opts.ifMatch`: only serve the range if the object's etag still equals
+  // it (HTTP `If-Match`); otherwise throw `EtagConflict`. Lets a reader with
+  // a cached footer skip the `head` round trip and still detect a rewrite.
+  // Backends that cannot check preconditions ignore it (documented per impl).
+  getRange(key: string, start: number, end: number, opts?: GetRangeOptions): Promise<Uint8Array>
   get(key: string): Promise<Uint8Array | null>
   put(key: string, bytes: Uint8Array): Promise<void>
   list(prefix: string): AsyncIterable<string>

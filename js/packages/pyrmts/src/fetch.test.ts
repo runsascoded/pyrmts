@@ -2,8 +2,7 @@
 
 import { parquetWriteBuffer } from 'hyparquet-writer'
 import { describe, expect, test } from 'vitest'
-import { fetchShardData, parquetBackend, type FetchTrace } from './fetch.js'
-import type { FileMetaData } from 'hyparquet'
+import { fetchShardData, parquetBackend, type CachedMetadata, type FetchTrace } from './fetch.js'
 import { memStorage } from './storage.js'
 import type { FetchSegment, Storage, Tier } from './types.js'
 
@@ -341,31 +340,55 @@ describe('fetchShardData: arbitrary-column filters', () => {
 })
 
 describe('fetchShardData: metadataCache', () => {
-  test('a shared cache skips the footer fetch + decode on the second read', async () => {
-    const KEY = 'shard.parquet'
-    const storage = memStorage()
-    await storage.put(KEY, multiRgParquet())
-    const metadataCache = new Map<string, FileMetaData>()
+  const KEY = 'shard.parquet'
+
+  // Count `head` calls and observe If-Match on range reads.
+  function counting(inner: Storage) {
+    const calls = { head: 0, ranges: 0, ifMatch: [] as (string | undefined)[] }
+    const storage: Storage = {
+      ...inner,
+      async head(key) { calls.head++; return inner.head(key) },
+      async getRange(key, start, end, opts) { calls.ranges++; calls.ifMatch.push(opts?.ifMatch); return inner.getRange(key, start, end, opts) },
+    }
+    return { storage, calls }
+  }
+
+  test('a warm cache skips head + footer and reads data with If-Match', async () => {
+    const inner = memStorage()
+    await inner.put(KEY, multiRgParquet())
+    const etag = (await inner.head(KEY))!.etag
+    const { storage, calls } = counting(inner)
+    const metadataCache = new Map<string, CachedMetadata>()
     const trace1: FetchTrace[] = []
     const rows1 = await fetchShardData(storage, KEY, { trace: trace1, metadataCache })
+    expect(calls.head).toBe(1)
+    expect(trace1.filter(t => t.phase === 'metadata').length).toBeGreaterThan(0)
+    expect(calls.ifMatch.every(m => m === undefined)).toBe(true)      // cold path: no precondition
+    expect([...metadataCache.keys()]).toEqual([KEY])
+    expect(metadataCache.get(KEY)!.etag).toBe(etag)
+
     const trace2: FetchTrace[] = []
+    const before = calls.ranges
     const rows2 = await fetchShardData(storage, KEY, { trace: trace2, metadataCache })
     expect(rows2).toEqual(rows1)
-    expect(trace1.filter(t => t.phase === 'metadata').length).toBeGreaterThan(0)
-    expect(trace2.filter(t => t.phase === 'metadata')).toEqual([])
-    expect([...metadataCache.keys()]).toEqual([`${KEY}@${(await storage.head(KEY))!.etag}`])
+    expect(calls.head).toBe(1)                                          // no second head
+    expect(trace2.filter(t => t.phase === 'metadata')).toEqual([])      // no footer read
+    expect(calls.ifMatch.slice(before).every(m => m === etag)).toBe(true) // every data range guarded
   })
 
-  test('a rewritten shard (new etag) misses the cache', async () => {
-    const KEY = 'shard.parquet'
-    const storage = memStorage()
-    await storage.put(KEY, multiRgParquet())
-    const metadataCache = new Map<string, FileMetaData>()
+  test('a rewritten shard conflicts on If-Match, evicts, and falls back to the cold path', async () => {
+    const inner = memStorage()
+    await inner.put(KEY, multiRgParquet())
+    const { storage, calls } = counting(inner)
+    const metadataCache = new Map<string, CachedMetadata>()
     await fetchShardData(storage, KEY, { metadataCache })
-    await storage.put(KEY, multiRgParquet(2))
+    const stale = metadataCache.get(KEY)!.etag
+    await inner.put(KEY, multiRgParquet(2))
     const trace: FetchTrace[] = []
-    await fetchShardData(storage, KEY, { trace, metadataCache })
+    const rows = await fetchShardData(storage, KEY, { trace, metadataCache })
+    expect(rows.map(r => r.value)).toEqual(await fetchShardData(inner, KEY).then(rs => rs.map(r => r.value)))
+    expect(calls.head).toBe(2)                                          // fallback re-headed
     expect(trace.filter(t => t.phase === 'metadata').length).toBeGreaterThan(0)
-    expect(metadataCache.size).toBe(2)
+    expect(metadataCache.get(KEY)!.etag).not.toBe(stale)                // refreshed, not just evicted
   })
 })

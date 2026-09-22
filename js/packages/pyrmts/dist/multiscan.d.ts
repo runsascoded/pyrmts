@@ -73,6 +73,12 @@ export declare function resolveScan(entries: MultiScanIndexEntry[], scan: string
 /** Parse the JSONL routing manifest (as `pyrmts_engine.StorageJsonlMultiScanIndex`
  * writes it), optionally filtering to one `dataset` scope. */
 export declare function parseMultiScanIndex(bytes: Uint8Array, dataset?: string): MultiScanIndexEntry[];
+/** Stitch a key's over-time line across capped-K sealed groups: order the tile's
+ * manifest entries by scan span, load each group's shard (via `load` — the
+ * consumer's footer-pruned fetch), `seriesFor` within it, and concat in scan
+ * order. Keeps the IO in the consumer and the routing/ordering in pyrmts. Pass
+ * only one tile's entries (one dataset + tier + period lineage). */
+export declare function seriesAcrossGroups(entries: MultiScanIndexEntry[], schema: Schema, key: Row, load: (archiveKey: string) => Promise<MultiScan>): Promise<SeriesPoint[]>;
 /** Parse a `MultiScan` from parquet bytes — rows (int64 normalized to number,
  * matching the fetch path) plus the self-describing `pyrmts.multiscan`
  * KV-metadata (encoder / member scans / digests) the Python writer attaches. */

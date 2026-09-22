@@ -211,6 +211,45 @@ export function seriesFor(ms, schema, key) {
     }
     return ms.scans.map((scan, j) => ({ scan, state: toRow(byScan.get(j) ?? id) }));
 }
+/** The routing decision: the archive covering `scan`, or null (the caller then
+ * falls back to the single-scan `ShardIndex`). Assumes at most one covering
+ * entry per tile (the driver never double-consolidates a scan). */
+export function resolveScan(entries, scan) {
+    for (const e of entries) {
+        const foldIndex = e.scans.indexOf(scan);
+        if (foldIndex >= 0)
+            return { key: e.key, foldIndex, encoder: e.encoder };
+    }
+    return null;
+}
+function entryFromRow(r) {
+    return {
+        dataset: r.dataset,
+        tier: r.tier,
+        shardDur: r.shard_dur,
+        periodStart: r.period_start,
+        periodEnd: r.period_end,
+        key: r.key,
+        scans: r.scans,
+        encoder: r.encoder,
+        writtenAt: r.written_at,
+        ...(r.digests ? { digests: r.digests } : {}),
+    };
+}
+/** Parse the JSONL routing manifest (as `pyrmts_engine.StorageJsonlMultiScanIndex`
+ * writes it), optionally filtering to one `dataset` scope. */
+export function parseMultiScanIndex(bytes, dataset) {
+    const text = new TextDecoder().decode(bytes);
+    const entries = [];
+    for (const line of text.split('\n')) {
+        if (!line.trim())
+            continue;
+        const entry = entryFromRow(JSON.parse(line));
+        if (dataset === undefined || entry.dataset === dataset)
+            entries.push(entry);
+    }
+    return entries;
+}
 function normalizeRow(row) {
     const out = {};
     for (const k in row) {

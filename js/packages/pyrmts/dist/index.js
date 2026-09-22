@@ -20,7 +20,7 @@ export { ManifestShardIndex } from './manifest-shard-index.js';
 // vitest into their runtime bundle.
 export { memStorage } from './storage.js';
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js';
-export { MULTISCAN_META_KEY, SCAN_COL, SCAN_HI, SCAN_LO, diffScans, diffTables, extractScan, identities, keyStateCols, readMultiScan, seriesFor, } from './multiscan.js';
+export { MULTISCAN_META_KEY, SCAN_COL, SCAN_HI, SCAN_LO, diffScans, diffTables, extractScan, identities, keyStateCols, parseMultiScanIndex, readMultiScan, resolveScan, seriesFor, } from './multiscan.js';
 export { buildQueryUrl, fetchPyramidQuery } from './query.js';
 export const VERSION = '0.0.0';
 //# sourceMappingURL=index.js.map

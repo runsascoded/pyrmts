@@ -44,6 +44,35 @@ export declare function diffScans(ms: MultiScan, schema: Schema, scanA: string, 
  * `[{ scan, state }]`, absent scans carrying the monoid identity. `key` is a
  * row carrying the key columns (`binCol` + dims). */
 export declare function seriesFor(ms: MultiScan, schema: Schema, key: Row): SeriesPoint[];
+/** One consolidated-tile row of the routing manifest (`pyramid_multiscans`).
+ * `scans` is the ordered member list — the routing key (fold-index =
+ * `scans.indexOf(S)`). */
+export interface MultiScanIndexEntry {
+    dataset: string;
+    tier: string;
+    shardDur: string;
+    periodStart: number;
+    periodEnd: number;
+    key: string;
+    scans: string[];
+    encoder: MultiScanEncoder;
+    writtenAt: number;
+    digests?: Record<string, string>;
+}
+/** Where a scan's data lives: the archive `key` and the scan's fold index within
+ * it. */
+export interface ScanLocation {
+    key: string;
+    foldIndex: number;
+    encoder: MultiScanEncoder;
+}
+/** The routing decision: the archive covering `scan`, or null (the caller then
+ * falls back to the single-scan `ShardIndex`). Assumes at most one covering
+ * entry per tile (the driver never double-consolidates a scan). */
+export declare function resolveScan(entries: MultiScanIndexEntry[], scan: string): ScanLocation | null;
+/** Parse the JSONL routing manifest (as `pyrmts_engine.StorageJsonlMultiScanIndex`
+ * writes it), optionally filtering to one `dataset` scope. */
+export declare function parseMultiScanIndex(bytes: Uint8Array, dataset?: string): MultiScanIndexEntry[];
 /** Parse a `MultiScan` from parquet bytes — rows (int64 normalized to number,
  * matching the fetch path) plus the self-describing `pyrmts.multiscan`
  * KV-metadata (encoder / member scans / digests) the Python writer attaches. */

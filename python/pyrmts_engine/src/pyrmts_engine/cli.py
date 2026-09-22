@@ -291,6 +291,7 @@ def multiscan() -> None:
 
 
 @multiscan.command('consolidate')
+@option('-e', '--engine', type=Choice(['python', 'duckdb']), default='python', help="Consolidation backend: in-memory reference (python) or out-of-core (duckdb, needs the [duckdb] extra)")
 @option('-o', '--out', required=True, help="Output root for the consolidated multi-scan shards")
 @option('-r', '--range', 'range_', required=True, help="Half-open scan range <from-iso>/<to-iso> (UTC) selecting shard periods")
 @option('-R', '--root', required=True, help="Scans root; each member scan is a subdir <root>/<label>/")
@@ -299,6 +300,7 @@ def multiscan() -> None:
 @option('-t', '--tier', required=True, help="Tier name to consolidate")
 @argument('config')
 def multiscan_consolidate(
+    engine: str,
     out: str,
     range_: str,
     root: str,
@@ -307,17 +309,20 @@ def multiscan_consolidate(
     tier: str,
     config: str,
 ) -> None:
-    """Stream-consolidate the member scans' `tier`@`shard` tiles over the range
-    into multi-scan shards at `--out`. Peak memory is O(#keys per tile), not
-    O(#keys × #scans)."""
+    """Consolidate the member scans' `tier`@`shard` tiles over the range into
+    multi-scan shards at `--out`. The `python` engine folds in memory (peak
+    O(#keys per tile)); `duckdb` reads the shards out-of-core (byte-identical
+    output) for fleet scale."""
     from .multiscan_driver import consolidate_range
 
     pyramid = _load_pyramid(config, None)
     scans = [(label, FsStorage(Path(root) / label)) for label in scan_labels]
-    written = consolidate_range(scans, pyramid, tier, shard, _parse_range(range_), FsStorage(out))
+    written = consolidate_range(
+        scans, pyramid, tier, shard, _parse_range(range_), FsStorage(out), engine=engine,
+    )
     for key, rows, n in written:
         print(f"{key}\t{rows} rows\t{n} scans")
-    err(f"multiscan consolidate: {len(written)} tiles, {len(scan_labels)} scans")
+    err(f"multiscan consolidate: {len(written)} tiles, {len(scan_labels)} scans ({engine})")
 
 
 @multiscan.command('extract')

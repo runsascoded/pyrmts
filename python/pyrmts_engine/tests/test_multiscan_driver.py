@@ -132,6 +132,33 @@ def _to_bytes(t: pa.Table) -> bytes:
     return buf.getvalue()
 
 
+def test_consolidate_range_duckdb_engine_matches_python(tmp_path: Path):
+    """The out-of-core `duckdb` engine writes the same shard as the in-memory
+    `python` engine (byte-identical), through the storage driver."""
+    root = _seed_scans(tmp_path)
+    pyr = _pyramid(root)
+    scans = [(label, FsStorage(root / label)) for label in SCANS]
+    key = substitute_key(KEY_TEMPLATE, {'tier': 'base', 'shard': '1mo', 'period': _period()})
+
+    consolidate_range(scans, pyr, 'base', '1mo', RANGE, FsStorage(tmp_path / 'py'), engine='python')
+    consolidate_range(scans, pyr, 'base', '1mo', RANGE, FsStorage(tmp_path / 'dd'), engine='duckdb')
+    py = from_arrow(pq.read_table(io.BytesIO(FsStorage(tmp_path / 'py').get(key))))
+    dd = from_arrow(pq.read_table(io.BytesIO(FsStorage(tmp_path / 'dd').get(key))))
+    assert dd.table.equals(py.table)
+    assert dd.scans == py.scans
+    assert dd.digests == py.digests
+    for label, rows in SCANS.items():
+        assert _rows(extract_scan(FsStorage(tmp_path / 'dd'), key, label, pyr)) == _rows(_shard(rows))
+
+
+def test_consolidate_range_rejects_unknown_engine(tmp_path: Path):
+    root = _seed_scans(tmp_path)
+    pyr = _pyramid(root)
+    scans = [(label, FsStorage(root / label)) for label in SCANS]
+    with pytest.raises(ValueError, match='unknown engine'):
+        consolidate_range(scans, pyr, 'base', '1mo', RANGE, FsStorage(tmp_path / 'x'), engine='rust')
+
+
 def test_consolidate_range_errors_on_missing_tile(tmp_path: Path):
     root = _seed_scans(tmp_path)
     pyr = _pyramid(root)

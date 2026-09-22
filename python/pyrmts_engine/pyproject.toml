@@ -23,7 +23,12 @@ pyrmts-engine = "pyrmts_engine.cli:cli"
 
 [project.optional-dependencies]
 batch = ["boto3>=1.34"]
-test = ["pytest>=8"]
+# Fleet-scale multi-scan consolidation backend (`multiscan_duckdb`): vectorized
+# gaps-and-islands over `read_parquet`, out-of-core (spills), vs. the in-memory
+# Python `pyrmts.consolidate_scans` reference. Optional — the Python path has no
+# duckdb dep.
+duckdb = ["duckdb>=1.0"]
+test = ["pytest>=8", "duckdb>=1.0"]
 
 [tool.uv.sources]
 pyrmts = { workspace = true }

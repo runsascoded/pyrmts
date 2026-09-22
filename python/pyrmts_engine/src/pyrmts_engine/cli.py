@@ -5,6 +5,7 @@ App-specific ingest (raw → long form) is library territory — see
 from __future__ import annotations
 
 import sys
+import time
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -426,6 +427,121 @@ def multiscan_seal(
         print(f"{key}\t{rows} rows\t{n} scans")
     detail = f"groups of {p.group_size}" if p.scheme == 'fixed' else f"base-{p.base} dyadic"
     err(f"multiscan seal: wrote {len(written)} archive(s), {p.scheme} ({detail}), dataset {p.dataset}, {engine}")
+
+
+@cli.group()
+def bench() -> None:
+    """Bake-offs on real scans (`bench_diff.py`)."""
+
+
+@bench.command('diff')
+@option('-a', '--scan-a', required=True, help="Path-index parquet of scan A ((depth, path)-sorted)")
+@option('-b', '--scan-b', required=True, help="Path-index parquet of scan B")
+@option('-B', '--budget', type=int, default=10_000, help="Walk expansion budget (backstop; the render floor is the real bound)")
+@option('-c', '--cell-px', type=float, default=4.0, help="Smallest drawable cell side (px) — sets the render floor with the canvas")
+@option('-C', '--cols', default='path,depth,b,o', help="Column mapping path,depth,size,count (disk-tree: path,depth,size,n_desc)")
+@option('-e', '--engine', type=Choice(['walk', 'materialize', 'both']), default='both', help="Which side(s) of the bake-off to run")
+@option('-F', '--no-footer-cache', is_flag=True, help="Walk: parse the footer on every open (default: cache decoded metadata)")
+@option('-G', '--no-rg-cache', is_flag=True, help="Walk: decode a row group on every expansion that touches it (default: cache per request)")
+@option('-H', '--height', type=int, default=340, help="Canvas height (px)")
+@option('-j', '--json', 'json_out', is_flag=True, help="Print the results as JSON on stdout (human table always on stderr)")
+@option('-l', '--listing', type=Choice(['filter', 'bisect']), default='filter', help="Walk: search a decoded row group by a vectorized filter (wins at small RGs) or by bisection over its sorted keys (wins at 64K+-row RGs)")
+@option('-n', '--repeat', type=int, default=2, help="Walk runs (first = cold footer, rest = warm)")
+@option('-p', '--parallel', type=int, default=8, help="In-flight requests for the modelled wall time")
+@option('-r', '--root', default='', help="View root path ('' = the scan root)")
+@option('-t', '--rtt', default='0,30', help="Modelled per-request latencies (ms), comma-separated")
+@option('-W', '--width', type=int, default=1400, help="Canvas width (px)")
+def bench_diff(
+    scan_a: str, scan_b: str, budget: int, cell_px: float, cols: str, engine: str,
+    no_footer_cache: bool, no_rg_cache: bool, height: int, json_out: bool, listing: str, repeat: int,
+    parallel: int, root: str, rtt: str, width: int,
+) -> None:
+    """Index-free diff walk vs. materialized pairwise diff, on two real scans:
+    per-stage CPU, requests, bytes, and modelled wall time at each RTT."""
+    import json
+
+    from .bench_diff import (
+        Cols, SnapshotReader, Stats, materialize_diff, render_floor, slice_view, walk_diff,
+    )
+
+    names = cols.split(',')
+    if len(names) != 4:
+        raise SystemExit("bench diff: --cols wants 4 names: path,depth,size,count")
+    c = Cols(*names)
+    rtts = [float(x) for x in rtt.split(',') if x]
+    results: dict = {'root': root, 'canvas': [width, height], 'cell_px': cell_px}
+
+    probe = SnapshotReader(scan_b, c, rg_cache=False)
+    root_node = probe.node(root) if root else None
+    if root and root_node is None:
+        raise SystemExit(f"bench diff: root {root!r} not found in scan B")
+    if root_node is None:
+        # Scan root = the sum of depth-1 nodes (the tree may have several).
+        root_size = sum(s for s, _ in probe.children('', 0).values())
+    else:
+        root_size = root_node[0]
+    floor = render_floor(root_size, width, height, cell_px)
+    results['root_size'] = root_size
+    results['floor'] = floor
+    err(f"root {root!r}: {root_size:,} bytes; render floor at {width}x{height} / {cell_px}px cells = {floor:,} bytes")
+
+    if engine in ('walk', 'both'):
+        footer_cache: dict | None = None if no_footer_cache else {}
+        runs = []
+        for k in range(repeat):
+            stats = Stats()
+            t0 = time.perf_counter()
+            ra = SnapshotReader(scan_a, c, stats=stats, footer_cache=footer_cache, rg_cache=not no_rg_cache, listing=listing)
+            rb = SnapshotReader(scan_b, c, stats=stats, footer_cache=footer_cache, rg_cache=not no_rg_cache, listing=listing)
+            res = walk_diff(ra, rb, root, floor=floor, budget=budget)
+            wall = (time.perf_counter() - t0) * 1000
+            run = {
+                'run': k, 'rows': len(res.rows), 'expansions': res.expansions, 'truncated': res.truncated,
+                'wall_local_ms': round(wall, 1), **stats.as_dict(),
+                'wall_model_ms': {str(r): round(stats.wall_model(r, parallel), 1) for r in rtts},
+            }
+            runs.append(run)
+            err(
+                f"walk run {k}: {len(res.rows)} rows, {res.expansions} expansions, {stats.listings} listings, "
+                f"{stats.requests} RG reads in {stats.gets} GETs / {stats.bytes/1e6:.1f} MB, rg decodes {stats.rg_decodes} (cache hits {stats.rg_cache_hits}), "
+                f"footer parses {stats.footer_parses}; cpu {stats.cpu_ms:.0f} ms "
+                f"(footer {stats.ms['footer']:.0f}, locate {stats.ms['locate']:.0f}, read {stats.ms['read']:.0f}, post {stats.ms['post']:.0f}); "
+                f"local wall {wall:.0f} ms; modelled @rtt " + ', '.join(f"{r:g}ms→{stats.wall_model(r, parallel):.0f}ms" for r in rtts)
+                + (" [budget-cut]" if res.truncated else "")
+            )
+        results['walk'] = runs
+
+    if engine in ('materialize', 'both'):
+        diff, timings = materialize_diff(scan_a, scan_b, c)
+        view, slice_ms = slice_view(diff, root, floor=floor)
+        results['materialize'] = {
+            'load_ms': round(timings['load'], 1), 'join_ms': round(timings['join'], 1), 'diff_rows': timings['rows'],
+            'slice_ms': round(slice_ms, 1), 'view_rows': view.num_rows,
+        }
+        err(
+            f"materialize: load {timings['load']:.0f} ms + join {timings['join']:.0f} ms → {timings['rows']:,} diff rows; "
+            f"slice for this view {slice_ms:.0f} ms → {view.num_rows} rows"
+        )
+        if engine == 'both':
+            # Same-floor comparison: the walk's drawable rows vs the materialized
+            # view. Rows only the materialized side has are the walk's blind
+            # spot (change under a dir whose size AND count are unchanged) or
+            # change below a floor-pruned dir; rows only the walk has are
+            # sub-floor children of expanded dirs (harmless, the client filters).
+            walk_rows = {r.path for r in res.rows if max(r.size_a, r.size_b) >= floor or abs(r.delta) >= floor}
+            view_rows = set(view['path'].to_pylist()) - {root or '.'}   # the walk emits children, not the root row
+            hidden = sorted(view_rows - walk_rows)
+            results['compare'] = {
+                'walk_drawable_rows': len(walk_rows), 'view_rows': len(view_rows),
+                'hidden_from_walk': len(hidden), 'hidden_examples': hidden[:5],
+                'walk_only': len(walk_rows - view_rows),
+            }
+            err(
+                f"compare: walk drawable rows {len(walk_rows)}, materialized view rows {len(view_rows)}, "
+                f"hidden from walk {len(hidden)} (e.g. {hidden[:3]}), walk-only {len(walk_rows - view_rows)}"
+            )
+    if json_out:
+        print(json.dumps(results, indent=2))
 
 
 @cli.group()

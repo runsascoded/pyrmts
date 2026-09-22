@@ -222,7 +222,12 @@ export function diffScans(ms: MultiScan, schema: Schema, scanA: string, scanB: s
 
 /** A key's value stream across every member scan (the "size over time" line) —
  * `[{ scan, state }]`, absent scans carrying the monoid identity. `key` is a
- * row carrying the key columns (`binCol` + dims). */
+ * row carrying the key columns (`binCol` + dims).
+ *
+ * Reads only rows matching `key` (no cross-key normalization, no total-key
+ * assumption), so a key-filtered *partial* `MultiScan` — just that key's interval
+ * rows plus the group's full `scans` list — yields the identical result. A
+ * footer-pruned reader can therefore stay O(pruned) per group. */
 export function seriesFor(ms: MultiScan, schema: Schema, key: Row): SeriesPoint[] {
   const { keyCols, stateCols } = keyStateCols(schema)
   const id = idTuple(schema, stateCols)

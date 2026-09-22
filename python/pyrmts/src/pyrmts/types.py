@@ -69,6 +69,33 @@ class IdentityRollup:
     canonicalPrefix: str = 'c:'
 
 
+@dataclass(frozen=True)
+class MultiScanPolicy:
+    """Declarative multi-scan consolidation policy (`specs/multi-scan-consolidation.md`,
+    Phase 2c). The *parameters* of automatic sealing — which `(tier, shard)` tile
+    to fold the scan axis of, the routing `dataset` scope, the grouping `scheme`,
+    the interval `encoder`, and whether to `drop` individuals after digest-verify.
+    The *trigger/cadence* stays with the consumer (a cron or an end-of-scan-emit
+    stage invokes `multiscan seal`); pyrmts is pure mechanism. Write-side only —
+    the reader routes via the manifest and never needs this.
+
+    Two schemes:
+    - `'fixed'` — seal every `group_size` scans into an immutable capped-K
+      archive. Archive count grows O(N/K) — simplest; good for steady churn.
+    - `'exponential'` — the logarithmic method (Bentley–Saxe / LSM leveling):
+      old scans coalesce into `base`-power-sized archives (recent scans in small
+      blocks), so the archive count grows only O(log N). Best for low-churn data
+      kept indefinitely; costs O(log N) rewrites per scan as it climbs levels."""
+    dataset: str
+    tier: str
+    shard: str
+    scheme: str = 'fixed'
+    group_size: int = 0
+    base: int = 2
+    encoder: str = 'interval'
+    drop: bool = False
+
+
 class Storage(Protocol):
     def head(self, key: str) -> dict | None: ...
     def get(self, key: str) -> bytes | None: ...
@@ -88,6 +115,7 @@ class Pyramid:
     axis: Axis = 'time'
     geo: GeoSpec | None = None
     identity_rollup: IdentityRollup | None = None
+    multi_scan: MultiScanPolicy | None = None
 
     def tier(self, name: str) -> Tier:
         for t in self.tiers:

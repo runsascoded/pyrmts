@@ -211,4 +211,23 @@ describe('seriesAcrossGroups (capped-K stitching)', () => {
       ['s0', 10, 1], ['s1', 10, 1], ['s2', 20, 2], ['s3', 30, 3],
     ])
   })
+
+  test('a key-filtered PARTIAL MultiScan yields the same series (footer-pruned load)', () => {
+    // A group holding many paths; the pruned load returns only 'a'-key rows +
+    // the full scans list. seriesFor must be identical to the full-group read.
+    const full: MultiScan = {
+      scans: ['s0', 's1'], encoder: 'interval',
+      rows: [
+        { dt: 0, path: 'a', b: 10, o: 1, __scan_lo: 0, __scan_hi: 1 },
+        { dt: 0, path: 'zzz', b: 99, o: 9, __scan_lo: 0, __scan_hi: 1 }, // other keys
+        { dt: 0, path: 'mmm', b: 77, o: 7, __scan_lo: 0, __scan_hi: 0 },
+      ],
+    }
+    const partial: MultiScan = {
+      scans: ['s0', 's1'], encoder: 'interval',
+      rows: [{ dt: 0, path: 'a', b: 10, o: 1, __scan_lo: 0, __scan_hi: 1 }], // only 'a'
+    }
+    expect(seriesFor(partial, SCHEMA, { dt: 0, path: 'a' }))
+      .toEqual(seriesFor(full, SCHEMA, { dt: 0, path: 'a' }))
+  })
 })

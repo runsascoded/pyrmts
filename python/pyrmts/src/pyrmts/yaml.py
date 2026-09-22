@@ -18,6 +18,7 @@ from .types import (
     IdentityRollup,
     Metric,
     MonoidName,
+    MultiScanPolicy,
     Pyramid,
     Storage,
     Tier,
@@ -42,6 +43,7 @@ class PyramidConfig:
     axis: Axis = 'time'
     geo: GeoSpec | None = None
     identity_rollup: IdentityRollup | None = None
+    multi_scan: MultiScanPolicy | None = None
 
 
 def parse_pyramid_yaml(text: str) -> PyramidConfig:
@@ -76,6 +78,8 @@ def parse_pyramid_yaml(text: str) -> PyramidConfig:
         cfg.geo = _parse_geo(raw['geo'])
     if 'identityRollup' in raw and raw['identityRollup'] is not None:
         cfg.identity_rollup = _parse_identity_rollup(raw['identityRollup'], cfg.geo)
+    if 'multiScan' in raw and raw['multiScan'] is not None:
+        cfg.multi_scan = _parse_multi_scan(raw['multiScan'])
     validate_shard_placeholder(cfg.keyTemplate, cfg.tiers)
     return cfg
 
@@ -95,6 +99,7 @@ def pyramid_from_config(cfg: PyramidConfig, storage: Storage) -> Pyramid:
         tiers=cfg.tiers,
         geo=cfg.geo,
         identity_rollup=cfg.identity_rollup,
+        multi_scan=cfg.multi_scan,
     )
 
 
@@ -411,3 +416,32 @@ def _parse_identity_rollup(raw: Any, geo: GeoSpec | None) -> IdentityRollup:
     if not isinstance(canonical_prefix, str) or not canonical_prefix:
         raise ValueError("parse_pyramid_yaml: identityRollup.canonicalPrefix must be a non-empty string")
     return IdentityRollup(col=col, map=map_, canonicalPrefix=canonical_prefix)
+
+
+def _parse_multi_scan(raw: Any) -> MultiScanPolicy:
+    if not isinstance(raw, dict):
+        raise ValueError("parse_pyramid_yaml: `multiScan` must be a mapping")
+    for field in ('dataset', 'tier', 'shard'):
+        if not isinstance(raw.get(field), str) or not raw[field]:
+            raise ValueError(f"parse_pyramid_yaml: multiScan.{field} must be a non-empty string")
+    scheme = raw.get('scheme', 'fixed')
+    if scheme not in ('fixed', 'exponential'):
+        raise ValueError(f"parse_pyramid_yaml: multiScan.scheme must be 'fixed' or 'exponential' (got {scheme!r})")
+    group_size = raw.get('groupSize', 0)
+    base = raw.get('base', 2)
+    if scheme == 'fixed':
+        if not isinstance(group_size, int) or isinstance(group_size, bool) or group_size < 1:
+            raise ValueError("parse_pyramid_yaml: multiScan.groupSize must be an int ≥ 1 for scheme 'fixed'")
+    else:
+        if not isinstance(base, int) or isinstance(base, bool) or base < 2:
+            raise ValueError("parse_pyramid_yaml: multiScan.base must be an int ≥ 2 for scheme 'exponential'")
+    encoder = raw.get('encoder', 'interval')
+    if encoder not in ('interval', 'densify'):
+        raise ValueError(f"parse_pyramid_yaml: multiScan.encoder must be 'interval' or 'densify' (got {encoder!r})")
+    drop = raw.get('drop', False)
+    if not isinstance(drop, bool):
+        raise ValueError("parse_pyramid_yaml: multiScan.drop must be a bool")
+    return MultiScanPolicy(
+        dataset=raw['dataset'], tier=raw['tier'], shard=raw['shard'],
+        scheme=scheme, group_size=group_size, base=base, encoder=encoder, drop=drop,
+    )

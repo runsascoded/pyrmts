@@ -388,6 +388,46 @@ def multiscan_extract(
         pq.write_table(table, out)
 
 
+@multiscan.command('seal')
+@option('-e', '--engine', type=Choice(['python', 'duckdb']), default='python', help="Consolidation backend (python | duckdb)")
+@option('-i', '--index', required=True, help="Routing-manifest JSONL key (under --out); read to skip already-sealed scans, appended for new groups")
+@option('-o', '--out', required=True, help="Output root for sealed archives + the manifest")
+@option('-r', '--range', 'range_', required=True, help="Half-open scan range <from-iso>/<to-iso> (UTC) selecting shard periods")
+@option('-R', '--root', required=True, help="Scans root; each scan is a subdir <root>/<label>/")
+@option('-s', '--scan', 'scan_labels', multiple=True, help="Ordered scan labels (default: <root>'s subdirs, sorted)")
+@argument('config')
+def multiscan_seal(
+    engine: str,
+    index: str,
+    out: str,
+    range_: str,
+    root: str,
+    scan_labels: tuple[str, ...],
+    config: str,
+) -> None:
+    """Incremental seal driven by the config's `multiScan` policy. `scheme:
+    fixed` seals each complete group of `groupSize` not-yet-sealed scans;
+    `scheme: exponential` reconciles archives to the dyadic decomposition (old
+    scans coalesce into `base`-power blocks, O(log N) archives). Idempotent — a
+    consumer's cron fires it each cycle and it no-ops when nothing changed."""
+    from .multiscan_driver import seal
+    from .multiscan_index import StorageJsonlMultiScanIndex
+
+    pyramid = _load_pyramid(config, None)
+    p = pyramid.multi_scan
+    if p is None:
+        raise SystemExit("multiscan seal: config has no `multiScan` policy block")
+    labels = list(scan_labels) or sorted(pp.name for pp in Path(root).iterdir() if pp.is_dir())
+    scans = [(label, FsStorage(Path(root) / label)) for label in labels]
+    out_storage = FsStorage(out)
+    ms_index = StorageJsonlMultiScanIndex(out_storage, index)
+    written = seal(scans, pyramid, _parse_range(range_), out_storage, ms_index, engine=engine)
+    for key, rows, n in written:
+        print(f"{key}\t{rows} rows\t{n} scans")
+    detail = f"groups of {p.group_size}" if p.scheme == 'fixed' else f"base-{p.base} dyadic"
+    err(f"multiscan seal: wrote {len(written)} archive(s), {p.scheme} ({detail}), dataset {p.dataset}, {engine}")
+
+
 @cli.command()
 @option('-b', '--mem-budget', help="Byte budget for window admission, e.g. 24g (default: 70% of the detected memory limit; 0 disables)")
 @option('-C', '--close-workers', type=int, help="Concurrent close computations (default 2): more overlaps closes with the walk (wall) at the cost of stacked close transients (peak RSS)")

@@ -215,6 +215,146 @@ def _consolidate_one(
     return (out_key, ms.table.num_rows, len(ms.scans))
 
 
+def seal_new_groups(
+    scans: Sequence[tuple[str, Storage]],
+    pyramid: Pyramid,
+    range_: tuple,
+    out_storage: Storage,
+    ms_index,
+    *,
+    engine: str = 'python',
+) -> list[tuple[str, int, int]]:
+    """Incremental capped-K seal driven by the pyramid's `multiScan` policy. Reads
+    which scans are already sealed (from `ms_index`), takes the not-yet-sealed
+    scans in order, and seals each *complete* group of `policy.group_size` —
+    leaving the trailing remainder (< K) as individuals until it fills. Idempotent:
+    a consumer's cron fires it every cycle and it no-ops until K fresh scans
+    accumulate. Returns the archives written this run (empty if none filled)."""
+    policy = pyramid.multi_scan
+    if policy is None:
+        raise ValueError("seal_new_groups: pyramid has no `multiScan` policy block")
+    sealed = {s for rec in ms_index.list_multiscans(policy.dataset) for s in rec.scans}
+    unsealed = [(label, storage) for label, storage in scans if label not in sealed]
+    n_complete = (len(unsealed) // policy.group_size) * policy.group_size
+    to_seal = unsealed[:n_complete]
+    if not to_seal:
+        return []
+    return consolidate_groups(
+        to_seal, pyramid, policy.tier, policy.shard, range_, out_storage,
+        group_size=policy.group_size, engine=engine, compression='snappy',
+        ms_index=ms_index, dataset=policy.dataset, drop=policy.drop,
+    )
+
+
+def _resolve_scan_table(
+    label: str,
+    individual_storage: Storage,
+    records: Sequence,
+    ms_storage: Storage,
+    pyramid: Pyramid,
+    in_key: str,
+) -> pa.Table:
+    """A scan's rows from wherever it currently lives: its covering archive
+    (extract) or, failing that, its individual shard. The merge source for
+    exponential compaction, where individuals may already be dropped."""
+    from .multiscan_index import resolve_scan
+
+    rec = resolve_scan(list(records), label)
+    if rec is not None:
+        ms = from_arrow(pq.read_table(io.BytesIO(ms_storage.get(rec.key))))
+        return extract_table(ms, label, pyramid)
+    data = individual_storage.get(in_key)
+    if data is None:
+        raise ValueError(f"seal (exponential): scan {label!r} not found in any archive or as an individual")
+    return pq.read_table(io.BytesIO(data))
+
+
+def seal_dyadic(
+    scans: Sequence[tuple[str, Storage]],
+    pyramid: Pyramid,
+    range_: tuple,
+    out_storage: Storage,
+    ms_index,
+    *,
+    engine: str = 'python',
+) -> list[tuple[str, int, int]]:
+    """Exponential (logarithmic-method) seal: reconcile the archives to the
+    dyadic decomposition of all `scans` — old scans coalesce into `base`-power
+    blocks, recent ones stay small, so the archive count is O(log N). Each run
+    recomputes the target block set, (re)builds changed blocks by merging their
+    scans from wherever they currently live, drops superseded archives, and (if
+    `policy.drop`) drops now-covered individuals. Idempotent: a stable N rebuilds
+    nothing. Returns the archives written this run."""
+    from .multiscan_index import MultiScanRecord, dyadic_decompose, now_ms
+
+    policy = pyramid.multi_scan
+    if policy is None:
+        raise ValueError("seal_dyadic: pyramid has no `multiScan` policy block")
+    tier, shard, dataset = policy.tier, policy.shard, policy.dataset
+    frm, to = range_
+    written: list[tuple[str, int, int]] = []
+    for period in shard_periods_covering(frm, to, shard):
+        in_key = _tile_key(pyramid, tier, shard, period.label)
+        current = ms_index.list_multiscans(dataset)
+        cur_by_key = {r.key: r for r in current}
+        target: list = []
+        for start, size in dyadic_decompose(len(scans), policy.base):
+            group = scans[start:start + size]
+            labels = [label for label, _ in group]
+            glabel = re.sub(r'[^A-Za-z0-9_.-]', '-', f"{group[0][0]}+{size}")
+            out_key = _tile_key(pyramid, tier, shard, f"{period.label}--{glabel}")
+            hit = cur_by_key.get(out_key)
+            if hit is not None and hit.scans == labels:
+                target.append(hit)  # unchanged block — reuse, no rebuild
+                continue
+            tables = [
+                (label, _resolve_scan_table(label, storage, current, out_storage, pyramid, in_key))
+                for label, storage in group
+            ]
+            ms = consolidate_scans(iter(tables), pyramid)  # merge from current holders
+            buf = io.BytesIO()
+            pq.write_table(to_arrow(ms), buf, compression='snappy')
+            out_storage.put(out_key, buf.getvalue())
+            target.append(MultiScanRecord(
+                dataset=dataset, tier=tier, shard_dur=shard,
+                period_start_ms=int(period.start.timestamp() * 1000),
+                period_end_ms=int(period.end.timestamp() * 1000),
+                key=out_key, scans=labels, encoder=ms.encoder,
+                written_at_ms=now_ms(), digests=ms.digests,
+            ))
+            written.append((out_key, ms.table.num_rows, len(labels)))
+        target_keys = {r.key for r in target}
+        for r in current:  # drop superseded archives (built before this, sources already read)
+            if r.key not in target_keys:
+                out_storage.delete(r.key)
+        if policy.drop:
+            sealed = {label for r in target for label in r.scans}
+            for label, storage in scans:
+                if label in sealed and storage.get(in_key) is not None:
+                    storage.delete(in_key)
+        ms_index.rewrite(dataset, target)
+    return written
+
+
+def seal(
+    scans: Sequence[tuple[str, Storage]],
+    pyramid: Pyramid,
+    range_: tuple,
+    out_storage: Storage,
+    ms_index,
+    *,
+    engine: str = 'python',
+) -> list[tuple[str, int, int]]:
+    """Dispatch to the policy's grouping scheme: `'fixed'` → capped-K
+    (`seal_new_groups`), `'exponential'` → logarithmic-method (`seal_dyadic`)."""
+    policy = pyramid.multi_scan
+    if policy is None:
+        raise ValueError("seal: pyramid has no `multiScan` policy block")
+    if policy.scheme == 'exponential':
+        return seal_dyadic(scans, pyramid, range_, out_storage, ms_index, engine=engine)
+    return seal_new_groups(scans, pyramid, range_, out_storage, ms_index, engine=engine)
+
+
 def drop_consolidated_scans(
     scans: Sequence[tuple[str, Storage]],
     ms_storage: Storage,

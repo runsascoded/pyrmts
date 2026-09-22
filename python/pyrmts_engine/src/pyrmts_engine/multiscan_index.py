@@ -90,6 +90,9 @@ class MemMultiScanIndex:
     def list_multiscans(self, dataset: str) -> list[MultiScanRecord]:
         return [r for r in self.records if r.dataset == dataset]
 
+    def rewrite(self, dataset: str, records: list[MultiScanRecord]) -> None:
+        self.records = [r for r in self.records if r.dataset != dataset] + list(records)
+
 
 class StorageJsonlMultiScanIndex:
     """JSONL manifest written through a pyrmts `Storage` (S3/R2/fs/mem), one
@@ -119,6 +122,38 @@ class StorageJsonlMultiScanIndex:
             if rec.dataset == dataset:
                 out.append(rec)
         return out
+
+    def rewrite(self, dataset: str, records: list[MultiScanRecord]) -> None:
+        """Replace all rows for `dataset` with `records` (drop superseded blocks,
+        write the new set) — the compaction path for the exponential scheme.
+        Rows for other datasets are preserved."""
+        kept = [
+            line for line in self._lines
+            if line and _from_row(json.loads(line)).dataset != dataset
+        ]
+        kept += [json.dumps(_row(r)) for r in records]
+        self._lines = kept
+        self.storage.put(self.key, ('\n'.join(self._lines) + '\n').encode())
+
+
+def dyadic_decompose(m: int, base: int = 2) -> list[tuple[int, int]]:
+    """The logarithmic-method block decomposition of the first `m` scans: maximal
+    `base`-power blocks aligned to their own size, largest-first. Old scans land
+    in big blocks, recent ones in small blocks, so the block count is O(log_base m)
+    (exactly popcount in base `base`). E.g. `dyadic_decompose(13)` →
+    `[(0, 8), (8, 4), (12, 1)]`. Returns `[(start, size), ...]`."""
+    if base < 2:
+        raise ValueError(f"dyadic_decompose: base must be ≥ 2, got {base}")
+    blocks: list[tuple[int, int]] = []
+    start = 0
+    while start < m:
+        remaining = m - start
+        size = 1
+        while size * base <= remaining and start % (size * base) == 0:
+            size *= base
+        blocks.append((start, size))
+        start += size
+    return blocks
 
 
 def resolve_scan(records: list[MultiScanRecord], scan: str) -> MultiScanRecord | None:

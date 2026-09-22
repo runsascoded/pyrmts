@@ -5,7 +5,7 @@ from textwrap import dedent
 
 import pytest
 
-from pyrmts import IdentityRollup, Tier, merge_lambda_shards, parse_pyramid_yaml
+from pyrmts import IdentityRollup, MultiScanPolicy, Tier, merge_lambda_shards, parse_pyramid_yaml
 
 
 def test_parses_shards_ladder():
@@ -29,6 +29,43 @@ def test_parses_shards_ladder():
         Tier(name='h1',  bin='1h',   shards=('1d', '1mo')),
     ]
     assert cfg.keyTemplate == 'avail/{tier}/{shard}/{period}.parquet'
+
+
+def _ms_yaml(ms_line: str = '') -> str:
+    return dedent(f"""
+        storage: {{ type: r2, bucket: b, key: 'p/{{tier}}/{{shard}}/{{period}}.parquet' }}
+        binCol: depth
+        dims:
+          - {{ name: path, type: string }}
+        metrics:
+          - {{ name: b, monoid: count }}
+        tiers:
+          - {{ name: base, bin: 1d, shards: [1mo] }}
+        {ms_line}
+    """).strip()
+
+
+def test_parses_multiscan_policy_block():
+    cfg = parse_pyramid_yaml(_ms_yaml('multiScan: { dataset: over-time, tier: base, shard: 1mo, groupSize: 16, drop: true }'))
+    assert cfg.multi_scan == MultiScanPolicy(
+        dataset='over-time', tier='base', shard='1mo', group_size=16, encoder='interval', drop=True,
+    )
+
+
+def test_multiscan_defaults_and_absence():
+    assert parse_pyramid_yaml(_ms_yaml()).multi_scan is None                       # absent → None
+    cfg = parse_pyramid_yaml(_ms_yaml('multiScan: { dataset: ot, tier: base, shard: 1mo, groupSize: 4 }'))
+    assert cfg.multi_scan == MultiScanPolicy('ot', 'base', '1mo', scheme='fixed', group_size=4)  # scheme/encoder/drop default
+
+
+def test_parses_exponential_scheme():
+    cfg = parse_pyramid_yaml(_ms_yaml('multiScan: { dataset: dt, tier: base, shard: 1mo, scheme: exponential, drop: true }'))
+    assert cfg.multi_scan == MultiScanPolicy('dt', 'base', '1mo', scheme='exponential', base=2, drop=True)
+
+
+def test_rejects_bad_multiscan_group_size():
+    with pytest.raises(ValueError, match='groupSize must be an int ≥ 1'):
+        parse_pyramid_yaml(_ms_yaml('multiScan: { dataset: ot, tier: base, shard: 1mo, groupSize: 0 }'))
 
 
 def test_rejects_old_singular_shard():

@@ -39,6 +39,7 @@ from .types import (
     IdentityRollup,
     Metric,
     MonoidName,
+    MultiScanPolicy,
     Pyramid,
     Storage,
     Tier,
@@ -55,7 +56,7 @@ __version__ = "0.0.0"
 
 __all__ = [
     'Axis', 'Dim', 'DimType', 'GeoSpec', 'IdentityRollup', 'Metric', 'MonoidName',
-    'Pyramid', 'Storage', 'Tier',
+    'MultiScanPolicy', 'Pyramid', 'Storage', 'Tier',
     'ParsedTimeSpan', 'ShardPeriod',
     'add_span', 'bins_in_range', 'ceil_to_span', 'floor_to_span', 'format_period',
     'nominal_delta_ms', 'parse_duration', 'shard_periods_covering',

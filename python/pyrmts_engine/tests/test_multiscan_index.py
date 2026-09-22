@@ -12,17 +12,30 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from pyrmts import Dim, FsStorage, Metric, Pyramid, Tier, from_arrow, substitute_key, to_arrow
+from pyrmts import (
+    Dim,
+    FsStorage,
+    Metric,
+    MultiScanPolicy,
+    Pyramid,
+    Tier,
+    from_arrow,
+    substitute_key,
+    to_arrow,
+)
 from pyrmts_engine.multiscan_driver import (
     consolidate_groups,
     consolidate_range,
     drop_consolidated_scans,
     extract_scan,
+    seal_dyadic,
+    seal_new_groups,
 )
 from pyrmts_engine.multiscan_index import (
     MemMultiScanIndex,
     MultiScanRecord,
     StorageJsonlMultiScanIndex,
+    dyadic_decompose,
     multiscan_d1_ddl,
     multiscan_d1_row,
     resolve_scan,
@@ -191,6 +204,87 @@ def test_consolidate_groups_seals_capped_k(tmp_path: Path):
 
 
 # ── D1 schema + row shape (pyrmts owns; the consumer writes via its CF-D1 path).
+
+
+def _seed_extra(root: Path, labels: list[str]) -> None:
+    for label in labels:
+        buf = io.BytesIO()
+        pq.write_table(_shard([(0, 'a', 10, 1), (0, label, 1, 1)]), buf)
+        FsStorage(root / label).put(_key(), buf.getvalue())
+
+
+def test_seal_new_groups_is_incremental(tmp_path: Path):
+    """Policy-driven capped-K seal: seals each complete group of K not-yet-sealed
+    scans, skips sealed ones, leaves the remainder — idempotent across cron-like
+    reruns."""
+    root, scans = _seed(tmp_path)                        # s0, s1, s2
+    pyr = _pyramid(root)
+    pyr.multi_scan = MultiScanPolicy(dataset='usage', tier='base', shard='1mo', group_size=2)
+    out = FsStorage(tmp_path / 'ms')
+    idx = StorageJsonlMultiScanIndex(out, 'ms.jsonl')
+
+    # Run 1: 3 scans, K=2 → seal [s0,s1]; s2 (remainder) stays individual.
+    w1 = seal_new_groups(scans, pyr, RANGE, out, idx)
+    assert [n for _, _, n in w1] == [2]
+    assert [r.scans for r in idx.list_multiscans('usage')] == [['s0', 's1']]
+
+    # Run 2: same 3 scans → nothing new (s2 alone < K). Idempotent no-op.
+    assert seal_new_groups(scans, pyr, RANGE, out, StorageJsonlMultiScanIndex(out, 'ms.jsonl')) == []
+
+    # Run 3: two more scans arrive → [s2,s3] fills; s4 remainder stays.
+    _seed_extra(root, ['s3', 's4'])
+    scans5 = [(l, FsStorage(root / l)) for l in ['s0', 's1', 's2', 's3', 's4']]
+    idx3 = StorageJsonlMultiScanIndex(out, 'ms.jsonl')
+    w3 = seal_new_groups(scans5, pyr, RANGE, out, idx3)
+    assert [r.scans for r in idx3.list_multiscans('usage')] == [['s0', 's1'], ['s2', 's3']]
+    assert resolve_scan(idx3.list_multiscans('usage'), 's3').scans == ['s2', 's3']
+
+
+def test_dyadic_decompose():
+    assert dyadic_decompose(1) == [(0, 1)]
+    assert dyadic_decompose(2) == [(0, 2)]
+    assert dyadic_decompose(3) == [(0, 2), (2, 1)]
+    assert dyadic_decompose(4) == [(0, 4)]
+    assert dyadic_decompose(13) == [(0, 8), (8, 4), (12, 1)]      # popcount(13)=3 blocks
+    assert dyadic_decompose(9, base=3) == [(0, 9)]                # base-3: 9 = 3^2
+    assert dyadic_decompose(4, base=3) == [(0, 3), (3, 1)]
+
+
+def test_seal_exponential_coalesces_logarithmically(tmp_path: Path):
+    """The logarithmic method: as scans accumulate, old ones merge into
+    base-power blocks so the archive count stays O(log N) (= popcount). Merges
+    read from the current (smaller) archives after individuals are dropped, and
+    every scan still extracts losslessly."""
+    root = tmp_path / 'scans'
+    payload = {}
+    for i in range(4):
+        rows = [(0, 'a', 10, 1), (0, f'k{i}', i + 1, 1)]         # each scan distinct
+        payload[f's{i}'] = rows
+        buf = io.BytesIO(); pq.write_table(_shard(rows), buf)
+        FsStorage(root / f's{i}').put(_key(), buf.getvalue())
+    pyr = _pyramid(root)
+    pyr.multi_scan = MultiScanPolicy('dt', 'base', '1mo', scheme='exponential', base=2, drop=True)
+    out = FsStorage(tmp_path / 'ms')
+
+    def seal_n(n: int):
+        scans = [(f's{i}', FsStorage(root / f's{i}')) for i in range(n)]
+        idx = StorageJsonlMultiScanIndex(out, 'ms.jsonl')
+        seal_dyadic(scans, pyr, RANGE, out, idx)
+        return idx.list_multiscans('dt')
+
+    for n in (1, 2, 3, 4):                                        # a cron firing each cycle
+        recs = seal_n(n)
+        assert len(recs) == len(dyadic_decompose(n))             # archive count = popcount(n)
+        for i in range(n):                                       # every sealed scan routes + extracts
+            rec = resolve_scan(recs, f's{i}')
+            assert rec is not None
+            assert _rows(extract_scan(out, rec.key, f's{i}', pyr)) == _rows(_shard(payload[f's{i}']))
+    # N=4 fully coalesced into a single size-4 block; re-running is a no-op.
+    assert [r.scans for r in seal_n(4)] == [['s0', 's1', 's2', 's3']]
+    assert seal_dyadic(
+        [(f's{i}', FsStorage(root / f's{i}')) for i in range(4)],
+        pyr, RANGE, out, StorageJsonlMultiScanIndex(out, 'ms.jsonl'),
+    ) == []                                                       # idempotent: nothing rebuilt
 
 
 def test_multiscan_d1_ddl_and_row_shape():

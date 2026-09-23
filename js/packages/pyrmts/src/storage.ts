@@ -8,7 +8,7 @@
 // clock so tests can advance time deterministically.
 
 import type { Storage } from './types.js'
-import { EtagConflict } from './types.js'
+import { EtagConflict, NotSupported } from './types.js'
 
 export interface MemStorageOptions {
   data?: Map<string, Uint8Array>
@@ -109,4 +109,62 @@ function etagOf(bytes: Uint8Array): string {
     h = Math.imul(h, 0x01000193)
   }
   return (h >>> 0).toString(16).padStart(8, '0')
+}
+
+export interface HttpStorageOptions {
+  /** Extra request headers (auth, etc.). */
+  headers?: Record<string, string>
+  /** `fetch` to use (default: global). */
+  fetch?: typeof fetch
+}
+
+// Read-only `Storage` over plain HTTP: `head` → HEAD (Content-Length, ETag),
+// `getRange` → GET with `Range` (+ `If-Match` when `ifMatch` is given; a 412
+// is an `EtagConflict`), `get` → GET. Any origin that serves static files with
+// range support works: a public R2 bucket, Pages, S3 website hosting, or
+// `scripts/serve-range.mjs` locally. Writes and listing are `NotSupported`.
+export function httpStorage(baseUrl: string, opts: HttpStorageOptions = {}): Storage {
+  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+  const doFetch = opts.fetch ?? fetch
+  const url = (key: string) => new URL(key.split('/').map(encodeURIComponent).join('/'), base).toString()
+  const hdrs = (extra: Record<string, string> = {}) => ({ ...(opts.headers ?? {}), ...extra })
+  const unsupported = (op: string) => new NotSupported(`httpStorage.${op}: read-only backend`)
+  return {
+    async head(key) {
+      const res = await doFetch(url(key), { method: 'HEAD', headers: hdrs() })
+      if (res.status === 404) return null
+      if (!res.ok) throw new Error(`httpStorage.head: ${key}: HTTP ${res.status}`)
+      const len = res.headers.get('content-length')
+      if (len === null) throw new Error(`httpStorage.head: ${key}: no Content-Length`)
+      const etag = res.headers.get('etag')
+      return { size: Number(len), ...(etag !== null ? { etag } : {}) }
+    },
+    async getRange(key, start, end, rangeOpts) {
+      if (end <= start) throw new Error(`httpStorage.getRange: empty range [${start}, ${end})`)
+      const res = await doFetch(url(key), {
+        headers: hdrs({
+          Range: `bytes=${start}-${end - 1}`,
+          ...(rangeOpts?.ifMatch !== undefined ? { 'If-Match': rangeOpts.ifMatch } : {}),
+        }),
+      })
+      if (res.status === 412) {
+        throw new EtagConflict(`httpStorage.getRange: etag mismatch for ${key} (If-Match ${rangeOpts?.ifMatch})`)
+      }
+      if (res.status === 404) throw new Error(`httpStorage.getRange: object not found: ${key}`)
+      if (res.status !== 206) throw new Error(`httpStorage.getRange: ${key}: expected 206, got HTTP ${res.status}`)
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      if (bytes.byteLength !== end - start) {
+        throw new Error(`httpStorage.getRange: ${key}: got ${bytes.byteLength} bytes for [${start}, ${end})`)
+      }
+      return bytes
+    },
+    async get(key) {
+      const res = await doFetch(url(key), { headers: hdrs() })
+      if (res.status === 404) return null
+      if (!res.ok) throw new Error(`httpStorage.get: ${key}: HTTP ${res.status}`)
+      return new Uint8Array(await res.arrayBuffer())
+    },
+    async put() { throw unsupported('put') },
+    async *list() { throw unsupported('list') },
+  }
 }

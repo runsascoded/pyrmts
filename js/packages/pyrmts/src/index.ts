@@ -118,7 +118,29 @@ export type { ManifestShardIndexOptions } from './manifest-shard-index.js'
 // `pyrmts/test-utils` so consumers importing the main module don't pull
 // vitest into their runtime bundle.
 
-export { memStorage } from './storage.js'
+export { httpStorage, memStorage } from './storage.js'
+export type { HttpStorageOptions } from './storage.js'
+
+export {
+  DEFAULT_WALK_COLS,
+  SnapshotReader,
+  cpuMs,
+  newWalkStats,
+  renderFloor,
+  roundTrips,
+  walkDiff,
+  wallModel,
+} from './walkdiff.js'
+export type {
+  DeltaRow,
+  Listing,
+  NodeState,
+  SnapshotReaderOptions,
+  WalkCols,
+  WalkOptions,
+  WalkResult,
+  WalkStats,
+} from './walkdiff.js'
 
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js'
 export type { PyramidConfig } from './yaml.js'

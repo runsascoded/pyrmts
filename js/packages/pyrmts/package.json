@@ -33,7 +33,7 @@
     "directory": "js/packages/pyrmts"
   },
   "dependencies": {
-    "hyparquet": "^1.26.0",
+    "hyparquet": "https://github.com/runsascoded/hyparquet#0fc22700f612f32c8a6ded303bfc8d4adcc57753",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

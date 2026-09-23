@@ -50,7 +50,8 @@ export interface WalkStats {
   /** Measured wall ms per round. */
   roundMs: number[]
   /** Per-stage ms summed over listings. `fetch` overlaps across concurrent
-   * listings (network wait); `decode` and `post` are single-threaded CPU. */
+   * listings (network wait); `decode` includes hyparquet's planning and the
+   * fetch wait inside it, so it is an upper bound on decode CPU. */
   ms: { footer: number; locate: number; fetch: number; decode: number; post: number }
 }
 
@@ -170,6 +171,12 @@ export interface SnapshotReaderOptions {
   /** Pre-supplied row-group index: no `head`, no footer read or parse; the
    * per-group metadata comes from `rowGroups.rowGroup(i)` on demand. */
   rowGroups?: RowGroupIndex
+  /** hyparquet's fetch coalescing budget for a run of row groups: the max
+   * share of a fetch that no selected column chunk needs, and the max bytes
+   * per fetch. Default `{ 1, Infinity }` = one GET per run regardless of the
+   * unselected columns' share; lower the ratio to trade GETs for bytes. */
+  maxOverfetchRatio?: number
+  maxRunBytes?: number
 }
 
 function num(v: unknown): number {
@@ -217,6 +224,8 @@ export class SnapshotReader {
   private readonly rgCache: Map<number, Promise<Row[]>> | null
   private readonly metadataCache: MetadataCache | undefined
   private readonly initialFetchSize: number
+  private readonly maxOverfetchRatio: number
+  private readonly maxRunBytes: number
   private opened = false
 
   constructor(readonly storage: Storage, readonly key: string, opts: SnapshotReaderOptions = {}) {
@@ -226,6 +235,8 @@ export class SnapshotReader {
     this.metadataCache = opts.metadataCache
     this.initialFetchSize = opts.initialFetchSize ?? 64 * 1024
     this.index = opts.rowGroups
+    this.maxOverfetchRatio = opts.maxOverfetchRatio ?? 1
+    this.maxRunBytes = opts.maxRunBytes ?? Infinity
   }
 
   /** Build the RG key ranges from the pre-supplied index, the cached footer,
@@ -284,7 +295,10 @@ export class SnapshotReader {
     return p
   }
 
-  // An AsyncBuffer over Storage for the footer read (cold open only).
+  // An AsyncBuffer over Storage: every slice is one range GET, counted as a
+  // footer GET (`guard` false, cold open) or a data GET; data reads carry
+  // If-Match when the etag is known, so a rewrite since the footer / index was
+  // taken fails loudly.
   private file(guard: boolean): AsyncBuffer {
     const { storage, key, size, stats } = this
     const opts = guard && this.etag !== undefined ? { ifMatch: this.etag } : undefined
@@ -295,7 +309,9 @@ export class SnapshotReader {
         if (guard) stats.gets++
         else stats.footerGets++
         stats.bytes += e - start
+        const t0 = performance.now()
         const bytes = await storage.getRange(key, start, e, opts)
+        if (guard) stats.ms.fetch += performance.now() - t0
         return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
       },
     }
@@ -308,53 +324,24 @@ export class SnapshotReader {
     return [first, Math.max(first, last)]
   }
 
-  // Byte span of a row group (all column chunks; dictionary pages first).
-  private static span(rg: RowGroup): [number, number] {
-    let lo = Infinity
-    let hi = 0
-    for (const c of rg.columns) {
-      const m = c.meta_data!
-      const start = Number(m.dictionary_page_offset ?? m.data_page_offset)
-      lo = Math.min(lo, start)
-      hi = Math.max(hi, start + Number(m.total_compressed_size))
-    }
-    return [lo, hi]
-  }
-
-  // Read row groups `[i, j)`: ONE range GET for the run's byte span (with
-  // If-Match when the etag is known), then decode only the four walk columns
-  // from memory through a synthetic footer holding just this run's groups.
-  // Returns one row array per RG.
+  // Read row groups `[i, j)`: hyparquet plans the fetches over a synthetic
+  // footer holding just this run's groups and coalesces them across row groups
+  // under `maxOverfetchRatio` / `maxRunBytes` (one GET per run at the
+  // defaults), reading only the four walk columns. Returns one row array per RG.
   private async readRun(i: number, j: number): Promise<Row[][]> {
     const c = this.cols
     const groups = await Promise.all(Array.from({ length: j - i }, (_, k) => this.rowGroupMeta(i + k)))
-    const [lo] = SnapshotReader.span(groups[0]!)
-    const [, hi] = SnapshotReader.span(groups[groups.length - 1]!)
-    const t0 = performance.now()
-    this.stats.gets++
-    this.stats.bytes += hi - lo
-    const opts = this.etag !== undefined ? { ifMatch: this.etag } : undefined
-    const buf = await this.storage.getRange(this.key, lo, hi, opts)
-    const t1 = performance.now()
-    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer
-    const file: AsyncBuffer = {
-      byteLength: this.size,
-      slice: (start: number, end?: number) => {
-        const e = end ?? this.size
-        if (start < lo || e > hi) throw new Error(`SnapshotReader: slice [${start}, ${e}) outside fetched run [${lo}, ${hi})`)
-        return ab.slice(start - lo, e - lo)
-      },
-    }
     const numRows = groups.reduce((n, g) => n + Number(g.num_rows), 0)
     const metadata: FileMetaData = {
       version: 2, schema: this.schema, num_rows: BigInt(numRows), row_groups: groups, metadata_length: 0,
     }
+    const t0 = performance.now()
     const rows = await parquetReadObjects({
-      file, metadata, rowStart: 0, rowEnd: numRows, columns: [c.path, c.depth, c.size, c.count],
+      file: this.file(true), metadata, rowStart: 0, rowEnd: numRows,
+      columns: [c.path, c.depth, c.size, c.count],
+      maxOverfetchRatio: this.maxOverfetchRatio, maxRunBytes: this.maxRunBytes,
     })
-    const t2 = performance.now()
-    this.stats.ms.fetch += t1 - t0
-    this.stats.ms.decode += t2 - t1
+    this.stats.ms.decode += performance.now() - t0
     const out: Row[][] = []
     let off = 0
     for (let k = i; k < j; k++) {

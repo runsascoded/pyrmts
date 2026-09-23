@@ -128,6 +128,8 @@ export {
   newWalkStats,
   renderFloor,
   roundTrips,
+  rowGroupIndexFromMetadata,
+  rowGroupSummaries,
   walkDiff,
   wallModel,
 } from './walkdiff.js'
@@ -135,6 +137,8 @@ export type {
   DeltaRow,
   Listing,
   NodeState,
+  RowGroupIndex,
+  RowGroupSummary,
   SnapshotReaderOptions,
   WalkCols,
   WalkOptions,

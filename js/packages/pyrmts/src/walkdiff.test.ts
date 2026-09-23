@@ -154,3 +154,41 @@ describe('walkDiff', () => {
     ])
   })
 })
+
+describe('SnapshotReader over a pre-supplied RowGroupIndex (no footer on the edge)', () => {
+  test('same listings and walk, zero head / footer traffic, per-group metadata fetched on demand', async () => {
+    const { parquetMetadata } = await import('hyparquet')
+    const { rowGroupIndexFromMetadata } = await import('./walkdiff.js')
+    const s = await pair()
+    let heads = 0
+    const counting: Storage = { ...s, async head(k) { heads++; return s.head(k) } }
+    const indexOf = async (key: string, served: number[]) => {
+      const bytes = (await s.get(key))!
+      const md = parquetMetadata(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer)
+      const full = rowGroupIndexFromMetadata(md, bytes.byteLength, (await s.head(key))!.etag)
+      // Serve group metadata lazily, as a D1 lookup would, recording which groups were asked for.
+      return { ...full, rowGroup: async (i: number) => { served.push(i); return full.rowGroup(i) } }
+    }
+    const servedA: number[] = []
+    const servedB: number[] = []
+    const ia = await indexOf('a.parquet', servedA)
+    const ib = await indexOf('b.parquet', servedB)
+    heads = 0
+    const stats = newWalkStats()
+    const res = await walkDiff(
+      new SnapshotReader(counting, 'a.parquet', { stats, rowGroups: ia }),
+      new SnapshotReader(counting, 'b.parquet', { stats, rowGroups: ib }),
+      '',
+    )
+    const ref = await walkDiff(new SnapshotReader(s, 'a.parquet'), new SnapshotReader(s, 'b.parquet'), '')
+    expect(key(res.rows)).toEqual(key(ref.rows))
+    expect(heads).toBe(0)
+    expect(stats.footerParses).toBe(0)
+    expect(stats.footerGets).toBe(0)
+    expect(stats.gets).toBeGreaterThan(0)
+    expect(ia.groups).toHaveLength(2)                                   // 8 rows / 4 per group
+    expect(servedA.sort()).toEqual([0, 1])                              // only touched groups, once each
+    expect(new Set(servedB).size).toBe(servedB.length)
+    expect(ia.groups[0]).toEqual({ rowStart: 0, numRows: 4, depthMin: 1, depthMax: 2, pathMin: 'r', pathMax: 'r/z' })
+  })
+})

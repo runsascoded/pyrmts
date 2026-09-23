@@ -1,3 +1,4 @@
+import { type FileMetaData, type RowGroup, type SchemaElement } from 'hyparquet';
 import type { MetadataCache } from './fetch.js';
 import { EtagConflict, type Storage } from './types.js';
 export interface WalkCols {
@@ -48,6 +49,34 @@ export interface NodeState {
     count: number;
 }
 export type Listing = Map<string, NodeState>;
+/** What locating a listing needs per row group: its row range and the
+ * `(depth, path)` min/max from the footer statistics. JSON-able: a consumer
+ * stores these in D1 / a manifest blob so the edge never parses the footer. */
+export interface RowGroupSummary {
+    rowStart: number;
+    numRows: number;
+    depthMin: number;
+    depthMax: number;
+    pathMin: string;
+    pathMax: string;
+}
+/** A pre-computed row-group index in place of the parquet footer. `rowGroup(i)`
+ * returns hyparquet's per-group metadata (column-chunk offsets / sizes / codec
+ * / encodings — what decoding group `i` needs), served however the consumer
+ * likes: all at once from a manifest, or one group at a time from D1. */
+export interface RowGroupIndex {
+    size: number;
+    etag?: string;
+    schema: SchemaElement[];
+    groups: RowGroupSummary[];
+    rowGroup(i: number): RowGroup | Promise<RowGroup>;
+}
+/** The per-group summaries from a parsed footer — the producer side of
+ * `RowGroupIndex.groups`. Requires `(depth, path)` statistics. */
+export declare function rowGroupSummaries(metadata: FileMetaData, cols?: WalkCols): RowGroupSummary[];
+/** A `RowGroupIndex` over an already-parsed footer (in-memory `rowGroup`),
+ * e.g. to build what a producer persists. */
+export declare function rowGroupIndexFromMetadata(metadata: FileMetaData, size: number, etag?: string, cols?: WalkCols): RowGroupIndex;
 export interface SnapshotReaderOptions {
     cols?: WalkCols;
     stats?: WalkStats;
@@ -58,6 +87,9 @@ export interface SnapshotReaderOptions {
     rgCache?: boolean;
     /** Initial bytes-from-EOF for the footer read. */
     initialFetchSize?: number;
+    /** Pre-supplied row-group index: no `head`, no footer read or parse; the
+     * per-group metadata comes from `rowGroups.rowGroup(i)` on demand. */
+    rowGroups?: RowGroupIndex;
 }
 /** Per-directory children reader over one snapshot parquet. */
 export declare class SnapshotReader {
@@ -65,9 +97,11 @@ export declare class SnapshotReader {
     readonly key: string;
     readonly cols: WalkCols;
     readonly stats: WalkStats;
-    private metadata;
+    private schema;
     private size;
     private etag;
+    private readonly index;
+    private readonly groupMeta;
     private rgLo;
     private rgHi;
     private rgRowStart;
@@ -77,12 +111,15 @@ export declare class SnapshotReader {
     private readonly initialFetchSize;
     private opened;
     constructor(storage: Storage, key: string, opts?: SnapshotReaderOptions);
-    /** Read (or take from the cache) the footer and build the RG key ranges. */
+    /** Build the RG key ranges from the pre-supplied index, the cached footer,
+     * or a footer read. */
     open(): Promise<this>;
+    /** Per-group metadata: from the parsed footer, or `rowGroups.rowGroup(i)` (memoized). */
+    private rowGroupMeta;
     private file;
     /** Row groups whose key range intersects `[(depth, lo), (depth, hi))`, as `[first, last)`. */
     private locate;
-    private rgSpan;
+    private static span;
     private readRun;
     private readRgs;
     private list;

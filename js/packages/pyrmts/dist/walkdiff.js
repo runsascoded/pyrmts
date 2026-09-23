@@ -40,6 +40,49 @@ export function wallModel(s, rttMs, parallel = 8) {
     const trips = s.rounds.reduce((acc, n) => acc + Math.ceil(n / Math.max(1, parallel)), 0);
     return cpuMs(s) + trips * rttMs;
 }
+/** The per-group summaries from a parsed footer — the producer side of
+ * `RowGroupIndex.groups`. Requires `(depth, path)` statistics. */
+export function rowGroupSummaries(metadata, cols = DEFAULT_WALK_COLS) {
+    const first = metadata.row_groups[0];
+    if (!first)
+        return [];
+    const idx = (name) => {
+        const i = first.columns.findIndex(c => c.meta_data?.path_in_schema.join('.') === name);
+        if (i < 0)
+            throw new Error(`rowGroupSummaries: column '${name}' not in the file`);
+        return i;
+    };
+    const di = idx(cols.depth);
+    const pi = idx(cols.path);
+    const out = [];
+    let cursor = 0;
+    for (const rg of metadata.row_groups) {
+        const ds = rg.columns[di]?.meta_data?.statistics;
+        const ps = rg.columns[pi]?.meta_data?.statistics;
+        if (!ds || !ps || ds.min_value === undefined || ps.min_value === undefined) {
+            throw new Error('rowGroupSummaries: the file lacks (depth, path) row-group statistics');
+        }
+        const numRows = Number(rg.num_rows);
+        out.push({
+            rowStart: cursor, numRows,
+            depthMin: num(ds.min_value), depthMax: num(ds.max_value),
+            pathMin: str(ps.min_value), pathMax: str(ps.max_value),
+        });
+        cursor += numRows;
+    }
+    return out;
+}
+/** A `RowGroupIndex` over an already-parsed footer (in-memory `rowGroup`),
+ * e.g. to build what a producer persists. */
+export function rowGroupIndexFromMetadata(metadata, size, etag, cols = DEFAULT_WALK_COLS) {
+    return {
+        size,
+        ...(etag !== undefined ? { etag } : {}),
+        schema: metadata.schema,
+        groups: rowGroupSummaries(metadata, cols),
+        rowGroup: (i) => metadata.row_groups[i],
+    };
+}
 function num(v) {
     if (typeof v === 'bigint')
         return Number(v);
@@ -78,9 +121,11 @@ export class SnapshotReader {
     key;
     cols;
     stats;
-    metadata;
+    schema = [];
     size = 0;
     etag;
+    index;
+    groupMeta = new Map();
     rgLo = [];
     rgHi = [];
     rgRowStart = [];
@@ -97,58 +142,67 @@ export class SnapshotReader {
         this.rgCache = opts.rgCache === false ? null : new Map();
         this.metadataCache = opts.metadataCache;
         this.initialFetchSize = opts.initialFetchSize ?? 64 * 1024;
+        this.index = opts.rowGroups;
     }
-    /** Read (or take from the cache) the footer and build the RG key ranges. */
+    /** Build the RG key ranges from the pre-supplied index, the cached footer,
+     * or a footer read. */
     async open() {
         if (this.opened)
             return this;
         const t0 = performance.now();
-        const cached = this.metadataCache?.get(this.key);
-        if (cached !== undefined) {
-            this.metadata = cached.metadata;
-            this.size = cached.size;
-            this.etag = cached.etag;
+        let summaries;
+        if (this.index !== undefined) {
+            this.size = this.index.size;
+            this.etag = this.index.etag;
+            this.schema = this.index.schema;
+            summaries = this.index.groups;
         }
         else {
-            const head = await this.storage.head(this.key);
-            if (head === null)
-                throw new Error(`SnapshotReader: object not found: ${this.key}`);
-            this.size = head.size;
-            this.metadata = await parquetMetadataAsync(this.file(false), { initialFetchSize: this.initialFetchSize });
-            this.stats.footerParses++;
-            if (head.etag !== undefined) {
-                this.etag = head.etag;
-                this.metadataCache?.set(this.key, { etag: head.etag, size: head.size, metadata: this.metadata });
+            let metadata;
+            const cached = this.metadataCache?.get(this.key);
+            if (cached !== undefined) {
+                metadata = cached.metadata;
+                this.size = cached.size;
+                this.etag = cached.etag;
             }
+            else {
+                const head = await this.storage.head(this.key);
+                if (head === null)
+                    throw new Error(`SnapshotReader: object not found: ${this.key}`);
+                this.size = head.size;
+                metadata = await parquetMetadataAsync(this.file(false), { initialFetchSize: this.initialFetchSize });
+                this.stats.footerParses++;
+                if (head.etag !== undefined) {
+                    this.etag = head.etag;
+                    this.metadataCache?.set(this.key, { etag: head.etag, size: head.size, metadata });
+                }
+            }
+            this.schema = metadata.schema;
+            summaries = rowGroupSummaries(metadata, this.cols);
+            metadata.row_groups.forEach((rg, i) => this.groupMeta.set(i, Promise.resolve(rg)));
         }
-        const first = this.metadata.row_groups[0];
-        if (!first)
+        if (summaries.length === 0)
             throw new Error(`SnapshotReader: ${this.key} has no row groups`);
-        const colIdx = (name) => {
-            const i = first.columns.findIndex(c => c.meta_data?.path_in_schema.join('.') === name);
-            if (i < 0)
-                throw new Error(`SnapshotReader: column '${name}' not in ${this.key}`);
-            return i;
-        };
-        const di = colIdx(this.cols.depth);
-        const pi = colIdx(this.cols.path);
-        let cursor = 0;
-        for (const rg of this.metadata.row_groups) {
-            const ds = rg.columns[di]?.meta_data?.statistics;
-            const ps = rg.columns[pi]?.meta_data?.statistics;
-            if (!ds || !ps || ds.min_value === undefined || ps.min_value === undefined) {
-                throw new Error(`SnapshotReader: ${this.key} lacks (depth, path) row-group statistics`);
-            }
-            this.rgLo.push([num(ds.min_value), str(ps.min_value)]);
-            this.rgHi.push([num(ds.max_value), str(ps.max_value)]);
-            this.rgRowStart.push(cursor);
-            const n = Number(rg.num_rows);
-            this.rgRows.push(n);
-            cursor += n;
+        for (const g of summaries) {
+            this.rgLo.push([g.depthMin, g.pathMin]);
+            this.rgHi.push([g.depthMax, g.pathMax]);
+            this.rgRowStart.push(g.rowStart);
+            this.rgRows.push(g.numRows);
         }
         this.stats.ms.footer += performance.now() - t0;
         this.opened = true;
         return this;
+    }
+    /** Per-group metadata: from the parsed footer, or `rowGroups.rowGroup(i)` (memoized). */
+    rowGroupMeta(i) {
+        let p = this.groupMeta.get(i);
+        if (p === undefined) {
+            if (this.index === undefined)
+                throw new Error(`SnapshotReader: no metadata for row group ${i}`);
+            p = Promise.resolve(this.index.rowGroup(i));
+            this.groupMeta.set(i, p);
+        }
+        return p;
     }
     // An AsyncBuffer over Storage for the footer read (cold open only).
     file(guard) {
@@ -174,11 +228,11 @@ export class SnapshotReader {
         const last = bisectLeft(this.rgLo, [depth, hi]);
         return [first, Math.max(first, last)];
     }
-    // Byte span of row group `k` (all column chunks; dictionary pages first).
-    rgSpan(k) {
+    // Byte span of a row group (all column chunks; dictionary pages first).
+    static span(rg) {
         let lo = Infinity;
         let hi = 0;
-        for (const c of this.metadata.row_groups[k].columns) {
+        for (const c of rg.columns) {
             const m = c.meta_data;
             const start = Number(m.dictionary_page_offset ?? m.data_page_offset);
             lo = Math.min(lo, start);
@@ -187,12 +241,14 @@ export class SnapshotReader {
         return [lo, hi];
     }
     // Read row groups `[i, j)`: ONE range GET for the run's byte span (with
-    // If-Match when the footer came from the cache), then decode only the four
-    // walk columns from memory. Returns one row array per RG.
+    // If-Match when the etag is known), then decode only the four walk columns
+    // from memory through a synthetic footer holding just this run's groups.
+    // Returns one row array per RG.
     async readRun(i, j) {
         const c = this.cols;
-        const [lo] = this.rgSpan(i);
-        const [, hi] = this.rgSpan(j - 1);
+        const groups = await Promise.all(Array.from({ length: j - i }, (_, k) => this.rowGroupMeta(i + k)));
+        const [lo] = SnapshotReader.span(groups[0]);
+        const [, hi] = SnapshotReader.span(groups[groups.length - 1]);
         const t0 = performance.now();
         this.stats.gets++;
         this.stats.bytes += hi - lo;
@@ -209,10 +265,12 @@ export class SnapshotReader {
                 return ab.slice(start - lo, e - lo);
             },
         };
-        const rowStart = this.rgRowStart[i];
-        const rowEnd = this.rgRowStart[j - 1] + this.rgRows[j - 1];
+        const numRows = groups.reduce((n, g) => n + Number(g.num_rows), 0);
+        const metadata = {
+            version: 2, schema: this.schema, num_rows: BigInt(numRows), row_groups: groups, metadata_length: 0,
+        };
         const rows = await parquetReadObjects({
-            file, metadata: this.metadata, rowStart, rowEnd, columns: [c.path, c.depth, c.size, c.count],
+            file, metadata, rowStart: 0, rowEnd: numRows, columns: [c.path, c.depth, c.size, c.count],
         });
         const t2 = performance.now();
         this.stats.ms.fetch += t1 - t0;

@@ -18,7 +18,8 @@ export { ManifestShardIndex } from './manifest-shard-index.js';
 // `assertShardIndexConformance` is exported separately as
 // `pyrmts/test-utils` so consumers importing the main module don't pull
 // vitest into their runtime bundle.
-export { memStorage } from './storage.js';
+export { httpStorage, memStorage } from './storage.js';
+export { DEFAULT_WALK_COLS, SnapshotReader, cpuMs, newWalkStats, renderFloor, roundTrips, walkDiff, wallModel, } from './walkdiff.js';
 export { parsePyramidYaml, pyramidFromConfig } from './yaml.js';
 export { MULTISCAN_META_KEY, SCAN_COL, SCAN_HI, SCAN_LO, diffScans, diffTables, extractScan, identities, keyStateCols, parseMultiScanIndex, readMultiScan, resolveScan, seriesAcrossGroups, seriesFor, } from './multiscan.js';
 export { alignedBlocks, changesetBetween, changesetFromRows, changesetToRows, composeChangesets, diffOverSpan, parseDiffIndexManifest, readChangesetNode, } from './diffindex.js';

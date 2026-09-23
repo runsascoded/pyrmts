@@ -28,7 +28,8 @@ export interface WalkStats {
     /** Measured wall ms per round. */
     roundMs: number[];
     /** Per-stage ms summed over listings. `fetch` overlaps across concurrent
-     * listings (network wait); `decode` and `post` are single-threaded CPU. */
+     * listings (network wait); `decode` includes hyparquet's planning and the
+     * fetch wait inside it, so it is an upper bound on decode CPU. */
     ms: {
         footer: number;
         locate: number;
@@ -90,6 +91,12 @@ export interface SnapshotReaderOptions {
     /** Pre-supplied row-group index: no `head`, no footer read or parse; the
      * per-group metadata comes from `rowGroups.rowGroup(i)` on demand. */
     rowGroups?: RowGroupIndex;
+    /** hyparquet's fetch coalescing budget for a run of row groups: the max
+     * share of a fetch that no selected column chunk needs, and the max bytes
+     * per fetch. Default `{ 1, Infinity }` = one GET per run regardless of the
+     * unselected columns' share; lower the ratio to trade GETs for bytes. */
+    maxOverfetchRatio?: number;
+    maxRunBytes?: number;
 }
 /** Per-directory children reader over one snapshot parquet. */
 export declare class SnapshotReader {
@@ -109,6 +116,8 @@ export declare class SnapshotReader {
     private readonly rgCache;
     private readonly metadataCache;
     private readonly initialFetchSize;
+    private readonly maxOverfetchRatio;
+    private readonly maxRunBytes;
     private opened;
     constructor(storage: Storage, key: string, opts?: SnapshotReaderOptions);
     /** Build the RG key ranges from the pre-supplied index, the cached footer,
@@ -119,7 +128,6 @@ export declare class SnapshotReader {
     private file;
     /** Row groups whose key range intersects `[(depth, lo), (depth, hi))`, as `[first, last)`. */
     private locate;
-    private static span;
     private readRun;
     private readRgs;
     private list;

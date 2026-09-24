@@ -2,7 +2,7 @@
 // emit a segmented plan describing which shards to read and where to
 // re-aggregate. No I/O.
 import { addSpan, binsInRange, fixedDurationMs, floorToSpan, nominalMs, parseDuration, shardPeriodsCovering } from './axis.js';
-import { substituteKey } from './keys.js';
+import { substituteKey, templateHasHash } from './keys.js';
 import { validateLadders } from './ladder.js';
 import { encodeWatermarkKey } from './shard-index.js';
 import { PlanLimitError } from './types.js';
@@ -673,6 +673,10 @@ function effectiveEarliestWatermarks(tiers, declared) {
     return out;
 }
 function shardKeys(pyramid, tier, shardDur, from, to, filter) {
+    if (templateHasHash(pyramid.keyTemplate)) {
+        throw new Error(`planQuery: keyTemplate '${pyramid.keyTemplate}' has a {hash} token, so shard keys cannot be ` +
+            `derived from it — plan from the registry with planQueryFromInventory`);
+    }
     const periods = shardPeriodsCovering(from, to, shardDur);
     return periods.map(p => substituteKey(pyramid.keyTemplate, {
         ...filter,

@@ -18,6 +18,7 @@
 //   tiers:
 //     - { name: raw, bin: 1min, shards: [1h, 1mo] }
 //     - { name: h1,  bin: 1h,   shards: [1d, 1mo] }
+import { validateKeyTemplate } from './keys.js';
 import { parse as parseYaml } from 'yaml';
 const VALID_AXES = new Set(['time', 'step']);
 const VALID_DIM_TYPES = new Set(['int', 'string', 'h3', 'geohash', 's2']);
@@ -52,6 +53,7 @@ export function parsePyramidYaml(text) {
         cfg.identityRollup = parseIdentityRollup(root.identityRollup, cfg.geo);
     }
     validateShardPlaceholder(cfg.keyTemplate, cfg.tiers);
+    validateKeyTemplate(cfg.keyTemplate);
     return cfg;
 }
 // A multi-rung tier's per-shard label is the only thing that keeps two
@@ -141,6 +143,7 @@ function parseIdentityRollup(raw, geo) {
 // code with a collision-prone template.
 export function pyramidFromConfig(cfg, storage) {
     validateShardPlaceholder(cfg.keyTemplate, cfg.tiers);
+    validateKeyTemplate(cfg.keyTemplate);
     const p = {
         storage,
         keyTemplate: cfg.keyTemplate,

@@ -23,7 +23,7 @@ export { listExpectedShards, listMissingShards } from './gap-discovery.js';
 export type { ExpectedShard } from './gap-discovery.js';
 export { CAS_ATTEMPTS, JOURNAL_BASENAME, invalidate, journalKey, listExistingWithMtime, loadInvalidations, overlaps, pruneSpent, staleKeysFor, } from './invalidation.js';
 export type { Invalidation } from './invalidation.js';
-export { shardKey, substituteKey } from './keys.js';
+export { hashWidth, keyPattern, parseKey, shardKey, slotKey, slotOf, substituteKey, templateHasHash, validateKeyTemplate, } from './keys.js';
 export { tileFromExisting } from './tile-from-existing.js';
 export type { TilingResult } from './tile-from-existing.js';
 export { ManifestShardIndex } from './manifest-shard-index.js';

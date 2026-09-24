@@ -109,6 +109,7 @@ export type { Invalidation } from './invalidation.js'
 export {
   hashWidth,
   keyPattern,
+  keysEtag,
   parseKey,
   shardKey,
   slotKey,

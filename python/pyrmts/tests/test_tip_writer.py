@@ -171,3 +171,34 @@ def test_dims_fill_extra_key_template_placeholders():
         tip.append(rows((T0, 'a', 1)))
     assert tip.key == 'awair-17617/raw/1d/2026-08-14.parquet'
     assert pyramid.storage.get(tip.key) is not None
+
+
+def test_hashed_template_tip_appends_land_at_new_keys_and_swap_the_registry_row():
+    """`specs/content-addressed-shards.md`: each tip flush writes a new
+    content-hashed key (the previous tip stays as an orphan) and the registry
+    row moves to it; the next flush reads the current tip through the registry."""
+    from pyrmts import parse_key
+    from pyrmts_engine.shard_index import MemShardIndex, RegistryResolver
+
+    pyramid = make_pyramid()
+    pyramid.keyTemplate = 'pyr/{tier}/{shard}/{period}.{hash:8}.parquet'
+    index = MemShardIndex()
+    with pytest.raises(ValueError, match='needs `registry`'):
+        TipWriter(pyramid, tier='raw', at=T0, now=T0)
+    kw = dict(resolver=RegistryResolver(index), registry=index, pyramid_name='p')
+    with TipWriter(pyramid, tier='raw', at=T0, now=T0, **kw) as tip:
+        tip.append(rows((T0, 'a', 1)))
+    k1 = tip.key
+    assert parse_key(pyramid.keyTemplate, k1)['period'] == '2026-08-14'
+    assert index.lookup('raw', '1d', ms(utc(2026, 8, 14))).key == k1
+    t1 = utc(2026, 8, 14, 10, 1)
+    with TipWriter(pyramid, tier='raw', at=t1, now=t1, **kw) as tip:
+        tip.append(rows((t1, 'b', 2)))
+    k2 = tip.key
+    assert k2 != k1 and tip.rows_written == 2                       # merged with the current tip
+    assert index.lookup('raw', '1d', ms(utc(2026, 8, 14))).key == k2
+    assert sorted(pyramid.storage.list('pyr/raw/')) == sorted([k1, k2])   # the old tip is an orphan, not overwritten
+    assert pq.read_table(io.BytesIO(pyramid.storage.get(k2))).to_pylist() == [
+        {'dt': ms(T0), 'device': 'a', 'rides': 1},
+        {'dt': ms(t1), 'device': 'b', 'rides': 2},
+    ]

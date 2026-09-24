@@ -4,6 +4,8 @@ extension-fill driver + registration, gap wire format."""
 from __future__ import annotations
 
 from dataclasses import replace
+
+import pytest
 from datetime import datetime, timezone
 
 from pyrmts import ExpectedShard, MemStorage, list_expected_shards, shard_periods_covering
@@ -405,3 +407,84 @@ def test_tiling_parity_fixture():
     )
     assert [{'rung': rung, 'key': key} for rung, key in picks] == fixture['picks']
     assert [{'start': fmt(s), 'end': fmt(e)} for s, e in holes] == fixture['holes']
+
+
+# ── content-hashed keys (`specs/content-addressed-shards.md`)
+
+def _hashed_ladder():
+    """The base ladder built under a `{hash:10}` template, registered in a
+    `MemShardIndex`; returns (extended-view pyramid, index)."""
+    from pyrmts_engine.shard_index import MemShardIndex
+
+    storage = MemStorage()
+    base = make_ladder(storage, extended=False)
+    base.keyTemplate = base.keyTemplate.replace('.parquet', '.{hash:10}.parquet')
+    write_base_shards(base)
+    index = MemShardIndex()
+    build_local(base, (FROM, TO), WideShardSource(base, shard_dur='6h'), pyramid_name='test', shard_index=index)
+    ext = make_ladder(storage, extended=True)
+    ext.keyTemplate = base.keyTemplate
+    return ext, index
+
+
+def test_run_extension_fill_hashed_template_uses_the_registry_and_registers_hashed_keys():
+    from pyrmts import parse_key, slot_of
+    from pyrmts_engine import run_extension_fill
+
+    pyramid, index = _hashed_ladder()
+    with pytest.raises(ValueError, match='needs a `shard_index`'):
+        run_extension_fill(pyramid, genesis=FROM, now=TO, pyramid_name='test')
+    results = run_extension_fill(pyramid, genesis=FROM, now=TO, pyramid_name='test', shard_index=index, reconcile=True)
+    assert [(r.gap.key, r.status) for r in results] == [
+        ('pyr/h/4d/2025-12-30.{hash:10}.parquet', 'wrote'),
+        ('pyr/h/4d/2026-01-03.{hash:10}.parquet', 'wrote'),
+    ]
+    ref, _, _ = _run_engine()
+    for r in results:
+        assert r.key is not None and parse_key(pyramid.keyTemplate, r.key)['hash'] == r.md5[:10]
+        assert slot_of(pyramid.keyTemplate, r.key) == r.gap.key
+        assert pyramid.storage.get(r.key) == ref.storage.get(r.gap.key.replace('.{hash:10}', ''))
+        assert index.lookup(r.gap.tier, r.gap.shard_dur, int(r.gap.period_start.timestamp() * 1000)).key == r.key
+    # Every expected slot has a registry row (the base-ladder build registered its
+    # own; the h@4d consolidations were just added). Adoption only concerns
+    # expected slots — the q@6h ingest tiles are below the extended cover, so
+    # they stay unregistered, exactly like `reconcile_registrations` treats them.
+    registered = {slot_of(pyramid.keyTemplate, rec.key) for rec in index.records}
+    assert {e.key for e in list_expected_shards(pyramid, (FROM, TO))} <= registered
+    assert not any(rec.tier == 'q' and rec.shard_dur == '6h' for rec in index.records)
+    # A second tick: everything is registered → nothing to do, nothing uploaded.
+    listed = sorted(pyramid.storage.list('pyr/'))
+    assert run_extension_fill(pyramid, genesis=FROM, now=TO, pyramid_name='test', shard_index=index) == []
+    assert sorted(pyramid.storage.list('pyr/')) == listed
+
+
+def test_adopt_and_gc_orphans():
+    """A blob whose registration was lost is adopted (newest good version per
+    slot); a superseded version is an orphan that `gc` deletes only past the
+    grace period, and only with `apply`."""
+    from datetime import timedelta
+
+    from pyrmts import put_shard_slot
+    from pyrmts_engine import adopt_unregistered, gc_orphans, list_orphans
+
+    pyramid, index = _hashed_ladder()
+    # Lose one registration; its blob is still there.
+    victim = next(r for r in index.records if r.tier == 'd')
+    index.records = [r for r in index.records if r is not victim]
+    # A second, superseded version of another slot: orphan by construction.
+    other = next(r for r in index.records if r.tier == 'h')
+    stale = put_shard_slot(pyramid.storage, pyramid.keyTemplate, other.key.replace(other.key.split('.')[-2], '{hash:10}'), b'not a real shard')
+    orphans = {o.key for o in list_orphans(pyramid, index.existing_keys())}
+    assert victim.key in orphans and stale.key in orphans
+    adopted = adopt_unregistered(pyramid, index, 'test', (FROM, TO))
+    assert [a.key for a in adopted] == [victim.key]                       # the q@6h rows were adopted in _hashed_ladder? no: here
+    assert index.lookup(victim.tier, victim.shard_dur, victim.period_start_ms).key == victim.key
+    # gc: dry-run lists, apply deletes; the grace period protects young blobs.
+    now = datetime.now(timezone.utc)
+    dry = gc_orphans(pyramid, index.existing_keys(), grace=timedelta(0), now=now + timedelta(seconds=1))
+    assert dry.dry_run and stale.key in dry.deleted and pyramid.storage.get(stale.key) is not None
+    young = gc_orphans(pyramid, index.existing_keys(), grace=timedelta(hours=24), now=now, apply=True)
+    assert young.deleted == [] and stale.key in young.kept_young
+    old = gc_orphans(pyramid, index.existing_keys(), grace=timedelta(0), now=now + timedelta(seconds=1), apply=True)
+    assert stale.key in old.deleted and pyramid.storage.get(stale.key) is None
+    assert pyramid.storage.get(victim.key) is not None                     # registered again → not an orphan

@@ -156,8 +156,10 @@ def invalidate(fs_root: str | None, range_: str, config: str) -> None:
 @cli.command()
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
 @option('-g', '--rg-size', type=int, help="Override the rewrite's row-group size (default: the shard's stamped layout, else its first row group's size)")
+@option('-i', '--index', 'manifest', help="Shard registry: a JSONL manifest path or s3://bucket/key (required for a {hash} keyTemplate: current keys are looked up there, rewritten shards registered there)")
 @option('-j', '--concurrency', type=int, default=1, help="Parallel shard rewrites (default 1)")
 @option('-m', '--map', 'map_override', help="Local id-map JSON path (overrides identityRollup.map)")
+@option('-n', '--pyramid-name', help="Pyramid name for shard registration (with -i)")
 @option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
 @option('-r', '--range', 'range_', required=True, help="Half-open range to (re)derive canonical rows over, <from-iso>/<to-iso> (UTC)")
 @option('-s', '--sort', 'sort_csv', help="Override the rewrite's sort columns, comma-separated (default: the shard's stamped layout, else the pyramid's default sort)")
@@ -165,8 +167,10 @@ def invalidate(fs_root: str | None, range_: str, config: str) -> None:
 def canonicalize(
     filters: tuple[str, ...],
     rg_size: int | None,
+    manifest: str | None,
     concurrency: int,
     map_override: str | None,
+    pyramid_name: str | None,
     fs_root: str | None,
     range_: str,
     sort_csv: str | None,
@@ -191,6 +195,8 @@ def canonicalize(
     else:
         raise SystemExit("canonicalize: need an `identityRollup` or `geo` block to resolve the vocab column")
     id_map = _load_id_map(pyramid, map_override)
+    registry = _open_registry(manifest)
+    from .shard_index import RegistryResolver
     result = canonicalize_shards(
         pyramid, id_map, _parse_range(range_),
         col=col,
@@ -199,6 +205,9 @@ def canonicalize(
         filter=_parse_filters(filters),
         sort=sort_csv.split(',') if sort_csv else None,
         row_group_size=rg_size,
+        resolver=RegistryResolver(registry) if registry is not None else None,
+        registry=registry,
+        pyramid_name=pyramid_name,
     )
     for key, status in result.errors:
         err(f"  error {key}: {status}")
@@ -434,6 +443,58 @@ def multiscan_seal(
         print(f"{key}\t{rows} rows\t{n} scans")
     detail = f"groups of {p.group_size}" if p.scheme == 'fixed' else f"base-{p.base} dyadic"
     err(f"multiscan seal: wrote {len(written)} archive(s), {p.scheme} ({detail}), dataset {p.dataset}, {engine}")
+
+
+def _open_registry(manifest: str | None):
+    """A shard registry from a JSONL manifest path or `s3://bucket/key`; None when not given."""
+    if manifest is None:
+        return None
+    if manifest.startswith('s3://'):
+        bucket, _, key = manifest[len('s3://'):].partition('/')
+        return StorageJsonlShardIndex(S3Storage(bucket=bucket), key)
+    return JsonlShardIndex(manifest)
+
+
+@cli.command()
+@option('-a', '--apply', is_flag=True, help="Delete (default: dry-run, list what would be deleted)")
+@option('-G', '--grace', type=float, default=24.0, help="Hours an orphan must be older than to be deleted (default 24: in-flight reads + edge cache TTL)")
+@option('-i', '--index', 'manifest', required=True, help="Shard registry: JSONL manifest path or s3://bucket/key")
+@option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
+@argument('config')
+def gc(apply: bool, grace: float, manifest: str, fs_root: str | None, config: str) -> None:
+    """Delete blobs under the pyramid's prefix that no registry row references
+    (content-hashed keys leave the previous version behind on every rewrite)
+    once older than the grace period. `specs/content-addressed-shards.md`."""
+    from datetime import timedelta
+
+    from .gc import gc_orphans
+
+    pyramid = _load_pyramid(config, fs_root)
+    registry = _open_registry(manifest)
+    result = gc_orphans(pyramid, registry.existing_keys(), grace=timedelta(hours=grace), apply=apply)
+    for key in result.deleted:
+        print(key)
+    err(result.summary())
+
+
+@cli.command()
+@option('-i', '--index', 'manifest', required=True, help="Shard registry: JSONL manifest path or s3://bucket/key")
+@option('-n', '--pyramid-name', required=True, help="Pyramid name for shard registration")
+@option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
+@option('-r', '--range', 'range_', required=True, help="Half-open range of expected shards to check, <from-iso>/<to-iso> (UTC)")
+@argument('config')
+def adopt(manifest: str, pyramid_name: str, fs_root: str | None, range_: str, config: str) -> None:
+    """Register present-but-unregistered shards (a write that died before
+    registering): for each expected slot without a registry row, the newest
+    listed blob whose bytes hash to its key. Content-hashed keyTemplates only."""
+    from .gc import adopt_unregistered
+
+    pyramid = _load_pyramid(config, fs_root)
+    registry = _open_registry(manifest)
+    adopted = adopt_unregistered(pyramid, registry, pyramid_name, _parse_range(range_))
+    for rec in adopted:
+        print(rec.key)
+    err(f"adopt: registered {len(adopted)} shard(s)")
 
 
 @cli.group()

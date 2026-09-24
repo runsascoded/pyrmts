@@ -28,7 +28,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .axis import ShardPeriod, floor_to_span, parse_duration, shard_periods_covering
-from .keys import substitute_key
+from .keys import KeyResolver, TemplateResolver, put_shard
 from .monoids import Monoid, Row, get_monoid
 from .types import Metric, Pyramid, Tier
 
@@ -54,9 +54,19 @@ def cascade_tiers(
     overwrite: bool = False,
     concurrency: int = 1,
     filter: dict[str, str | int] | None = None,
+    resolver: KeyResolver | None = None,
+    registry=None,
+    pyramid_name: str | None = None,
 ) -> CascadeResult:
     """Build every (tier, shard_dur) rung at or above `finest_tier` by walking
     each tier's `shards` ladder.
+
+    Keys (`specs/content-addressed-shards.md`): sources are found through
+    `resolver` (default: the template, which refuses a `{hash}` template —
+    pass a `RegistryResolver`); outputs go through `put_shard` and, when
+    `registry` (+ `pyramid_name`) is given, are registered so readers swap
+    to the new key atomically. `overwrite=False` skips a slot the resolver
+    already knows.
 
     Caller must have already materialized `(finest_tier, finest_tier.shards[0])`
     for `time_range`.
@@ -77,6 +87,10 @@ def cascade_tiers(
     finest_idx = pyramid.tier_index(finest)
     filter = filter or {}
     storage_write = storage_write or pyramid.storage
+    resolver = resolver or TemplateResolver(pyramid.keyTemplate)
+    from .keys import template_has_hash
+    if template_has_hash(pyramid.keyTemplate) and (registry is None or pyramid_name is None):
+        raise ValueError("cascade_tiers: a {hash} keyTemplate needs `registry` + `pyramid_name` to register outputs")
 
     result = CascadeResult()
 
@@ -98,6 +112,9 @@ def cascade_tiers(
                 concurrency=concurrency,
                 filter=filter,
                 result=result,
+                resolver=resolver,
+                registry=registry,
+                pyramid_name=pyramid_name or '',
             )
     return result
 
@@ -125,26 +142,26 @@ def _cascade_one_rung(
     concurrency: int,
     filter: dict[str, str | int],
     result: CascadeResult,
+    resolver: KeyResolver,
+    registry=None,
+    pyramid_name: str = '',
 ) -> None:
     from_, to = time_range
     out_periods = shard_periods_covering(from_, to, shard_dur)
+    ms = lambda dt: int(dt.timestamp() * 1000)
 
     def work(period: ShardPeriod) -> tuple[str, str]:
-        out_key = substitute_key(
-            pyramid.keyTemplate,
-            {**filter, 'tier': tier.name, 'shard': shard_dur, 'period': period.label},
-        )
-        if not overwrite and storage_write.head(out_key) is not None:
+        values = {**filter, 'tier': tier.name, 'shard': shard_dur, 'period': period.label}
+        out_key = resolver.resolve(tier.name, shard_dur, ms(period.start), period.label, filter)
+        if not overwrite and out_key is not None and storage_write.head(out_key) is not None:
             return out_key, 'skipped'
+        out_key = out_key or f"{tier.name}/{shard_dur}/{period.label}"
         try:
             src_periods = shard_periods_covering(period.start, period.end, src_shard_dur)
             src_tables: list[pa.Table] = []
             for sp in src_periods:
-                src_key = substitute_key(
-                    pyramid.keyTemplate,
-                    {**filter, 'tier': src_tier.name, 'shard': src_shard_dur, 'period': sp.label},
-                )
-                blob = pyramid.storage.get(src_key)
+                src_key = resolver.resolve(src_tier.name, src_shard_dur, ms(sp.start), sp.label, filter)
+                blob = pyramid.storage.get(src_key) if src_key is not None else None
                 if blob is None:
                     continue
                 src_tables.append(pq.read_table(io.BytesIO(blob)))
@@ -164,8 +181,11 @@ def _cascade_one_rung(
             out_table = _rows_to_table(out_rows, pyramid)
             buf = io.BytesIO()
             pq.write_table(out_table, buf, compression='snappy')
-            storage_write.put(out_key, buf.getvalue())
-            return out_key, 'written'
+            written = put_shard(storage_write, pyramid.keyTemplate, values, buf.getvalue())
+            if registry is not None:
+                from .canonicalize import _shard_record
+                registry.record_shard(_shard_record(pyramid_name, tier.name, shard_dur, period, written))
+            return written.key, 'written'
         except Exception as e:
             return out_key, f"error:{e!r}"
 

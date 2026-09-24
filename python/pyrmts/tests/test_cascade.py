@@ -441,3 +441,57 @@ def test_cascade_no_source_skips_quietly():
     )
     assert result.errors == []
     assert result.written == []
+
+
+def test_cascade_hashed_template_registers_content_addressed_outputs():
+    """`specs/content-addressed-shards.md`: with `{hash:N}` in the template the
+    cascade finds its sources through the registry, writes each output at a
+    content-hashed key, registers it, and a second run skips every slot the
+    registry already knows. Without a registry it refuses."""
+    from pyrmts import parse_key, put_shard
+    from pyrmts_engine.shard_index import MemShardIndex, RegistryResolver, ShardRecord
+
+    storage = MemStorage()
+    pyramid = _make_pyramid(storage)
+    pyramid.keyTemplate = 'avail/{tier}/{period}.{hash:8}.parquet'
+    base = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
+    end = datetime(2026, 5, 10, 13, 0, tzinfo=UTC)
+    # The finest rung, written by "ingest" through the write protocol and registered.
+    plain = _make_pyramid(MemStorage())
+    _write_finest_shards(plain, [(datetime(2026, 5, 10, 12, m, tzinfo=UTC), 's1', m % 2) for m in range(60)])
+    index = MemShardIndex()
+    for key in plain.storage.list('avail/'):
+        label = key.split('/')[-1].removesuffix('.parquet')
+        w = put_shard(storage, pyramid.keyTemplate, {'tier': '5m', 'period': label}, plain.storage.get(key))
+        index.record_shard(ShardRecord(
+            pyramid='avail', tier='5m', shard_dur='1h', period_start_ms=_ms(base), period_end_ms=_ms(end),
+            key=w.key, written_at_ms=1, md5=w.md5, n_bytes=w.n_bytes,
+        ))
+
+    with pytest.raises(ValueError, match='needs `registry`'):
+        cascade_tiers(pyramid, time_range=(base, end))
+    r1 = cascade_tiers(
+        pyramid, time_range=(base, end),
+        resolver=RegistryResolver(index), registry=index, pyramid_name='avail',
+    )
+    assert r1.errors == [] and len(r1.written) == 3                              # 15m@1h, 1h@1d, 1d@1mo
+    for key in r1.written:
+        parsed = parse_key(pyramid.keyTemplate, key)
+        assert parsed is not None and parsed['hash'] == hashlib.md5(storage.get(key)).hexdigest()[:8]
+    assert sorted(rec.key for rec in index.records if rec.tier != '5m') == sorted(r1.written)
+    # Same logical output as the hashless cascade.
+    ref = _make_pyramid(MemStorage())
+    _write_finest_shards(ref, [(datetime(2026, 5, 10, 12, m, tzinfo=UTC), 's1', m % 2) for m in range(60)])
+    cascade_tiers(ref, time_range=(base, end))
+    for key in r1.written:
+        tier = parse_key(pyramid.keyTemplate, key)['tier']
+        period = parse_key(pyramid.keyTemplate, key)['period']
+        assert storage.get(key) == ref.storage.get(f'avail/{tier}/{period}.parquet')
+    r2 = cascade_tiers(
+        pyramid, time_range=(base, end),
+        resolver=RegistryResolver(index), registry=index, pyramid_name='avail',
+    )
+    assert r2.written == [] and sorted(r2.skipped) == sorted(r1.written)
+
+
+import hashlib

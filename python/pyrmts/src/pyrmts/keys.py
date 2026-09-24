@@ -134,6 +134,52 @@ def slot_of(template: str, key: str) -> str | None:
     return slot_key(template, {k: v for k, v in values.items() if k != HASH})
 
 
+def slot_values(template: str, slot: str) -> dict[str, str]:
+    """The placeholder values a slot key encodes (the inverse of `slot_key`)."""
+    parts: list[str] = []
+    pos = 0
+    seen: set[str] = set()
+    for m in _PLACEHOLDER.finditer(template):
+        parts.append(re.escape(template[pos:m.start()]))
+        name = m.group(1)
+        if name == HASH:
+            parts.append(re.escape(m.group(0)))
+        elif name in seen:
+            parts.append(f'(?P={name})')
+        else:
+            seen.add(name)
+            parts.append(f'(?P<{name}>[^/]+)')
+        pos = m.end()
+    parts.append(re.escape(template[pos:]))
+    m2 = re.compile('^' + ''.join(parts) + '$').match(slot)
+    if m2 is None:
+        raise ValueError(f"slot_values: {slot!r} is not a slot key of {template!r}")
+    return m2.groupdict()
+
+
+def listed_slots(storage, template: str, prefix: str | None = None) -> dict[str, str]:
+    """Slot key → storage key for every key under `prefix` (default: the
+    template's static prefix) that the template can produce. Hashless: the
+    identity. Hashed: a slot with several listed versions is ambiguous from a
+    LIST alone (an orphan not yet GC'd next to the current one) — refuse
+    rather than guess; the registry is the truth for those."""
+    if prefix is None:
+        prefix = template.split('{')[0]
+    by_slot: dict[str, list[str]] = {}
+    for key in storage.list(prefix):
+        slot = slot_of(template, key)
+        if slot is not None:
+            by_slot.setdefault(slot, []).append(key)
+    dupes = {s: sorted(k) for s, k in by_slot.items() if len(k) > 1}
+    if dupes:
+        sample = next(iter(dupes.items()))
+        raise ValueError(
+            f"listed_slots: {len(dupes)} slot(s) have several versions in storage "
+            f"(e.g. {sample[0]!r}: {sample[1]}) — GC the orphans, or resolve through the registry"
+        )
+    return {s: k[0] for s, k in by_slot.items()}
+
+
 @dataclass(frozen=True)
 class ShardWrite:
     key: str
@@ -159,6 +205,11 @@ def put_shard(storage, template: str, values: Mapping[str, str | int], payload: 
     key = substitute_key(template, values)
     storage.put(key, payload)
     return ShardWrite(key=key, md5=md5, n_bytes=len(payload), put=True)
+
+
+def put_shard_slot(storage, template: str, slot: str, payload: bytes) -> ShardWrite:
+    """`put_shard` addressed by a slot key (what `ExpectedShard.key` carries)."""
+    return put_shard(storage, template, slot_values(template, slot), payload)
 
 
 class KeyResolver(Protocol):

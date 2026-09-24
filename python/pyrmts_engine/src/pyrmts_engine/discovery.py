@@ -17,12 +17,82 @@ import sys
 from datetime import datetime
 from functools import partial
 
-from pyrmts import ExpectedShard, Pyramid, list_expected_shards
+from pyrmts import ExpectedShard, Pyramid, list_expected_shards, slot_of, template_has_hash
 
 from .invalidation import Invalidation, stale_keys_for
 from .plan import _approx_ms
 
 err = partial(print, file=sys.stderr, flush=True)
+
+
+class KeySet:
+    """What the fill path knows as "present": a set of **slot keys** with, for
+    a hashed keyTemplate, each slot's current storage key. For a hashless
+    template the two coincide, so this is a plain set of keys. Membership and
+    iteration are by slot key (what `ExpectedShard.key` carries); `key(slot)`
+    is what to `get`. `specs/content-addressed-shards.md`."""
+
+    def __init__(self, keys=None, *, hashed: bool = False) -> None:
+        self.hashed = hashed
+        if isinstance(keys, KeySet):
+            self.hashed = keys.hashed
+            self._map = dict(keys._map)
+        elif isinstance(keys, dict):
+            self._map = dict(keys)
+        else:
+            self._map = {k: k for k in (keys or ())}
+
+    def __contains__(self, slot: object) -> bool:
+        return slot in self._map
+
+    def __iter__(self):
+        return iter(self._map)
+
+    def __len__(self) -> int:
+        return len(self._map)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, KeySet):
+            return self._map == other._map
+        if isinstance(other, (set, frozenset)):
+            return set(self._map) == other
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return f'KeySet({sorted(self._map)!r}, hashed={self.hashed})'
+
+    def add(self, slot: str, key: str | None = None) -> None:
+        self._map[slot] = key if key is not None else slot
+
+    def discard(self, slot: str) -> None:
+        self._map.pop(slot, None)
+
+    def key(self, slot: str) -> str:
+        """The storage key holding `slot`'s current bytes."""
+        return self._map[slot]
+
+    def __sub__(self, slots) -> 'KeySet':
+        drop = set(slots)
+        out = KeySet(hashed=self.hashed)
+        out._map = {s: k for s, k in self._map.items() if s not in drop}
+        return out
+
+    def __isub__(self, slots):
+        for s in set(slots):
+            self._map.pop(s, None)
+        return self
+
+
+def registry_key_set(pyramid: Pyramid, registry_keys: set[str]) -> KeySet:
+    """The registry's current keys as a `KeySet` (hashed templates: the only
+    truth for what is built; a LIST may hold orphans)."""
+    template = pyramid.keyTemplate
+    out = KeySet(hashed=True)
+    for key in registry_keys:
+        slot = slot_of(template, key)
+        if slot is not None:
+            out.add(slot, key)
+    return out
 
 
 def list_existing_keys(pyramid: Pyramid, prefix: str | None = None) -> set[str]:
@@ -69,9 +139,9 @@ def split_stale(
 
 def diff_with_existing(
     expected: list[ExpectedShard],
-    existing_keys: set[str],
+    existing_keys,
 ) -> list[ExpectedShard]:
-    """`expected` entries whose key isn't on storage."""
+    """`expected` entries whose slot isn't present (a set or `KeySet`)."""
     return [e for e in expected if e.key not in existing_keys]
 
 
@@ -117,7 +187,8 @@ def discover_gaps(
     filter: dict | None = None,
     stale_before: datetime | None = None,
     invalidations: list[Invalidation] | None = None,
-) -> tuple[list[ExpectedShard], set[str], dict[str, list[ExpectedShard]]]:
+    registry_keys: set[str] | None = None,
+) -> tuple[list[ExpectedShard], KeySet, dict[str, list[ExpectedShard]]]:
     """End-to-end discovery: enumerate expected → LIST storage → diff →
     sort. Returns `(gaps_in_fill_order, existing_key_set,
     expected_by_tier)`:
@@ -139,7 +210,20 @@ def discover_gaps(
     expected = list_expected_shards(pyramid, time_range, filter=filter)
     err(f"  expected: {len(expected)} shards declared by the ladder")
     existing_mtimes = list_existing_with_mtime(pyramid)
-    existing, stale = split_stale(existing_mtimes, stale_before)
+    hashed = template_has_hash(pyramid.keyTemplate)
+    if hashed:
+        # Content-hashed keys: the registry says what is built; the LIST only
+        # supplies mtimes for staleness (orphans it holds are `gc` / `adopt`'s
+        # business, not a fill's).
+        if registry_keys is None:
+            raise ValueError(
+                "discover_gaps: a keyTemplate with {hash} needs `registry_keys` — the registry, "
+                "not a LIST, says which shards are built"
+            )
+        current = registry_key_set(pyramid, registry_keys)
+        existing_mtimes = {slot: existing_mtimes.get(current.key(slot)) for slot in current}
+    existing_set, stale = split_stale(existing_mtimes, stale_before)
+    existing = current - stale if hashed else KeySet(existing_set)
     err(f"  existing: {len(existing_mtimes)} keys on storage"
         + (f" ({len(stale)} stale, modified before {stale_before.isoformat()})"
            if stale_before is not None else ""))

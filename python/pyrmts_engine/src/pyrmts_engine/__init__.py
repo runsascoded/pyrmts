@@ -14,6 +14,7 @@ from .consolidate import (
     run_single_gap,
     tile_from_existing,
 )
+from .gc import adopt_unregistered, gc_orphans, list_orphans
 from .discovery import (
     diff_with_existing,
     discover_gaps,
@@ -102,6 +103,7 @@ __all__ = [
     'cross_tier_rebin', 'decode_gap', 'encode_gap',
     'materialize_extension_shard', 'overlap_cover',
     'reconcile_registrations', 'run_extension_fill', 'run_single_gap',
+    'adopt_unregistered', 'gc_orphans', 'list_orphans',
     'tile_from_existing',
     'aligned_range', 'canonical_long', 'compare_manifest',
     'compare_streaming', 'covering_shard',

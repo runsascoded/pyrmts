@@ -122,3 +122,23 @@ def test_template_resolver_refuses_hashed_templates():
     assert TemplateResolver('rides/{tier}/{period}.parquet').resolve('base', '1mo', 0, '2026-01', {}) == 'rides/base/2026-01.parquet'
     with pytest.raises(ValueError, match='registry-backed resolver'):
         TemplateResolver(T).resolve('base', '1mo', 0, '2026-01', {})
+
+
+def test_slot_values_put_shard_slot_and_listed_slots():
+    from pyrmts import listed_slots, put_shard_slot, slot_values
+
+    s = MemStorage()
+    slot = 'rides/base/1mo/2026-01.{hash:12}.parquet'
+    assert slot_values(T, slot) == {'tier': 'base', 'shard': '1mo', 'period': '2026-01'}
+    with pytest.raises(ValueError, match='not a slot key'):
+        slot_values(T, 'rides/base/1mo/2026-01.parquet')
+    w = put_shard_slot(s, T, slot, b'payload')
+    assert w.key == f'rides/base/1mo/2026-01.{MD5[:12]}.parquet'
+    assert listed_slots(s, T) == {slot: w.key}
+    # A hashless template has no hash group, so a hashed key parses as a plain key
+    # (period '2026-01.<hash>') and is its own slot — legacy and hashed pyramids
+    # must not share a prefix.
+    assert listed_slots(s, 'rides/{tier}/{shard}/{period}.parquet') == {w.key: w.key}
+    put_shard_slot(s, T, slot, b'payload v2')                                         # a second version → ambiguous
+    with pytest.raises(ValueError, match='several versions'):
+        listed_slots(s, T)

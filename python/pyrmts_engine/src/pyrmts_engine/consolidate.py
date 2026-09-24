@@ -52,11 +52,13 @@ from pyrmts import (
     floor_to_span,
     nominal_delta_ms,
     parse_duration,
+    put_shard_slot,
+    template_has_hash,
     write_tier_parquet,
 )
 from pyrmts.types import Tier
 
-from .discovery import discover_gaps, list_existing_with_mtime, split_stale
+from .discovery import KeySet, discover_gaps, list_existing_with_mtime, registry_key_set, split_stale
 from .invalidation import load_invalidations, overlaps, prune_spent
 from .longform import empty_long, long_to_wide, rebin_long, wide_to_long
 from .materialize import MaterializeResult, buildable_at, shard_key, source_tier_for
@@ -193,7 +195,7 @@ def cross_tier_rebin(
     bin_col = pyramid.binCol
     longs: list[pl.DataFrame] = []
     for k, ranges in by_key.items():
-        blob = pyramid.storage.get(k)
+        blob = pyramid.storage.get(key_set.key(k) if isinstance(key_set, KeySet) else k)
         if blob is None:
             return None  # key_set raced a delete — treat as uncoverable
         # Stream row-group batches, arrow-filter to the clip ranges
@@ -250,6 +252,7 @@ def materialize_extension_shard(
         return MaterializeResult(gap=gap, status='exists')
     if (
         head_check
+        and not template_has_hash(pyramid.keyTemplate)   # a hashed slot key is not an object
         and (overwrite_keys is None or gap.key not in overwrite_keys)
         and pyramid.storage.head(gap.key) is not None
     ):
@@ -298,7 +301,7 @@ def materialize_extension_shard(
         + (f" + {len(holes)} hole fills" if holes else ""))
     tables: list[pa.Table] = list(hole_tables)
     for _rung, k in picks:
-        blob = pyramid.storage.get(k)
+        blob = pyramid.storage.get(key_set.key(k) if isinstance(key_set, KeySet) else k)
         if blob is None:
             raise RuntimeError(
                 f"consolidate: tile {k} was in key_set but storage returned "
@@ -333,13 +336,16 @@ def materialize_extension_shard(
         kwargs['row_group_size'] = rgs
     write_tier_parquet(combined, pyramid, out=buf, **kwargs)
     blob = buf.getvalue()
-    pyramid.storage.put(gap.key, blob)
-    key_set.add(gap.key)
+    written = put_shard_slot(pyramid.storage, pyramid.keyTemplate, gap.key, blob)
+    if isinstance(key_set, KeySet):
+        key_set.add(gap.key, written.key)
+    else:
+        key_set.add(gap.key)
     err(f"  ⟵ {tag} → wrote ({combined.num_rows:,} rows, {len(blob)/1e6:.1f}MB, "
         f"{_time.time()-t0:.1f}s)")
     return MaterializeResult(
-        gap=gap, status='wrote', bytes_written=len(blob), rows=combined.num_rows,
-        md5=hashlib.md5(blob).hexdigest(),
+        gap=gap, status='wrote', key=written.key, bytes_written=len(blob), rows=combined.num_rows,
+        md5=written.md5,
         inputs_present=inputs_expected, inputs_expected=inputs_expected,
         source_desc=f'same-tier cover ×{inputs_expected}',
     )
@@ -357,7 +363,7 @@ def _register(
         shard_dur=gap.shard_dur,
         period_start_ms=int(gap.period_start.timestamp() * 1000),
         period_end_ms=int(gap.period_end.timestamp() * 1000),
-        key=gap.key,
+        key=(res.key if res is not None and res.key else gap.key),
         written_at_ms=now_ms(),
         md5=res.md5 if res is not None else None,
         n_bytes=res.bytes_written if res is not None else None,
@@ -437,10 +443,19 @@ def run_extension_fill(
         invs, _ = load_invalidations(pyramid)
         if invs:
             err(f"invalidations: {len(invs)} journal entries")
+    hashed = template_has_hash(pyramid.keyTemplate)
+    registry_keys = None
+    if hashed:
+        if shard_index is None or not hasattr(shard_index, 'existing_keys'):
+            raise ValueError("run_extension_fill: a {hash} keyTemplate needs a `shard_index` that can list its rows")
+        if reconcile and not dry_run:
+            from .gc import adopt_unregistered
+            adopt_unregistered(pyramid, shard_index, pyramid_name, (genesis, now))
+        registry_keys = shard_index.existing_keys()
     gaps, existing, expected_by_tier = discover_gaps(
         pyramid, (genesis, now), stale_before=stale_before,
-        invalidations=invs or None)
-    if reconcile and shard_index is not None and not dry_run:
+        invalidations=invs or None, registry_keys=registry_keys)
+    if reconcile and shard_index is not None and not dry_run and not hashed:
         reconcile_registrations(expected_by_tier, existing, shard_index, pyramid_name)
     smallest = {t.name: t.shards[0] for t in pyramid.tiers}
     ext_gaps = []
@@ -485,7 +500,7 @@ def run_extension_fill(
         res = materialize_extension_shard(
             pyramid, g,
             key_set=existing, genesis=genesis, sort=sort,
-            head_check=stale_before is None,
+            head_check=stale_before is None and not hashed,
             overwrite_keys=overwrite_keys,
             raw_fill=raw_fill, cross_tier_fill=cross_tier_fill,
         )
@@ -521,13 +536,20 @@ def run_single_gap(
     keys are excluded from that view (stale sub-tiles are never concat'd
     into a rebuilt shard) and the target key is overwritten in place."""
     existing_mtimes = list_existing_with_mtime(pyramid)
-    fresh, stale = split_stale(existing_mtimes, stale_before)
+    hashed = template_has_hash(pyramid.keyTemplate)
+    if hashed:
+        if shard_index is None or not hasattr(shard_index, 'existing_keys'):
+            raise ValueError("run_single_gap: a {hash} keyTemplate needs a `shard_index` that can list its rows")
+        current = registry_key_set(pyramid, shard_index.existing_keys())
+        existing_mtimes = {slot: existing_mtimes.get(current.key(slot)) for slot in current}
+    fresh_set, stale = split_stale(existing_mtimes, stale_before)
+    fresh = current - stale if hashed else KeySet(fresh_set)
     err(f"single-gap /{gap.tier}@{gap.shard_dur} {gap.period_start.date()}: "
         f"{len(fresh)} fresh keys" + (f", {len(stale)} stale" if stale else ""))
     res = materialize_extension_shard(
         pyramid, gap,
         key_set=fresh, genesis=genesis, sort=sort,
-        head_check=stale_before is None,
+        head_check=stale_before is None and not hashed,
         raw_fill=raw_fill, cross_tier_fill=cross_tier_fill,
     )
     if res.status == 'wrote' and shard_index is not None:

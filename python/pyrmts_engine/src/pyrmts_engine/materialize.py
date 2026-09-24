@@ -36,9 +36,11 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from pyrmts import ExpectedShard, Pyramid, write_tier_parquet
+from pyrmts import ExpectedShard, Pyramid, put_shard_slot, template_has_hash, write_tier_parquet
 from pyrmts.axis import ceil_to_span, format_period, parse_duration
-from pyrmts.keys import substitute_key
+from pyrmts.keys import slot_key
+
+from .discovery import KeySet
 
 from .longform import combine_long, empty_long, long_to_wide, rebin_long, wide_to_long
 from .plan import _approx_ms, bin_floor_expr
@@ -61,6 +63,7 @@ class MaterializeResult:
     inputs_expected: int = 0
     source_desc: str = ''  # e.g. '/1h@30d×2', 'raw'
     error: str | None = None
+    key: str | None = None  # storage key written ('wrote'); differs from `gap.key` (the slot key) under a {hash} template
 
 
 def source_tier_for(pyramid: Pyramid, tier_name: str):
@@ -183,9 +186,9 @@ def parse_wide_blob(blob: bytes, pyramid: Pyramid) -> pl.DataFrame:
 
 
 def shard_key(pyramid: Pyramid, tier: str, shard_dur: str, period_start: datetime) -> str:
-    """Substitute the pyramid's keyTemplate for one shard."""
+    """The slot key for one shard (the storage key for a hashless template)."""
     label = format_period(period_start, parse_duration(shard_dur))
-    return substitute_key(
+    return slot_key(
         pyramid.keyTemplate,
         {'tier': tier, 'shard': shard_dur, 'period': label},
     )
@@ -270,7 +273,7 @@ def source_long_for_gap(
     t_reads = time()
     for i, pick in enumerate(picks):
         t_pick = time()
-        blob = pyramid.storage.get(pick.key)
+        blob = pyramid.storage.get(key_set.key(pick.key) if isinstance(key_set, KeySet) else pick.key)
         if blob is None:
             raise RuntimeError(
                 f"strict-cascade read failure for {src_tag}: source pick "
@@ -316,7 +319,8 @@ def materialize_shard(
         if key_set is not None:
             if gap.key in key_set:
                 return MaterializeResult(gap=gap, status='exists')
-        elif pyramid.storage.head(gap.key) is not None:
+        elif not template_has_hash(pyramid.keyTemplate) and pyramid.storage.head(gap.key) is not None:
+            # (a hashed slot key is not an object: only a key_set / the registry can say "exists")
             return MaterializeResult(gap=gap, status='exists')
 
     if gap.period_end <= genesis:
@@ -363,13 +367,17 @@ def materialize_shard(
         kwargs['row_group_size'] = rgs
     write_tier_parquet(wide.to_arrow(), pyramid, out=buf, **kwargs)
     blob = buf.getvalue()
-    pyramid.storage.put(gap.key, blob)
+    written = put_shard_slot(pyramid.storage, pyramid.keyTemplate, gap.key, blob)
+    if isinstance(key_set, KeySet):
+        key_set.add(gap.key, written.key)
+    elif key_set is not None:
+        key_set.add(gap.key)
     err(f"  ⟵ {tag} → wrote ({wide.height:,} rows, {len(blob)/1e6:.1f}MB, "
         f"total {time()-t0:.1f}s)")
     return MaterializeResult(
-        gap=gap, status='wrote',
+        gap=gap, status='wrote', key=written.key,
         bytes_written=len(blob), rows=wide.height,
-        md5=hashlib.md5(blob).hexdigest(),
+        md5=written.md5,
         inputs_present=inputs_present, inputs_expected=inputs_expected,
         source_desc=source_desc,
     )
@@ -398,13 +406,14 @@ def emit_d1_insert_sql(
     for r in eligible:
         ps = int(r.gap.period_start.timestamp() * 1000)
         pe = int(r.gap.period_end.timestamp() * 1000)
-        for s in (pyramid_name, r.gap.tier, r.gap.shard_dur, r.gap.key):
+        key = r.key or r.gap.key
+        for s in (pyramid_name, r.gap.tier, r.gap.shard_dur, key):
             assert "'" not in s, f"single-quote in {s!r} — SQL injection guard"
         lines.append(
             f"INSERT INTO {shards_table} "
             f"(pyramid, tier, shard_dur, period_start, period_end, key, written_at) "
             f"VALUES ('{pyramid_name}', '{r.gap.tier}', '{r.gap.shard_dur}', "
-            f"{ps}, {pe}, '{r.gap.key}', unixepoch()*1000) "
+            f"{ps}, {pe}, '{key}', unixepoch()*1000) "
             f"ON CONFLICT (pyramid, tier, shard_dur, period_start) DO UPDATE SET "
             f"period_end=excluded.period_end, key=excluded.key, written_at=excluded.written_at;"
         )

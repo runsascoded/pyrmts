@@ -1,6 +1,6 @@
 # Content-hashed shard keys + registry-as-truth
 
-Status: **in progress** (proposed 2026-09-24 from ctbk's rides re-key; phase 1 landed the same day, see "Landed" at the end). Companion: `done/canonicalize-preserve-layout.md`.
+Status: **done** (proposed 2026-09-24 from ctbk's rides re-key; phases 1 and 2 landed the same day, see "Landed" at the end; the two consumer-side items are listed under "Consumer follow-ups"). Companion: `done/canonicalize-preserve-layout.md`.
 
 ## Problem: shard blobs are mutable
 
@@ -95,11 +95,17 @@ Pick one in the CFW package (`pyrmts-cfw`). Out of scope for the Python engine.
 - **`canonicalize_shards`**: finds the current shard through `resolver` (a hashed template requires `RegistryResolver` + `registry` + `pyramid_name`), writes through `put_shard` (new key, old blob untouched), registers the new row (atomic swap), and is idempotent (a second pass yields the same key, no new object). A hashless template warns that the rewrite is in place.
 - **TS**: `planQuery` throws on a hashed template ("plan from the registry with `planQueryFromInventory`"); `shardKey` (gap discovery) yields slot keys.
 
-### Phase 2 — remaining
+### Phase 2 — every writer, registry-driven discovery, adopt + gc, CLI, ETag
 
-- Adopt `put_shard` + a resolver in the other writers/readers that still derive keys from the template: `cascade.py`, `tip_writer.py`, `materialize.py` / `consolidate.py` (gap keys), `validate.py`, `multiscan_driver.py`; the CFW cascade writer (`pyrmts-cfw`). Until then a hashed template fails loudly there (`missing value for {hash}`).
-- `reconcile` → "adopt orphans" (LIST, keys no row references, hash matches content, register newest per slot); `fsck` diff against registry rows.
-- `pyrmts-engine gc`: delete objects under the prefix that no registry row references and are older than a grace period (dry-run default, `--apply`).
-- CLI: `canonicalize` gains `--index` / `--pyramid-name` so a hashed pyramid can be canonicalized from the command line (today only via the library).
-- RG manifest: drop `shard_written_at` from validity with hashed keys (consumer-side; ctbk).
-- Edge cache in `pyrmts-cfw`: option (a), a response `ETag` from the covered rows' keys.
+- **Fill path** (`materialize.py` / `consolidate.py` / `discovery.py`): `KeySet` — what the fill knows as "present": a set of *slot keys* with, under a hashed template, each slot's current storage key (`key(slot)` is what to `get`). `discover_gaps(registry_keys=)`: with a hashed template the registry says what is built (a LIST only supplies mtimes for staleness; orphans it holds are `gc` / `adopt`'s business) and it refuses to run without one; `run_extension_fill` / `run_single_gap` pass the registry's current keys, skip the HEAD "exists" probe (a slot key is not an object), and register the *written* key (`MaterializeResult.key`). Cover-tile reads go through `KeySet.key`. `emit_d1_insert_sql` emits the written key.
+- **`cascade_tiers`** and **`TipWriter`**: `resolver` / `registry` / `pyramid_name` like `canonicalize_shards`; sources found through the resolver, outputs through `put_shard`, registered on write; a hashed template refuses to run without a registry. A tip append writes a new key and swaps the row; the previous tip is an orphan.
+- **`pyrmts_engine.gc`**: `list_orphans` (listed keys the template can produce that no registry row references), `gc_orphans(grace=24h, apply=False)` (dry-run by default; never deletes a blob without an mtime), `adopt_unregistered(pyramid, index, name, range)` (for each expected slot with no row, register the newest listed version whose bytes hash to its key). `run_extension_fill(reconcile=True)` under a hashed template runs `adopt_unregistered` instead of `reconcile_registrations`.
+- **`WideShardSource`** and the other template-derived readers (`validate.py`, `multiscan_driver.py` still use `slot_key` semantics; `listed_slots(storage, template)` is the LIST-based resolver they can use, refusing a slot with several versions).
+- **CLI**: `canonicalize -i/--index MANIFEST -n/--pyramid-name` (JSONL path or `s3://bucket/key`; required for a hashed template); `pyrmts-engine gc -i MANIFEST [-G hours] [-a/--apply] CONFIG`; `pyrmts-engine adopt -i MANIFEST -n NAME -r RANGE CONFIG`.
+- **Edge cache**: `keysEtag(keys)` in `pyrmts` (TS): an order-independent, versioned ETag from the keys a response was built from — option (a). The consumer's route serves it with a short `max-age` and revalidation; a registry swap changes the tag.
+
+## Consumer follow-ups
+
+- **RG manifest** (ctbk): drop `shard_written_at` from the validity check once the pyramid's template carries `{hash}`; the manifest is keyed by `(pyramid, key)` and a key's bytes never change.
+- **CFW cascade writer** (the base's `pyrmts-cfw` route that writes shards): adopt the same protocol — derive the key from the bytes, put-if-absent, `INSERT OR REPLACE` the row — the TS twin of `put_shard` is a few lines over `substituteKey({ ..., hash })` and R2's `onlyIf`; not built here because no `pyrmts-cfw` route writes shards today.
+- **Multi-scan archives** (`multiscan_driver`): archive keys have their own scheme (`{period}--{first_scan_label}`) and are sealed-not-appended already; unaffected.

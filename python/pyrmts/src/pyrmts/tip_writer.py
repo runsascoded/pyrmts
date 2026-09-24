@@ -31,7 +31,7 @@ import pyarrow.parquet as pq
 
 from .axis import add_span, floor_to_span, format_period, parse_duration
 from .invalidation import invalidate
-from .keys import substitute_key
+from .keys import KeyResolver, TemplateResolver, put_shard, template_has_hash
 from .types import Pyramid
 from .writer import write_tier_parquet
 
@@ -82,9 +82,21 @@ class TipWriter:
         dims: dict[str, str | int] | None = None,
         on_conflict: OnConflict = 'keep-last',
         now: datetime | None = None,
+        resolver: KeyResolver | None = None,
+        registry=None,
+        pyramid_name: str | None = None,
     ) -> None:
         if on_conflict not in ('keep-last', 'keep-first', 'error'):
             raise ValueError(f"TipWriter: unknown on_conflict {on_conflict!r}")
+        # Keys (`specs/content-addressed-shards.md`): the existing tip is found
+        # through `resolver` (a `{hash}` template needs a `RegistryResolver`),
+        # the merged tip goes through `put_shard` and is registered when
+        # `registry` (+ `pyramid_name`) is given.
+        if template_has_hash(pyramid.keyTemplate) and (registry is None or pyramid_name is None):
+            raise ValueError("TipWriter: a {hash} keyTemplate needs `registry` + `pyramid_name` to register the tip")
+        self.resolver = resolver or TemplateResolver(pyramid.keyTemplate)
+        self.registry = registry
+        self.pyramid_name = pyramid_name
         self.pyramid = pyramid
         self.tier = pyramid.tier(tier)
         self.at = at
@@ -144,12 +156,15 @@ class TipWriter:
         span = parse_duration(str(rung))
         period_start = floor_to_span(self.at, span)
         period_end = add_span(period_start, span)
-        key = substitute_key(pyramid.keyTemplate, {
+        values = {
             'tier': self.tier.name,
             'shard': str(rung),
             'period': format_period(period_start, span),
             **self.dims,
-        })
+        }
+        key = self.resolver.resolve(
+            self.tier.name, str(rung), int(period_start.timestamp() * 1000), values['period'], self.dims,
+        )
 
         new = pa.concat_tables(self._appends)
         mm = pc.min_max(new.column(pyramid.binCol)).as_py()
@@ -161,7 +176,7 @@ class TipWriter:
                 f"{period_end.isoformat()}) selected by at={self.at.isoformat()}"
             )
 
-        blob = pyramid.storage.get(key)
+        blob = pyramid.storage.get(key) if key is not None else None
         if blob is not None:
             existing = pq.read_table(io.BytesIO(blob))
             # Align writer-era schema drift (string vs large_string, column
@@ -175,7 +190,15 @@ class TipWriter:
         buf = io.BytesIO()
         write_tier_parquet(combined, pyramid, out=buf)
         out = buf.getvalue()
-        pyramid.storage.put(key, out)
+        written = put_shard(pyramid.storage, pyramid.keyTemplate, values, out)
+        key = written.key
+        if self.registry is not None:
+            from .axis import ShardPeriod
+            from .canonicalize import _shard_record
+            self.registry.record_shard(_shard_record(
+                self.pyramid_name or '', self.tier.name, str(rung),
+                ShardPeriod(start=period_start, end=period_end, label=values['period']), written,
+            ))
 
         bin_span = parse_duration(self.tier.bin)
         invalidate(pyramid, (lo, add_span(hi, bin_span)), now=self.now)

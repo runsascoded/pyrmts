@@ -53,8 +53,12 @@ class S3ShardStore(pulumi.ComponentResource):
             tags=dict(tags or {}),
             opts=child,
         )
+        # Kept as an attribute so callers (and the mock-harness tests) can await
+        # the rule itself: it registers asynchronously after the bucket, so
+        # awaiting `bucket` alone does not imply the rule has been declared.
+        self.lifecycle: pulumi.Resource | None = None
         if expire_raw_after_days is not None:
-            aws.s3.BucketLifecycleConfiguration(
+            self.lifecycle = aws.s3.BucketLifecycleConfiguration(
                 f'{name}-lifecycle',
                 bucket=bucket.id,
                 rules=[aws.s3.BucketLifecycleConfigurationRuleArgs(

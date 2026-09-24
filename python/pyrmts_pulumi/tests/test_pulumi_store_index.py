@@ -29,6 +29,7 @@ def test_raw_expiry_scopes_its_rule_to_the_raw_prefix():
     # `pyrmts_ops.gc` decide what is droppable, and the fill loop would
     # rebuild anything deleted while the cover still expects it.
     store = S3ShardStore('s2', prefix='beta', expire_raw_after_days=30)
+    assert store.lifecycle is not None
     def check(_):
         (_, inputs), = declared(LIFECYCLE, 's2')
         assert inputs['rules'] == [{
@@ -37,7 +38,9 @@ def test_raw_expiry_scopes_its_rule_to_the_raw_prefix():
             'filter': {'prefix': 'raw/'},
             'expiration': {'days': 30},
         }]
-    return pulumi.Output.all(store.bucket).apply(check)
+    # Await the rule's own output, not just the bucket's: the rule registers
+    # after the bucket, and on Python 3.12 the bucket's apply could run first.
+    return pulumi.Output.all(store.bucket, store.lifecycle.id).apply(check)
 
 
 @pulumi.runtime.test

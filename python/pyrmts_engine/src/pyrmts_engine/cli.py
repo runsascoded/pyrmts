@@ -155,17 +155,21 @@ def invalidate(fs_root: str | None, range_: str, config: str) -> None:
 
 @cli.command()
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
+@option('-g', '--rg-size', type=int, help="Override the rewrite's row-group size (default: the shard's stamped layout, else its first row group's size)")
 @option('-j', '--concurrency', type=int, default=1, help="Parallel shard rewrites (default 1)")
 @option('-m', '--map', 'map_override', help="Local id-map JSON path (overrides identityRollup.map)")
 @option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
 @option('-r', '--range', 'range_', required=True, help="Half-open range to (re)derive canonical rows over, <from-iso>/<to-iso> (UTC)")
+@option('-s', '--sort', 'sort_csv', help="Override the rewrite's sort columns, comma-separated (default: the shard's stamped layout, else the pyramid's default sort)")
 @argument('config')
 def canonicalize(
     filters: tuple[str, ...],
+    rg_size: int | None,
     concurrency: int,
     map_override: str | None,
     fs_root: str | None,
     range_: str,
+    sort_csv: str | None,
     config: str,
 ) -> None:
     """Re-derive canonical identity rows in every built shard overlapping the
@@ -175,7 +179,8 @@ def canonicalize(
     canonical rows alongside — no source re-pull, no cascade. Run after a build
     to materialize the canonical level, or after an id-map change to refresh it
     (the stale canonical rows are dropped and rebuilt, so it is idempotent for
-    a fixed map)."""
+    a fixed map). The rewrite keeps each shard's build layout (sort + row-group
+    size, from its footer stamp) unless `-s` / `-g` override it."""
     from pyrmts import canonicalize_shards
     pyramid = _load_pyramid(config, fs_root)
     ir = pyramid.identity_rollup
@@ -192,6 +197,8 @@ def canonicalize(
         canonical_prefix=canonical_prefix,
         concurrency=concurrency,
         filter=_parse_filters(filters),
+        sort=sort_csv.split(',') if sort_csv else None,
+        row_group_size=rg_size,
     )
     for key, status in result.errors:
         err(f"  error {key}: {status}")

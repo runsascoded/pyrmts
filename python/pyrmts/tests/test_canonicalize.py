@@ -246,3 +246,84 @@ def test_additive_fast_path_handles_large_string_col():
         ('s:A', 0, 3, 30, 300),
         ('s:B', 0, 2, 20, 200),
     ]
+
+
+def _layout_fixture(storage: MemStorage):
+    """A 2-dim shard written the way the engine writes it (`write_tier_parquet`
+    with an explicit non-default sort and 4-row groups → several RGs), plus the
+    id-map and time range that canonicalize the January shard."""
+    from datetime import datetime, timezone
+
+    from pyrmts import shard_periods_covering, substitute_key, write_tier_parquet
+
+    p = _sum_pyramid(storage, extra_dim=True)
+    tr = (datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 2, 1, tzinfo=timezone.utc))
+    (period,) = shard_periods_covering(*tr, '1mo')
+    key = substitute_key(p.keyTemplate, {'tier': 'base', 'shard': '1mo', 'period': period.label})
+    rows = [
+        (dt, cell, d, n, n * 10, n * 100)
+        for d in ('a', 'b')
+        for dt in (0, 1)
+        for cell, n in (('s:A', 3), ('s:B', 2), ('s:C', 5))
+    ]
+    table = _sum_table(rows, extra_dim=True)
+    layout = {'row_group_size': 4, 'sort': ['dir', 'dt', 'cell']}
+    buf = io.BytesIO()
+    write_tier_parquet(table, p, out=buf, **layout)
+    storage.put(key, buf.getvalue())
+    return p, tr, key, table, layout
+
+
+def test_canonicalize_preserves_the_build_layout():
+    """`specs/canonicalize-preserve-layout.md`: the canonicalized shard has the
+    row-group layout and global sort `write_tier_parquet` would give the same
+    logical table — `c:` rows interleaved at their sorted position, not one
+    unsorted row group with them appended. Byte-equal, since both go through
+    the one writer with the layout the shard's footer records."""
+    from pyrmts import write_tier_parquet
+
+    storage = MemStorage()
+    p, tr, key, table, layout = _layout_fixture(storage)
+    id_map = {'s:A': 'c:X', 's:B': 'c:X'}
+
+    result = canonicalize_shards(p, id_map, tr)
+    assert (result.written, result.errors) == ([key], [])
+
+    expected_buf = io.BytesIO()
+    write_tier_parquet(recanonicalize_table(table, id_map, pyramid=p), p, out=expected_buf, **layout)
+    got = storage.get(key)
+    got_md = pq.ParquetFile(io.BytesIO(got)).metadata
+    exp_md = pq.ParquetFile(io.BytesIO(expected_buf.getvalue())).metadata
+    assert [got_md.row_group(i).num_rows for i in range(got_md.num_row_groups)] == \
+           [exp_md.row_group(i).num_rows for i in range(exp_md.num_row_groups)] == [4, 4, 4, 4]
+    got_rows = pq.read_table(io.BytesIO(got)).to_pylist()
+    assert [(r['dir'], r['dt'], r['cell']) for r in got_rows] == sorted((r['dir'], r['dt'], r['cell']) for r in got_rows)
+    assert 'c:X' in [r['cell'] for r in got_rows[:4]]          # interleaved, not appended
+    assert got == expected_buf.getvalue()
+
+
+def test_canonicalize_infers_layout_for_legacy_shards_and_honours_overrides():
+    """A shard without the layout stamp (written by a bare `pq.write_table`)
+    keeps its first row group's size and gets the pyramid's default sort; an
+    explicit `sort` / `row_group_size` wins over both."""
+    from pyrmts import write_tier_parquet
+
+    storage = MemStorage()
+    p, tr, key, table, _ = _layout_fixture(storage)
+    buf = io.BytesIO()
+    pq.write_table(table, buf, row_group_size=3, compression='snappy')   # legacy: no stamp, 3-row RGs
+    storage.put(key, buf.getvalue())
+    id_map = {'s:A': 'c:X', 's:B': 'c:X'}
+
+    canonicalize_shards(p, id_map, tr)
+    got = storage.get(key)
+    exp = io.BytesIO()
+    write_tier_parquet(recanonicalize_table(table, id_map, pyramid=p), p, out=exp, row_group_size=3)
+    assert got == exp.getvalue()
+
+    storage.put(key, buf.getvalue())
+    canonicalize_shards(p, id_map, tr, sort=['dir', 'cell', 'dt'], row_group_size=5)
+    got = storage.get(key)
+    exp = io.BytesIO()
+    write_tier_parquet(recanonicalize_table(table, id_map, pyramid=p), p, out=exp, row_group_size=5, sort=['dir', 'cell', 'dt'])
+    assert got == exp.getvalue()

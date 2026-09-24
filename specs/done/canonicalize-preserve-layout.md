@@ -1,6 +1,6 @@
 # `canonicalize_shards`: preserve the shard's sort + row-group layout
 
-Status: proposed (2026-09-24, from ctbk's rides re-key validation). **Blocking** ctbk P4: canonicalized `rides/` shards blow the CF Worker CPU limit (error 1102) on full-range queries.
+Status: **done** (2026-09-24; proposed the same day from ctbk's rides re-key validation, where it blocked P4: canonicalized `rides/` shards blew the CF Worker CPU limit, error 1102, on full-range queries). Landed as option 1 (footer stamp) + option 3 (legacy inference) + explicit overrides; see "Landed" at the end.
 
 ## The bug
 
@@ -37,3 +37,11 @@ Canonicalize must write with the **same layout the build used**:
 ## ctbk follow-up once released
 
 Bump pyrmts in ctbk → re-run `ctbk gbfs engine canonicalize -C rides-{start,end}` on `e` → `ctbk gbfs lambda reconcile -C rides-<a> -f` → `ctbk gbfs manifest backfill`, which re-does today's backfill (~$1.40 of D1 writes). Re-running over shards that already carry `c:` rows is safe: `recanonicalize_table` drops existing `c:` rows before rebuilding them. Or, since the build layout is fine, fold that re-run into a rebuild if content-addressed keys (`content-addressed-shards.md`) land first.
+
+## Landed
+
+- `write_tier_parquet` stamps its effective layout into the parquet key-value metadata: `pyrmts.sort` (comma-joined sort columns, after dropping absent ones) and `pyrmts.row_group_size`. Every engine-written shard is now self-describing; `read_layout(metadata | schema)` → `ShardLayout(sort, row_group_size)`, or None for a legacy shard. Both exported from `pyrmts`.
+- `canonicalize_shards` writes through `write_tier_parquet` with `shard_layout(pf, pyramid, sort=, row_group_size=)`: explicit overrides win, else the footer stamp, else (legacy) the first row group's size + `_default_sort_cols(pyramid)`. `recanonicalize_table` is unchanged (raw ∪ canon, unsorted; the writer sorts, so `c:` rows land at their sorted position).
+- CLI `pyrmts-engine canonicalize` gains `-g/--rg-size` and `-s/--sort` (same spellings as the build command).
+- Tests (TFFP, both failed on the old code: one 16-row group, bytes differ): `test_canonicalize_preserves_the_build_layout` (a `write_tier_parquet` shard with a non-default sort and 4-row groups canonicalizes to the byte-identical output of `write_tier_parquet(recanonicalize_table(...))` with the same layout: `[4, 4, 4, 4]` groups, globally sorted, `c:` interleaved), `test_canonicalize_infers_layout_for_legacy_shards_and_honours_overrides`, and the writer's stamp round-trip.
+- Option 2 (a `layout:` config block) was not needed for this and stays open; the stamp makes any future rewriter (content-addressed re-keys, consolidate) layout-preserving for free.

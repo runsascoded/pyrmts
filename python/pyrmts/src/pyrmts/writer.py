@@ -9,6 +9,7 @@ See `specs/done/writer-helper-and-arbitrary-col-rg-prune.md` for motivation
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
@@ -20,6 +21,35 @@ from .types import Pyramid
 
 _DEFAULT_ROW_GROUP_MIN = 4096
 _DEFAULT_ROW_GROUP_MAX = 16384
+
+#: Parquet key-value metadata stamped on every shard `write_tier_parquet`
+#: writes: the effective sort columns (comma-joined) and row-group size, so an
+#: in-place rewriter (`canonicalize_shards`, …) reproduces the build's layout
+#: without any config plumbing (`specs/canonicalize-preserve-layout.md`).
+LAYOUT_SORT_KEY = b'pyrmts.sort'
+LAYOUT_ROW_GROUP_SIZE_KEY = b'pyrmts.row_group_size'
+
+
+@dataclass(frozen=True)
+class ShardLayout:
+    sort: list[str]
+    row_group_size: int
+
+
+def read_layout(schema_or_metadata) -> ShardLayout | None:
+    """The layout stamp from a shard's schema / parquet metadata (a
+    `pa.Schema`, `pq.FileMetaData`, or the raw KV dict), or None for a legacy
+    shard written without one."""
+    md = schema_or_metadata
+    if hasattr(md, 'metadata'):
+        md = md.metadata
+    if not md or LAYOUT_ROW_GROUP_SIZE_KEY not in md:
+        return None
+    sort_raw = md.get(LAYOUT_SORT_KEY, b'').decode()
+    return ShardLayout(
+        sort=[c for c in sort_raw.split(',') if c],
+        row_group_size=int(md[LAYOUT_ROW_GROUP_SIZE_KEY].decode()),
+    )
 
 
 def _default_row_group_size(total_rows: int) -> int:
@@ -83,6 +113,10 @@ def write_tier_parquet(
             Required when `pyramid` is `None`.
         compression: Passed through to `pq.write_table` (default `snappy`).
 
+    The effective `sort` and `row_group_size` are stamped into the parquet
+    key-value metadata (`LAYOUT_SORT_KEY` / `LAYOUT_ROW_GROUP_SIZE_KEY`; read
+    back with `read_layout`) so in-place rewriters keep the build's layout.
+
     Returns:
         Bytes written.
     """
@@ -111,6 +145,14 @@ def write_tier_parquet(
         table = table.sort_by([(c, 'ascending') for c in sort_cols])
 
     rgs = row_group_size if row_group_size is not None else _default_row_group_size(table.num_rows)
+
+    # Stamp the effective layout so a rewriter can reproduce it (`read_layout`).
+    existing = table.schema.metadata or {}
+    table = table.replace_schema_metadata({
+        **existing,
+        LAYOUT_SORT_KEY: ','.join(sort_cols).encode(),
+        LAYOUT_ROW_GROUP_SIZE_KEY: str(rgs).encode(),
+    })
 
     sink = pa.BufferOutputStream()
     pq.write_table(table, sink, row_group_size=rgs, compression=compression)

@@ -52,7 +52,7 @@ from .types import (
     Storage,
     Tier,
 )
-from .writer import write_tier_parquet
+from .writer import ShardLayout, read_layout, write_tier_parquet
 from .yaml import (
     PyramidConfig,
     merge_lambda_shards,
@@ -79,7 +79,7 @@ __all__ = [
     'diff_tables', 'extract_table', 'from_arrow', 'scan_digest', 'series_for',
     'to_arrow',
     'EtagConflict', 'FsStorage', 'MemStorage', 'S3Storage', 'storage_from_cfg',
-    'write_tier_parquet',
+    'write_tier_parquet', 'read_layout', 'ShardLayout',
     'PyramidConfig', 'merge_lambda_shards', 'parse_pyramid_yaml',
     'pyramid_from_config',
 ]

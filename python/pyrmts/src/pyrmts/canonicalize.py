@@ -12,6 +12,7 @@ rows (a local shard rewrite: no source re-pull, no re-cascade)."""
 from __future__ import annotations
 
 import io
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -24,6 +25,7 @@ from .cascade import _rows_to_table
 from .keys import substitute_key
 from .monoids import Monoid, Row, get_monoid
 from .types import Metric, Pyramid, Tier
+from .writer import ShardLayout, _default_sort_cols, read_layout, write_tier_parquet
 
 
 def _rollup_col(pyramid: Pyramid) -> str:
@@ -203,13 +205,21 @@ def canonicalize_shards(
     canonical_prefix: str = 'c:',
     concurrency: int = 1,
     filter: dict[str, str | int] | None = None,
+    sort: Sequence[str] | None = None,
+    row_group_size: int | None = None,
 ) -> CanonicalizeResult:
     """Re-derive canonical rows in every built shard overlapping `time_range`,
     in place: read shard → `recanonicalize_table` → write. Missing shards are
     skipped. No source pull and no cascade — the raw leaves already in each
     shard are the rollup source, so this is the reactive fast path for an
     id-map change (append the affected span to the invalidation journal, then
-    run this over it)."""
+    run this over it).
+
+    The rewrite goes through `write_tier_parquet` with the **shard's own
+    layout** (`specs/canonicalize-preserve-layout.md`): the sort + row-group
+    size stamped in its footer by the build, else — a legacy shard — its first
+    row group's size and the pyramid's default sort. `sort` / `row_group_size`
+    override either source."""
     storage_write = storage_write or pyramid.storage
     col = col or _rollup_col(pyramid)
     filter = filter or {}
@@ -225,12 +235,13 @@ def canonicalize_shards(
         if blob is None:
             return key, 'skipped'
         try:
-            table = pq.read_table(io.BytesIO(blob))
+            pf = pq.ParquetFile(io.BytesIO(blob))
+            layout = shard_layout(pf, pyramid, sort=sort, row_group_size=row_group_size)
             out = recanonicalize_table(
-                table, id_map, pyramid=pyramid, col=col, canonical_prefix=canonical_prefix,
+                pf.read(), id_map, pyramid=pyramid, col=col, canonical_prefix=canonical_prefix,
             )
             buf = io.BytesIO()
-            pq.write_table(out, buf, compression='snappy')
+            write_tier_parquet(out, pyramid, out=buf, sort=layout.sort, row_group_size=layout.row_group_size)
             storage_write.put(key, buf.getvalue())
             return key, 'written'
         except Exception as e:
@@ -251,6 +262,32 @@ def canonicalize_shards(
         for t in tasks:
             _record(result, *work(*t))
     return result
+
+
+def shard_layout(
+    pf: pq.ParquetFile,
+    pyramid: Pyramid,
+    *,
+    sort: Sequence[str] | None = None,
+    row_group_size: int | None = None,
+) -> ShardLayout:
+    """The layout an in-place rewrite of `pf` must reproduce: explicit overrides,
+    else the footer's stamp (`write_tier_parquet` output), else — a legacy
+    shard — inferred as its first row group's size + the pyramid's default sort."""
+    stamped = read_layout(pf.metadata)
+    if sort is None:
+        sort = stamped.sort if stamped is not None else _default_sort_cols(pyramid)
+    if row_group_size is None:
+        if stamped is not None:
+            row_group_size = stamped.row_group_size
+        else:
+            md = pf.metadata
+            row_group_size = md.row_group(0).num_rows if md.num_row_groups else _DEFAULT_LEGACY_ROW_GROUP_SIZE
+    return ShardLayout(sort=list(sort), row_group_size=row_group_size)
+
+
+#: Row-group size for an empty legacy shard (nothing to infer from).
+_DEFAULT_LEGACY_ROW_GROUP_SIZE = 4096
 
 
 def _record(result: CanonicalizeResult, key: str, status: str) -> None:

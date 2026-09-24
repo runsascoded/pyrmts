@@ -303,3 +303,28 @@ def test_pyramid_optional_sort_empty_explicit():
     assert n > 0
     table, _ = _read_parquet(buf.getvalue())
     assert table.column('value').to_pylist() == [1, 0]
+
+
+def test_write_tier_parquet_stamps_its_layout_and_read_layout_reads_it_back():
+    """`specs/canonicalize-preserve-layout.md`: every shard records the sort and
+    row-group size it was written with, so an in-place rewriter can reproduce
+    them; a shard without the stamp reads as None."""
+    from pyrmts import ShardLayout, read_layout
+
+    p = _awair_pyramid()
+    t = pa.table({'ts': [3, 1, 2, 0], 'device_id': [2, 1, 2, 1], 'temp': [1, 2, 3, 4]})
+    buf = io.BytesIO()
+    write_tier_parquet(t, p, out=buf, row_group_size=2, sort=['device_id', 'ts'])
+    pf = pq.ParquetFile(io.BytesIO(buf.getvalue()))
+    assert read_layout(pf.metadata) == ShardLayout(sort=['device_id', 'ts'], row_group_size=2)
+    assert read_layout(pf.schema_arrow) == ShardLayout(sort=['device_id', 'ts'], row_group_size=2)
+    assert pf.read().to_pydict()['ts'] == [0, 1, 2, 3]                    # sorted by device_id, then ts
+
+    buf = io.BytesIO()
+    write_tier_parquet(t, p, out=buf)                                       # defaults → recorded too
+    assert read_layout(pq.ParquetFile(io.BytesIO(buf.getvalue())).metadata) == ShardLayout(
+        sort=[p.binCol] + [d.name for d in p.dims], row_group_size=4096,
+    )
+    buf = io.BytesIO()
+    pq.write_table(t, buf)                                                  # legacy: no stamp
+    assert read_layout(pq.ParquetFile(io.BytesIO(buf.getvalue())).metadata) is None

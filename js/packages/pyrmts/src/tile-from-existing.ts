@@ -12,7 +12,7 @@
 
 import { addSpan, ceilToSpan, nominalMs, parseDuration } from './axis.js'
 import type { ExpectedShard } from './gap-discovery.js'
-import { shardKey } from './keys.js'
+import { shardKey, templateHasHash } from './keys.js'
 import type { Pyramid, Shard, Tier } from './types.js'
 
 export interface TilingResult {
@@ -42,6 +42,12 @@ export function tileFromExisting(
   keySet: Set<string>,
   opts: { genesis: Date; filter?: Record<string, string | number> },
 ): TilingResult {
+  if (templateHasHash(pyramid.keyTemplate)) {
+    throw new Error(
+      `tileFromExisting: keyTemplate '${pyramid.keyTemplate}' has a {hash} token — storage keys cannot be ` +
+      `derived from it; resolve tiles through the registry (content-addressed-shards.md)`,
+    )
+  }
   const filter = opts.filter ?? {}
   const rungs = tier.shards.filter(r => nominalMs(r) < nominalMs(gap.shardDur))
   const picks: TilingResult['picks'] = []

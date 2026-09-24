@@ -25,7 +25,7 @@
 import { addSpan, floorToSpan, parseDuration } from './axis.js'
 import type { Invalidation } from './invalidation.js'
 import { staleKeysFor } from './invalidation.js'
-import { shardKey } from './keys.js'
+import { shardKey, templateHasHash } from './keys.js'
 import type { Pyramid, Shard, Tier } from './types.js'
 import type { ShardIndex } from './shard-index.js'
 
@@ -64,6 +64,12 @@ export function listExpectedShards(
   range: { from: Date; to: Date },
   filter: Record<string, string | number> = {},
 ): ExpectedShard[] {
+  if (templateHasHash(pyramid.keyTemplate)) {
+    throw new Error(
+      `listExpectedShards: keyTemplate '${pyramid.keyTemplate}' has a {hash} token — expected keys cannot be ` +
+      `derived from it; the TS gap discovery is template-driven (content-addressed-shards.md)`,
+    )
+  }
   const out: ExpectedShard[] = []
   for (const tier of pyramid.tiers) {
     coverForTier(pyramid, tier, range.from, range.to, filter, out)

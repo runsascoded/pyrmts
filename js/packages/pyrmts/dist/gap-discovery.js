@@ -23,7 +23,7 @@
 // part of the cover.
 import { addSpan, floorToSpan, parseDuration } from './axis.js';
 import { staleKeysFor } from './invalidation.js';
-import { shardKey } from './keys.js';
+import { shardKey, templateHasHash } from './keys.js';
 // Per-tier minimal cover of `range`. See file docstring.
 //
 // Shards whose period is entirely outside `[range.from, range.to)` are
@@ -35,6 +35,10 @@ import { shardKey } from './keys.js';
 // (e.g. `{ device_id: 17617 }` for an awair-style multi-tenant layout).
 // `{tier}`, `{shard}`, and `{period}` are filled internally.
 export function listExpectedShards(pyramid, range, filter = {}) {
+    if (templateHasHash(pyramid.keyTemplate)) {
+        throw new Error(`listExpectedShards: keyTemplate '${pyramid.keyTemplate}' has a {hash} token — expected keys cannot be ` +
+            `derived from it; the TS gap discovery is template-driven (content-addressed-shards.md)`);
+    }
     const out = [];
     for (const tier of pyramid.tiers) {
         coverForTier(pyramid, tier, range.from, range.to, filter, out);

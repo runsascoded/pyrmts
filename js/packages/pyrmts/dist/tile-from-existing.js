@@ -10,7 +10,7 @@
 // shard. Uncovered `holes` are app policy (fetch from a tip layout,
 // raise past month-close, etc.).
 import { addSpan, ceilToSpan, nominalMs, parseDuration } from './axis.js';
-import { shardKey } from './keys.js';
+import { shardKey, templateHasHash } from './keys.js';
 // Greedy largest-first tiling of `gap`'s period from existing same-tier
 // shards (`keySet` — snapshot of the caller's listing). The prescriptive
 // expected cover is wrong for this problem: it demands largest-fitting
@@ -27,6 +27,10 @@ import { shardKey } from './keys.js';
 // `{dim_name}` placeholders in the keyTemplate (must match how the
 // caller's `keySet` keys were derived).
 export function tileFromExisting(pyramid, tier, gap, keySet, opts) {
+    if (templateHasHash(pyramid.keyTemplate)) {
+        throw new Error(`tileFromExisting: keyTemplate '${pyramid.keyTemplate}' has a {hash} token — storage keys cannot be ` +
+            `derived from it; resolve tiles through the registry (content-addressed-shards.md)`);
+    }
     const filter = opts.filter ?? {};
     const rungs = tier.shards.filter(r => nominalMs(r) < nominalMs(gap.shardDur));
     const picks = [];

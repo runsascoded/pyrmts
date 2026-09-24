@@ -207,7 +207,7 @@ describe('listExpectedShards', () => {
     expect(() => listExpectedShards(p, {
       from: d('2026-06-01T00:00:00Z'),
       to: d('2026-06-01T01:00:00Z'),
-    })).toThrow('substituteKey: missing value for {device_id}')
+    })).toThrow('missing value for {device_id}')
   })
 
   describe('effective{Start,End}', () => {

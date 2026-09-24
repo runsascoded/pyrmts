@@ -24,7 +24,20 @@ from .diffindex import (
     aligned_blocks,
 )
 from .gap_discovery import ExpectedShard, list_expected_shards
-from .keys import substitute_key
+from .keys import (
+    KeyResolver,
+    ShardWrite,
+    TemplateResolver,
+    content_hash,
+    key_pattern,
+    parse_key,
+    put_shard,
+    slot_key,
+    slot_of,
+    substitute_key,
+    template_has_hash,
+    validate_key_template,
+)
 from .monoids import Monoid, Row, get_monoid, state_columns
 from .multiscan import (
     MultiScan,
@@ -73,7 +86,8 @@ __all__ = [
     'SparseDiffIndex', 'changeset_between', 'changeset_from_table', 'changeset_to_table',
     'compose_changesets', 'aligned_blocks',
     'ExpectedShard', 'list_expected_shards',
-    'substitute_key',
+    'substitute_key', 'slot_key', 'slot_of', 'key_pattern', 'parse_key', 'template_has_hash',
+    'validate_key_template', 'content_hash', 'put_shard', 'ShardWrite', 'KeyResolver', 'TemplateResolver',
     'Monoid', 'Row', 'get_monoid', 'state_columns',
     'MultiScan', 'consolidate_scans', 'consolidate_tables', 'diff_scans',
     'diff_tables', 'extract_table', 'from_arrow', 'scan_digest', 'series_for',

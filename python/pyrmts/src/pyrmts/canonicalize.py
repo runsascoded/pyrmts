@@ -12,6 +12,7 @@ rows (a local shard rewrite: no source re-pull, no re-cascade)."""
 from __future__ import annotations
 
 import io
+import warnings
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -22,7 +23,7 @@ import pyarrow.parquet as pq
 
 from .axis import ShardPeriod, shard_periods_covering
 from .cascade import _rows_to_table
-from .keys import substitute_key
+from .keys import KeyResolver, TemplateResolver, put_shard, template_has_hash
 from .monoids import Monoid, Row, get_monoid
 from .types import Metric, Pyramid, Tier
 from .writer import ShardLayout, _default_sort_cols, read_layout, write_tier_parquet
@@ -207,6 +208,9 @@ def canonicalize_shards(
     filter: dict[str, str | int] | None = None,
     sort: Sequence[str] | None = None,
     row_group_size: int | None = None,
+    resolver: KeyResolver | None = None,
+    registry=None,
+    pyramid_name: str | None = None,
 ) -> CanonicalizeResult:
     """Re-derive canonical rows in every built shard overlapping `time_range`,
     in place: read shard → `recanonicalize_table` → write. Missing shards are
@@ -219,21 +223,43 @@ def canonicalize_shards(
     layout** (`specs/canonicalize-preserve-layout.md`): the sort + row-group
     size stamped in its footer by the build, else — a legacy shard — its first
     row group's size and the pyramid's default sort. `sort` / `row_group_size`
-    override either source."""
+    override either source.
+
+    Keys (`specs/content-addressed-shards.md`): a slot's current shard is found
+    through `resolver` (default: the template — which refuses a `{hash}`
+    template, whose current keys live only in the registry; pass a
+    `RegistryResolver`). The rewrite goes through `put_shard`: with a hashed
+    template it lands at a new content-hashed key, never overwriting, and is
+    registered (`registry.record_shard`, needs `pyramid_name`) so readers swap
+    to it atomically; the old blob is left for GC. A hashless template
+    rewrites in place — a warning says so, since the registry's `written_at`
+    and any RG manifest must then be bumped by the caller."""
     storage_write = storage_write or pyramid.storage
+    hashed = template_has_hash(pyramid.keyTemplate)
+    resolver = resolver or TemplateResolver(pyramid.keyTemplate)
+    if hashed and registry is None:
+        raise ValueError("canonicalize_shards: a {hash} keyTemplate needs `registry` (+ `pyramid_name`) to register the rewritten shards")
+    if hashed and pyramid_name is None:
+        raise ValueError("canonicalize_shards: `pyramid_name` is required to register rewritten shards")
+    if not hashed:
+        warnings.warn(
+            f"canonicalize_shards: keyTemplate {pyramid.keyTemplate!r} has no {{hash}} token — shards are "
+            f"rewritten IN PLACE; bump the registry's written_at / rebuild any RG manifest afterwards "
+            f"(see specs/content-addressed-shards.md)",
+            stacklevel=2,
+        )
     col = col or _rollup_col(pyramid)
     filter = filter or {}
     from_, to = time_range
     result = CanonicalizeResult()
 
     def work(tier: Tier, shard_dur: str, period: ShardPeriod) -> tuple[str, str]:
-        key = substitute_key(
-            pyramid.keyTemplate,
-            {**filter, 'tier': tier.name, 'shard': shard_dur, 'period': period.label},
-        )
-        blob = pyramid.storage.get(key)
-        if blob is None:
-            return key, 'skipped'
+        values = {**filter, 'tier': tier.name, 'shard': shard_dur, 'period': period.label}
+        period_start_ms = int(period.start.timestamp() * 1000)
+        key = resolver.resolve(tier.name, shard_dur, period_start_ms, period.label, filter)
+        blob = pyramid.storage.get(key) if key is not None else None
+        if key is None or blob is None:
+            return key or f"{tier.name}/{shard_dur}/{period.label}", 'skipped'
         try:
             pf = pq.ParquetFile(io.BytesIO(blob))
             layout = shard_layout(pf, pyramid, sort=sort, row_group_size=row_group_size)
@@ -242,8 +268,10 @@ def canonicalize_shards(
             )
             buf = io.BytesIO()
             write_tier_parquet(out, pyramid, out=buf, sort=layout.sort, row_group_size=layout.row_group_size)
-            storage_write.put(key, buf.getvalue())
-            return key, 'written'
+            written = put_shard(storage_write, pyramid.keyTemplate, values, buf.getvalue())
+            if registry is not None:
+                registry.record_shard(_shard_record(pyramid_name or '', tier.name, shard_dur, period, written))
+            return written.key, 'written'
         except Exception as e:
             return key, f"error:{e!r}"
 
@@ -262,6 +290,21 @@ def canonicalize_shards(
         for t in tasks:
             _record(result, *work(*t))
     return result
+
+
+def _shard_record(pyramid_name: str, tier: str, shard_dur: str, period: ShardPeriod, written):
+    """A registry row for a rewritten shard (the engine's `ShardRecord` shape,
+    imported lazily so core stays engine-free unless a registry is used)."""
+    from datetime import timezone
+
+    from pyrmts_engine.shard_index import ShardRecord
+    return ShardRecord(
+        pyramid=pyramid_name, tier=tier, shard_dur=shard_dur,
+        period_start_ms=int(period.start.timestamp() * 1000),
+        period_end_ms=int(period.end.timestamp() * 1000),
+        key=written.key, written_at_ms=int(datetime.now(tz=timezone.utc).timestamp() * 1000),
+        md5=written.md5, n_bytes=written.n_bytes,
+    )
 
 
 def shard_layout(

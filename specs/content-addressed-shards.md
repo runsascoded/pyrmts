@@ -1,6 +1,6 @@
 # Content-hashed shard keys + registry-as-truth
 
-Status: proposed (2026-09-24, from ctbk's rides re-key). Companion: `canonicalize-preserve-layout.md`.
+Status: **in progress** (proposed 2026-09-24 from ctbk's rides re-key; phase 1 landed the same day, see "Landed" at the end). Companion: `done/canonicalize-preserve-layout.md`.
 
 ## Problem: shard blobs are mutable
 
@@ -82,3 +82,24 @@ Pick one in the CFW package (`pyrmts-cfw`). Out of scope for the Python engine.
 
 - Should hashing cover the parquet bytes (depends on writer version / compression) or a canonical content digest? Bytes are simpler and are what the manifest actually depends on. Recommend bytes.
 - GC grace: tie it to the edge cache TTL, and to the maximum query duration.
+
+## Landed
+
+### Phase 1 — key grammar, write protocol, registry lookup; engine + canonicalize adopt
+
+- **Key grammar** (`pyrmts.keys` / `keys.ts`, twins with identical tests): `{hash}` = full md5, `{hash:N}` = first N (1..32); `validate_key_template` (config-time: `:N` only on `hash`, N in range — wired into `parse_pyramid_yaml` / `pyramid_from_config` and the TS `parsePyramidYaml`); `template_has_hash`; `substitute_key(values with hash)`; **`slot_key`** (everything but `{hash}` substituted — a slot's stable identity, equal to the storage key for a hashless template); `key_pattern` / `parse_key` / `slot_of` (the inverse for listings: fixed-width `[0-9a-f]{N}`, repeated placeholders back-referenced).
+- **Write protocol**: `put_shard(storage, template, values, payload) → ShardWrite(key, md5, n_bytes, put)`: hashed template → key from the bytes, `put` only if absent, never overwrite; hashless → in place. `content_hash` = md5 hex.
+- **Resolver**: `KeyResolver` protocol; `TemplateResolver` (refuses a hashed template with a pointer to the registry); `pyrmts_engine.shard_index.RegistryResolver` over any index with `lookup`.
+- **Registry**: `ShardIndex` impls (Mem / Jsonl / StorageJsonl / D1) gain `lookup(tier, shard_dur, period_start_ms)`; `existing_keys()` now returns the *current* key per slot (last row wins = `INSERT OR REPLACE`).
+- **Engine** (`build_local`): `ExpectedShard.key` is the slot key; `_write_shard` goes through `put_shard` and registers the returned key/md5/bytes; with a hashed template `fill` and `resume` take "built" from the **registry** (a LIST may hold several versions of a slot), and refuse a `shard_index` that cannot list; the source-coverage check compares slots. `WideShardSource` resolves a hashed slot to its one listed key and refuses a slot with several versions (GC the orphans, or read through the registry). Tests: keys derive from bytes and register; a byte-identical rebuild uploads nothing and re-points the registry; a fill trusts registry rows, not orphans.
+- **`canonicalize_shards`**: finds the current shard through `resolver` (a hashed template requires `RegistryResolver` + `registry` + `pyramid_name`), writes through `put_shard` (new key, old blob untouched), registers the new row (atomic swap), and is idempotent (a second pass yields the same key, no new object). A hashless template warns that the rewrite is in place.
+- **TS**: `planQuery` throws on a hashed template ("plan from the registry with `planQueryFromInventory`"); `shardKey` (gap discovery) yields slot keys.
+
+### Phase 2 — remaining
+
+- Adopt `put_shard` + a resolver in the other writers/readers that still derive keys from the template: `cascade.py`, `tip_writer.py`, `materialize.py` / `consolidate.py` (gap keys), `validate.py`, `multiscan_driver.py`; the CFW cascade writer (`pyrmts-cfw`). Until then a hashed template fails loudly there (`missing value for {hash}`).
+- `reconcile` → "adopt orphans" (LIST, keys no row references, hash matches content, register newest per slot); `fsck` diff against registry rows.
+- `pyrmts-engine gc`: delete objects under the prefix that no registry row references and are older than a grace period (dry-run default, `--apply`).
+- CLI: `canonicalize` gains `--index` / `--pyramid-name` so a hashed pyramid can be canonicalized from the command line (today only via the library).
+- RG manifest: drop `shard_written_at` from validity with hashed keys (consumer-side; ctbk).
+- Edge cache in `pyrmts-cfw`: option (a), a response `ETag` from the covered rows' keys.

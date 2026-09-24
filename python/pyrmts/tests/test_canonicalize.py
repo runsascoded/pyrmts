@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 
 import pyarrow as pa
+import pytest
 import pyarrow.parquet as pq
 
 from pyrmts import (
@@ -327,3 +328,56 @@ def test_canonicalize_infers_layout_for_legacy_shards_and_honours_overrides():
     exp = io.BytesIO()
     write_tier_parquet(recanonicalize_table(table, id_map, pyramid=p), p, out=exp, row_group_size=5, sort=['dir', 'cell', 'dt'])
     assert got == exp.getvalue()
+
+
+def test_canonicalize_hashed_template_writes_a_new_key_and_swaps_the_registry_row():
+    """`specs/content-addressed-shards.md`: with `{hash:N}` in the template the
+    current shard is found via the registry, the rewrite lands at a new
+    content-hashed key (the old blob is untouched, left for GC), and the
+    registry row swaps to it; without a registry the call refuses."""
+    from pyrmts import parse_key, put_shard, write_tier_parquet
+    from pyrmts_engine.shard_index import MemShardIndex, RegistryResolver, ShardRecord
+
+    p, tr, key, table, layout = _layout_fixture(MemStorage())
+    storage = MemStorage()                                                  # fresh: only hashed keys live here
+    p.storage = storage
+    p.keyTemplate = p.keyTemplate.replace('.parquet', '.{hash:10}.parquet')
+    values = {'tier': 'base', 'shard': '1mo', 'period': key.split('/')[-1].removesuffix('.parquet')}
+    buf = io.BytesIO()
+    write_tier_parquet(table, p, out=buf, **layout)
+    first = put_shard(storage, p.keyTemplate, values, buf.getvalue())     # the "build"
+    index = MemShardIndex()
+    from datetime import datetime, timezone
+    index.record_shard(ShardRecord(
+        pyramid='t', tier='base', shard_dur='1mo',
+        period_start_ms=int(tr[0].timestamp() * 1000), period_end_ms=int(tr[1].timestamp() * 1000),
+        key=first.key, written_at_ms=1, md5=first.md5, n_bytes=first.n_bytes,
+    ))
+    id_map = {'s:A': 'c:X', 's:B': 'c:X'}
+
+    with pytest.raises(ValueError, match='needs `registry`'):
+        canonicalize_shards(p, id_map, tr)
+    result = canonicalize_shards(p, id_map, tr, resolver=RegistryResolver(index), registry=index, pyramid_name='t')
+    (new_key,) = result.written
+    assert new_key != first.key and parse_key(p.keyTemplate, new_key)['hash'] == hashlib_md5(storage.get(new_key))[:10]
+    assert storage.get(first.key) == buf.getvalue()                          # old version untouched (orphan)
+    assert index.lookup('base', '1mo', int(tr[0].timestamp() * 1000)).key == new_key
+    assert _parse_sum(pq.read_table(io.BytesIO(storage.get(new_key))), extra_dim=True)[:2] == [
+        ('c:X', 'a', 0, 5, 50, 500), ('c:X', 'a', 1, 5, 50, 500),
+    ]
+    # Idempotent: a second pass produces identical bytes → the same key, no new object.
+    again = canonicalize_shards(p, id_map, tr, resolver=RegistryResolver(index), registry=index, pyramid_name='t')
+    assert again.written == [new_key]
+    assert sorted(storage.list('p/')) == sorted([first.key, new_key])
+
+
+def hashlib_md5(b: bytes) -> str:
+    import hashlib
+    return hashlib.md5(b).hexdigest()
+
+
+def test_canonicalize_hashless_template_warns_about_in_place_rewrite():
+    storage = MemStorage()
+    p, tr, key, table, layout = _layout_fixture(storage)
+    with pytest.warns(UserWarning, match='rewritten IN PLACE'):
+        canonicalize_shards(p, {'s:A': 'c:X'}, tr)

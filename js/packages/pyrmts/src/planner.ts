@@ -3,7 +3,7 @@
 // re-aggregate. No I/O.
 
 import { addSpan, binsInRange, fixedDurationMs, floorToSpan, nominalMs, parseDuration, shardPeriodsCovering, type ParsedTimeSpan } from './axis.js'
-import { substituteKey } from './keys.js'
+import { substituteKey, templateHasHash } from './keys.js'
 import { validateLadders } from './ladder.js'
 import { encodeWatermarkKey, type RecordedShard } from './shard-index.js'
 import { PlanLimitError, type Bin, type Duration, type PlanLimits, type Pyramid, type Shard, type Tier } from './types.js'
@@ -947,6 +947,12 @@ function shardKeys(
   to: Date,
   filter: Record<string, string | number>,
 ): string[] {
+  if (templateHasHash(pyramid.keyTemplate)) {
+    throw new Error(
+      `planQuery: keyTemplate '${pyramid.keyTemplate}' has a {hash} token, so shard keys cannot be ` +
+      `derived from it — plan from the registry with planQueryFromInventory`,
+    )
+  }
   const periods = shardPeriodsCovering(from, to, shardDur)
   return periods.map(p =>
     substituteKey(pyramid.keyTemplate, {

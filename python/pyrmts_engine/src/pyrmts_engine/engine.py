@@ -96,9 +96,13 @@ import polars as pl
 from pyrmts import (
     ExpectedShard,
     Pyramid,
+    format_period,
     parse_duration,
+    put_shard,
     shard_periods_covering,
-    substitute_key,
+    slot_key,
+    slot_of,
+    template_has_hash,
     write_tier_parquet,
 )
 
@@ -521,10 +525,22 @@ def build_local(
         from .discovery import list_existing_keys
         expected = plan.outputs + plan.skipped_rungs
         listed = list_existing_keys(pyramid, commonprefix([e.key for e in expected]))
-        done = set(listed)
         existing_keys = getattr(shard_index, 'existing_keys', None)
-        if existing_keys is not None:
-            done |= existing_keys()
+        if template_has_hash(pyramid.keyTemplate):
+            # Hashed keys: the registry is the truth for "what's built" (a
+            # LIST may hold several versions of one slot, incl. orphans), and
+            # expected shards are identified by slot key.
+            if existing_keys is None:
+                raise ValueError(
+                    "build_local: a keyTemplate with {hash} needs a shard_index that can list "
+                    "prior records (existing_keys()) — the registry, not a LIST, says what is built"
+                )
+            done = {s for k in existing_keys() if (s := slot_of(pyramid.keyTemplate, k)) is not None}
+            listed = {s for k in listed if (s := slot_of(pyramid.keyTemplate, k)) is not None}
+        else:
+            done = set(listed)
+            if existing_keys is not None:
+                done |= existing_keys()
         missing_src = [e for e in plan.skipped_rungs if e.key not in done]
         missing = [e for e in plan.outputs if e.key not in done]
         result.present_shards = len(plan.outputs) - len(missing)
@@ -545,7 +561,7 @@ def build_local(
                     min(p.end, to)
                     for d in durs
                     for p in shard_periods_covering(from_, to, d)
-                    if substitute_key(
+                    if slot_key(
                         pyramid.keyTemplate,
                         {**(filter or {}), 'tier': src_tier, 'shard': d, 'period': p.label},
                     ) in listed
@@ -664,6 +680,8 @@ def build_local(
                 "records (existing_keys()) — e.g. a JSONL manifest index"
             )
         done = existing_keys()
+        if template_has_hash(pyramid.keyTemplate):
+            done = {s for k in done if (s := slot_of(pyramid.keyTemplate, k)) is not None}
         for name, q in pending.items():
             kept = deque(e for e in q if e.key not in done)
             result.resumed_shards += len(q) - len(kept)
@@ -709,7 +727,13 @@ def build_local(
             kwargs['row_group_size'] = rgs
         n_bytes = write_tier_parquet(wide.to_arrow(), pyramid, out=buf, **kwargs)
         payload = buf.getvalue()
-        pyramid.storage.put(shard.key, payload)
+        # `shard.key` is the slot key; the storage key is derived from the
+        # bytes when the template has {hash} (put-if-absent, never overwrite)
+        # and equals the slot key otherwise (`specs/content-addressed-shards.md`).
+        written = put_shard(pyramid.storage, pyramid.keyTemplate, {
+            **(filter or {}), 'tier': shard.tier, 'shard': shard.shard_dur,
+            'period': format_period(shard.period_start, parse_duration(shard.shard_dur)),
+        }, payload)
         with reg_cond:
             while next_reg != seq:
                 reg_cond.wait()
@@ -719,13 +743,13 @@ def build_local(
                 shard_dur=shard.shard_dur,
                 period_start_ms=_ms(shard.period_start),
                 period_end_ms=_ms(shard.period_end),
-                key=shard.key,
+                key=written.key,
                 written_at_ms=now_ms(),
-                md5=hashlib.md5(payload).hexdigest(),
-                n_bytes=len(payload),
+                md5=written.md5,
+                n_bytes=written.n_bytes,
             ))
             result.written.append(WrittenShard(
-                key=shard.key, tier=shard.tier, shard_dur=shard.shard_dur,
+                key=written.key, tier=shard.tier, shard_dur=shard.shard_dur,
                 rows=wide.height, bytes=n_bytes,
             ))
             next_reg += 1

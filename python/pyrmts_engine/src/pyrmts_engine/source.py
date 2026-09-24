@@ -25,7 +25,7 @@ from typing import Protocol
 import polars as pl
 import pyarrow.parquet as pq
 
-from pyrmts import Pyramid, ShardPeriod, shard_periods_covering, substitute_key
+from pyrmts import Pyramid, ShardPeriod, shard_periods_covering, slot_key, slot_of, template_has_hash
 from .longform import empty_long, long_schema, wide_to_long
 
 
@@ -296,10 +296,17 @@ class WideShardSource(TiledSource):
         return (self.tier.name, self.shard_dur)
 
     def _key(self, dur: str, label: str) -> str:
-        return substitute_key(
+        """The tile's storage key. Hashless template: the template key. Hashed
+        template (`specs/content-addressed-shards.md`): the one listed key of
+        the tile's slot, else the slot key itself (absent → a coverage miss,
+        as for a missing template key)."""
+        slot = slot_key(
             self.pyramid.keyTemplate,
             {**self.filter, 'tier': self.tier.name, 'shard': dur, 'period': label},
         )
+        if not template_has_hash(self.pyramid.keyTemplate):
+            return slot
+        return self._current().get(slot, slot)
 
     def _listed(self) -> set[str]:
         """The tier prefix's LIST result (lazy, once, single-flight)."""
@@ -310,6 +317,26 @@ class WideShardSource(TiledSource):
                     partial = partial.replace('{' + k + '}', str(v))
                 self._listing = set(self.pyramid.storage.list(partial.split('{', 1)[0]))
             return self._listing
+
+    def _current(self) -> dict[str, str]:
+        """Hashed template: slot key → its listed storage key. A slot with
+        several listed versions is ambiguous from a LIST alone (an orphan not
+        yet GC'd next to the current one): refuse rather than guess."""
+        template = self.pyramid.keyTemplate
+        by_slot: dict[str, list[str]] = {}
+        for key in self._listed():
+            slot = slot_of(template, key)
+            if slot is not None:
+                by_slot.setdefault(slot, []).append(key)
+        dupes = {s: sorted(k) for s, k in by_slot.items() if len(k) > 1}
+        if dupes:
+            sample = next(iter(dupes.items()))
+            raise ValueError(
+                f"WideShardSource: {len(dupes)} slot(s) have several versions in storage "
+                f"(e.g. {sample[0]!r}: {sample[1]}) — GC the orphans, or read the source rung "
+                f"through its registry"
+            )
+        return {s: k[0] for s, k in by_slot.items()}
 
     def tile_at(self, at: datetime) -> Tile:
         """The tile to read for instant `at`: the pinned rung's grid

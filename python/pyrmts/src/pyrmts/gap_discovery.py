@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from .axis import add_span, floor_to_span, format_period, parse_duration
-from .keys import substitute_key
+from .keys import slot_key
 from .types import Pyramid, Tier
 
 
@@ -52,7 +52,11 @@ class ExpectedShard:
     # intersects `[effective_start, effective_end)`, not the raw shard period.
     effective_start: datetime
     effective_end: datetime
-    key: str  # pre-substituted keyTemplate path
+    # The slot key: keyTemplate with everything but `{hash}` substituted. For a
+    # hashless template this IS the storage key; for a hashed one the storage
+    # key is only known once the bytes are (`put_shard`), and the registry row
+    # is where readers find it.
+    key: str
 
 
 def list_expected_shards(
@@ -140,7 +144,7 @@ def _make_expected(
 ) -> ExpectedShard:
     span = parse_duration(shard_dur)
     label = format_period(start, span)
-    key = substitute_key(
+    key = slot_key(
         pyramid.keyTemplate,
         {**filter, 'tier': tier.name, 'shard': shard_dur, 'period': label},
     )

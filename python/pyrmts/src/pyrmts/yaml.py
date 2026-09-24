@@ -10,6 +10,7 @@ from typing import Any
 import yaml as _yaml
 
 from .axis import nominal_delta_ms, parse_duration
+from .keys import validate_key_template
 from .types import (
     Axis,
     Dim,
@@ -81,6 +82,7 @@ def parse_pyramid_yaml(text: str) -> PyramidConfig:
     if 'multiScan' in raw and raw['multiScan'] is not None:
         cfg.multi_scan = _parse_multi_scan(raw['multiScan'])
     validate_shard_placeholder(cfg.keyTemplate, cfg.tiers)
+    validate_key_template(cfg.keyTemplate)
     return cfg
 
 
@@ -89,6 +91,7 @@ def pyramid_from_config(cfg: PyramidConfig, storage: Storage) -> Pyramid:
     # `PyramidConfig` (bypassing `parse_pyramid_yaml`) still can't reach
     # downstream fill/serve code with a collision-prone template.
     validate_shard_placeholder(cfg.keyTemplate, cfg.tiers)
+    validate_key_template(cfg.keyTemplate)
     return Pyramid(
         storage=storage,
         keyTemplate=cfg.keyTemplate,

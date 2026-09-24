@@ -19,6 +19,7 @@
 //     - { name: raw, bin: 1min, shards: [1h, 1mo] }
 //     - { name: h1,  bin: 1h,   shards: [1d, 1mo] }
 
+import { validateKeyTemplate } from './keys.js'
 import { parse as parseYaml } from 'yaml'
 import type {
   Axis,
@@ -85,6 +86,7 @@ export function parsePyramidYaml(text: string): PyramidConfig {
     cfg.identityRollup = parseIdentityRollup(root.identityRollup, cfg.geo)
   }
   validateShardPlaceholder(cfg.keyTemplate, cfg.tiers)
+  validateKeyTemplate(cfg.keyTemplate)
   return cfg
 }
 
@@ -186,6 +188,7 @@ function parseIdentityRollup(raw: unknown, geo: GeoSpec | undefined): IdentityRo
 // code with a collision-prone template.
 export function pyramidFromConfig(cfg: PyramidConfig, storage: StorageBackend): Pyramid {
   validateShardPlaceholder(cfg.keyTemplate, cfg.tiers)
+  validateKeyTemplate(cfg.keyTemplate)
   const p: Pyramid = {
     storage,
     keyTemplate: cfg.keyTemplate,

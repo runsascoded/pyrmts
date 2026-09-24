@@ -462,3 +462,78 @@ def test_strict_open_periods_restores_ratio():
         'such holes are expected here (outputs WERE written/registered)'
     )
     assert sorted(r.key for r in index.records) == _expected_keys_open(pyramid)
+
+
+# ── content-hashed keys (`specs/content-addressed-shards.md`)
+
+def test_hashed_template_writes_content_addressed_keys_and_registers_them():
+    """With `{hash:N}` in the keyTemplate the engine derives each shard's key
+    from its bytes, registers that key, and a second build over the same
+    range writes nothing (put-if-absent) while re-registering the same keys."""
+    import hashlib
+
+    from pyrmts import parse_key, slot_of
+
+    pyramid = make_pyramid()
+    pyramid.keyTemplate = pyramid.keyTemplate.replace('.parquet', '.{hash:12}.parquet')
+    write_base_shards(pyramid)
+    index = MemShardIndex()
+    result = build_local(
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
+        pyramid_name='test', shard_index=index,
+    )
+    written = sorted(w.key for w in result.written)
+    assert len(written) == len(EXPECTED_KEYS)
+    for key in written:
+        parsed = parse_key(pyramid.keyTemplate, key)
+        assert parsed is not None and len(parsed['hash']) == 12
+        assert parsed['hash'] == hashlib.md5(pyramid.storage.get(key)).hexdigest()[:12]
+    assert sorted(slot_of(pyramid.keyTemplate, k) for k in written) == [
+        k.replace('.parquet', '.{hash:12}.parquet') for k in EXPECTED_KEYS
+    ]
+    assert sorted(r.key for r in index.records) == written
+    # Byte-identical rebuild: same keys, nothing re-uploaded, registry re-pointed to the same rows.
+    listed_before = sorted(pyramid.storage.list('pyr/'))
+    result2 = build_local(
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
+        pyramid_name='test', shard_index=index,
+    )
+    assert sorted(w.key for w in result2.written) == written
+    assert sorted(pyramid.storage.list('pyr/')) == listed_before
+    assert index.lookup('h', '1d', int(datetime(2026, 1, 7, tzinfo=timezone.utc).timestamp() * 1000)).key.startswith('pyr/h/1d/2026-01-07.')
+
+
+def test_hashed_template_fill_trusts_the_registry_not_the_listing():
+    """`fill=True` on a hashed template treats registry rows as "built": an
+    orphan blob in storage (a previous version) doesn't count, and a registered
+    slot is skipped even though its key can't be derived from the template."""
+    pyramid = make_pyramid()
+    pyramid.keyTemplate = pyramid.keyTemplate.replace('.parquet', '.{hash:12}.parquet')
+    write_base_shards(pyramid)
+    index = MemShardIndex()
+    full = build_local(
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
+        pyramid_name='test', shard_index=index,
+    )
+    # A fill with everything registered builds nothing.
+    again = build_local(
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
+        pyramid_name='test', shard_index=index, fill=True,
+    )
+    assert again.written == [] and again.present_shards == len(full.written)
+    # Drop one slot's registration (keep its blob as an orphan): the fill rebuilds exactly that slot.
+    victim = next(r for r in index.records if r.tier == 'q')
+    index.records = [r for r in index.records if r is not victim]
+    refill = build_local(
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
+        pyramid_name='test', shard_index=index, fill=True,
+    )
+    assert [w.key for w in refill.written] == [victim.key]
+    # The rebuilt bytes are identical, so the orphan simply became current again; no new object.
+    assert sorted(r.key for r in index.records) == sorted(r.key for r in full.written and index.records)
+    from pyrmts_engine.shard_index import NoopShardIndex
+    with pytest.raises(ValueError, match='needs a shard_index that can list'):
+        build_local(
+            pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
+            pyramid_name='test', shard_index=NoopShardIndex(), fill=True,
+        )

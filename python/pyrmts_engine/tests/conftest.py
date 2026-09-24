@@ -30,6 +30,7 @@ from pyrmts import (
     Pyramid,
     Tier,
     shard_periods_covering,
+    put_shard,
     substitute_key,
     write_tier_parquet,
 )
@@ -102,14 +103,13 @@ def write_base_shards(
         s_ms = int(period.start.timestamp() * 1000)
         e_ms = int(period.end.timestamp() * 1000)
         frame = base_wide_frame(s_ms, e_ms)
-        key = substitute_key(
-            pyramid.keyTemplate,
-            {'tier': 'q', 'shard': shard_dur, 'period': period.label},
-        )
         buf = io.BytesIO()
         write_tier_parquet(frame.to_arrow(), pyramid, out=buf)
-        pyramid.storage.put(key, buf.getvalue())
-        keys.append(key)
+        written = put_shard(
+            pyramid.storage, pyramid.keyTemplate,
+            {'tier': 'q', 'shard': shard_dur, 'period': period.label}, buf.getvalue(),
+        )
+        keys.append(written.key)
     return keys
 
 

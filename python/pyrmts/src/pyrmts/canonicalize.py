@@ -187,11 +187,12 @@ def _recanonicalize_additive(
 class CanonicalizeResult:
     written: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    unchanged: list[str] = field(default_factory=list)   # hashed template: bytes and row already current
     errors: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         return (
-            f"canonicalize_shards: wrote {len(self.written)}, "
+            f"canonicalize_shards: wrote {len(self.written)}, unchanged {len(self.unchanged)}, "
             f"skipped {len(self.skipped)}, errors {len(self.errors)}"
         )
 
@@ -269,6 +270,8 @@ def canonicalize_shards(
             buf = io.BytesIO()
             write_tier_parquet(out, pyramid, out=buf, sort=layout.sort, row_group_size=layout.row_group_size)
             written = put_shard(storage_write, pyramid.keyTemplate, values, buf.getvalue())
+            if not written.put and written.key == key:
+                return written.key, 'unchanged'     # same bytes, same row: nothing to register or bump
             if registry is not None:
                 registry.record_shard(_shard_record(pyramid_name or '', tier.name, shard_dur, period, written))
             return written.key, 'written'
@@ -336,6 +339,8 @@ _DEFAULT_LEGACY_ROW_GROUP_SIZE = 4096
 def _record(result: CanonicalizeResult, key: str, status: str) -> None:
     if status == 'written':
         result.written.append(key)
+    elif status == 'unchanged':
+        result.unchanged.append(key)
     elif status == 'skipped':
         result.skipped.append(key)
     else:

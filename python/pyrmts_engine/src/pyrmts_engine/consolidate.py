@@ -444,17 +444,17 @@ def run_extension_fill(
         if invs:
             err(f"invalidations: {len(invs)} journal entries")
     hashed = template_has_hash(pyramid.keyTemplate)
-    registry_keys = None
+    registry_records = None
     if hashed:
-        if shard_index is None or not hasattr(shard_index, 'existing_keys'):
+        if shard_index is None or not hasattr(shard_index, 'current_records'):
             raise ValueError("run_extension_fill: a {hash} keyTemplate needs a `shard_index` that can list its rows")
         if reconcile and not dry_run:
             from .gc import adopt_unregistered
             adopt_unregistered(pyramid, shard_index, pyramid_name, (genesis, now))
-        registry_keys = shard_index.existing_keys()
+        registry_records = shard_index.current_records(pyramid_name)
     gaps, existing, expected_by_tier = discover_gaps(
         pyramid, (genesis, now), stale_before=stale_before,
-        invalidations=invs or None, registry_keys=registry_keys)
+        invalidations=invs or None, registry_records=registry_records)
     if reconcile and shard_index is not None and not dry_run and not hashed:
         reconcile_registrations(expected_by_tier, existing, shard_index, pyramid_name)
     smallest = {t.name: t.shards[0] for t in pyramid.tiers}
@@ -538,9 +538,9 @@ def run_single_gap(
     existing_mtimes = list_existing_with_mtime(pyramid)
     hashed = template_has_hash(pyramid.keyTemplate)
     if hashed:
-        if shard_index is None or not hasattr(shard_index, 'existing_keys'):
+        if shard_index is None or not hasattr(shard_index, 'current_records'):
             raise ValueError("run_single_gap: a {hash} keyTemplate needs a `shard_index` that can list its rows")
-        current = registry_key_set(pyramid, shard_index.existing_keys())
+        current = registry_key_set(pyramid, shard_index.current_records(pyramid_name))
         existing_mtimes = {slot: existing_mtimes.get(current.key(slot)) for slot in current}
     fresh_set, stale = split_stale(existing_mtimes, stale_before)
     fresh = current - stale if hashed else KeySet(fresh_set)

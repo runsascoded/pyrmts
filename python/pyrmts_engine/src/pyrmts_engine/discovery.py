@@ -14,10 +14,10 @@ reconciliation is a separate concern (`consolidate.run_extension_fill`'s
 from __future__ import annotations
 
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import partial
 
-from pyrmts import ExpectedShard, Pyramid, list_expected_shards, slot_of, template_has_hash
+from pyrmts import ExpectedShard, Pyramid, format_period, list_expected_shards, parse_duration, slot_key, slot_of_any, template_has_hash
 
 from .invalidation import Invalidation, stale_keys_for
 from .plan import _approx_ms
@@ -83,15 +83,36 @@ class KeySet:
         return self
 
 
-def registry_key_set(pyramid: Pyramid, registry_keys: set[str]) -> KeySet:
-    """The registry's current keys as a `KeySet` (hashed templates: the only
-    truth for what is built; a LIST may hold orphans)."""
+def slot_for_record(pyramid: Pyramid, record, filter: dict | None = None) -> str | None:
+    """A registry row's slot key. From the row's own fields (tier, shard_dur,
+    period_start) — so a legacy `…/{period}.parquet` row and a hashed one map
+    alike, and a lazy migration never mistakes an unmigrated slot for a gap.
+    Templates with extra placeholders take them from `filter`, else fall back
+    to parsing the row's key (hashed or legacy shape, `slot_of_any`)."""
     template = pyramid.keyTemplate
+    period = format_period(
+        record.period_start_ms if isinstance(record.period_start_ms, datetime) else _dt(record.period_start_ms),
+        parse_duration(record.shard_dur),
+    )
+    try:
+        return slot_key(template, {**(filter or {}), 'tier': record.tier, 'shard': record.shard_dur, 'period': period})
+    except KeyError:
+        return slot_of_any(template, record.key)
+
+
+def _dt(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc)
+
+
+def registry_key_set(pyramid: Pyramid, records, filter: dict | None = None) -> KeySet:
+    """The registry's current rows as a `KeySet` (hashed templates: the only
+    truth for what is built; a LIST may hold orphans). Slots come from the
+    rows' fields, so legacy-keyed rows count as present."""
     out = KeySet(hashed=True)
-    for key in registry_keys:
-        slot = slot_of(template, key)
+    for r in records:
+        slot = slot_for_record(pyramid, r, filter)
         if slot is not None:
-            out.add(slot, key)
+            out.add(slot, r.key)
     return out
 
 
@@ -187,7 +208,7 @@ def discover_gaps(
     filter: dict | None = None,
     stale_before: datetime | None = None,
     invalidations: list[Invalidation] | None = None,
-    registry_keys: set[str] | None = None,
+    registry_records=None,
 ) -> tuple[list[ExpectedShard], KeySet, dict[str, list[ExpectedShard]]]:
     """End-to-end discovery: enumerate expected → LIST storage → diff →
     sort. Returns `(gaps_in_fill_order, existing_key_set,
@@ -215,12 +236,12 @@ def discover_gaps(
         # Content-hashed keys: the registry says what is built; the LIST only
         # supplies mtimes for staleness (orphans it holds are `gc` / `adopt`'s
         # business, not a fill's).
-        if registry_keys is None:
+        if registry_records is None:
             raise ValueError(
-                "discover_gaps: a keyTemplate with {hash} needs `registry_keys` — the registry, "
+                "discover_gaps: a keyTemplate with {hash} needs `registry_records` — the registry, "
                 "not a LIST, says which shards are built"
             )
-        current = registry_key_set(pyramid, registry_keys)
+        current = registry_key_set(pyramid, registry_records, filter)
         existing_mtimes = {slot: existing_mtimes.get(current.key(slot)) for slot in current}
     existing_set, stale = split_stale(existing_mtimes, stale_before)
     existing = current - stale if hashed else KeySet(existing_set)

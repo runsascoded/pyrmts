@@ -42,20 +42,37 @@ class ShardIndex(Protocol):
     def record_shard(self, record: ShardRecord) -> None: ...
 
 
-Slot = tuple[str, str, int]   # (tier, shard_dur, period_start_ms)
+Slot = tuple[str, str, str, int]   # (pyramid, tier, shard_dur, period_start_ms) — the D1 table's PK
 
 
 def _slot(record: ShardRecord) -> Slot:
-    return (record.tier, record.shard_dur, record.period_start_ms)
+    return (record.pyramid, record.tier, record.shard_dur, record.period_start_ms)
 
 
-def _current(records: list[ShardRecord]) -> dict[Slot, ShardRecord]:
+def _current(records: list[ShardRecord], pyramid: str | None = None) -> dict[Slot, ShardRecord]:
     """Latest record per slot (append-only manifests: the last row wins, which
-    is the `INSERT OR REPLACE` semantics of the D1 table)."""
+    is the `INSERT OR REPLACE` semantics of the D1 table, keyed exactly like
+    its PK — so one manifest can hold several pyramids, and multi-tenant
+    layouts that put a dim in the key must use one pyramid name per tenant, as
+    D1 already requires). `pyramid` scopes the result to one pyramid."""
     out: dict[Slot, ShardRecord] = {}
     for r in records:
-        out[_slot(r)] = r
+        if pyramid is None or r.pyramid == pyramid:
+            out[_slot(r)] = r
     return out
+
+
+def _lookup(records: list[ShardRecord], tier: str, shard_dur: str, period_start_ms: int, pyramid: str | None) -> ShardRecord | None:
+    current = _current(records, pyramid)
+    if pyramid is not None:
+        return current.get((pyramid, tier, shard_dur, period_start_ms))
+    hits = [r for (p, t, d, ps), r in current.items() if (t, d, ps) == (tier, shard_dur, period_start_ms)]
+    if len(hits) > 1:
+        raise ValueError(
+            f"lookup({tier!r}, {shard_dur!r}, {period_start_ms}): rows for {len(hits)} pyramids "
+            f"({sorted(r.pyramid for r in hits)}) — pass `pyramid`"
+        )
+    return hits[0] if hits else None
 
 
 def _record_from_row(row: dict, pyramid: str | None = None) -> ShardRecord:
@@ -75,11 +92,13 @@ def _record_from_row(row: dict, pyramid: str | None = None) -> ShardRecord:
 @dataclass(frozen=True)
 class RegistryResolver:
     """`pyrmts.KeyResolver` over a registry: a slot's current key is its row's
-    `key` — the only truth once keys carry a content hash."""
+    `key` — the only truth once keys carry a content hash. `pyramid` scopes
+    the lookup (required when the index holds several pyramids)."""
     index: object   # any ShardIndex with `lookup`
+    pyramid: str | None = None
 
     def resolve(self, tier: str, shard_dur: str, period_start_ms: int, period_label: str, filter) -> str | None:
-        rec = self.index.lookup(tier, shard_dur, period_start_ms)
+        rec = self.index.lookup(tier, shard_dur, period_start_ms, pyramid=self.pyramid)
         return None if rec is None else rec.key
 
 
@@ -112,32 +131,49 @@ class MemShardIndex:
     def record_shard(self, record: ShardRecord) -> None:
         self.records.append(record)
 
-    def existing_keys(self) -> set[str]:
-        return {r.key for r in _current(self.records).values()}
+    def current_records(self, pyramid: str | None = None) -> list[ShardRecord]:
+        return list(_current(self.records, pyramid).values())
 
-    def lookup(self, tier: str, shard_dur: str, period_start_ms: int) -> ShardRecord | None:
-        return _current(self.records).get((tier, shard_dur, period_start_ms))
+    def existing_keys(self, pyramid: str | None = None) -> set[str]:
+        return {r.key for r in self.current_records(pyramid)}
+
+    def lookup(self, tier: str, shard_dur: str, period_start_ms: int, pyramid: str | None = None) -> ShardRecord | None:
+        return _lookup(self.records, tier, shard_dur, period_start_ms, pyramid)
 
 
 class JsonlShardIndex:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._cache = None
 
     def record_shard(self, record: ShardRecord) -> None:
         with open(self.path, 'a') as f:
             f.write(json.dumps(_row(record)) + '\n')
+        if self._cache is not None:
+            self._cache.append(record)
+
+    _cache: list[ShardRecord] | None = None
 
     def _records(self) -> list[ShardRecord]:
-        if not self.path.exists():
-            return []
-        return [_record_from_row(json.loads(line)) for line in self.path.read_text().splitlines() if line]
+        # Parsed once per index instance (a canonicalize / cascade pass looks
+        # up every slot); `record_shard` appends to the cache, so it stays
+        # exact for this writer. Another writer's rows appear on the next instance.
+        if self._cache is None:
+            if not self.path.exists():
+                self._cache = []
+            else:
+                self._cache = [_record_from_row(json.loads(line)) for line in self.path.read_text().splitlines() if line]
+        return self._cache
 
-    def existing_keys(self) -> set[str]:
-        return {r.key for r in _current(self._records()).values()}
+    def current_records(self, pyramid: str | None = None) -> list[ShardRecord]:
+        return list(_current(self._records(), pyramid).values())
 
-    def lookup(self, tier: str, shard_dur: str, period_start_ms: int) -> ShardRecord | None:
-        return _current(self._records()).get((tier, shard_dur, period_start_ms))
+    def existing_keys(self, pyramid: str | None = None) -> set[str]:
+        return {r.key for r in self.current_records(pyramid)}
+
+    def lookup(self, tier: str, shard_dur: str, period_start_ms: int, pyramid: str | None = None) -> ShardRecord | None:
+        return _lookup(self._records(), tier, shard_dur, period_start_ms, pyramid)
 
 
 class StorageJsonlShardIndex:
@@ -165,11 +201,14 @@ class StorageJsonlShardIndex:
     def _records(self) -> list[ShardRecord]:
         return [_record_from_row(json.loads(line)) for line in self._lines]
 
-    def existing_keys(self) -> set[str]:
-        return {r.key for r in _current(self._records()).values()}
+    def current_records(self, pyramid: str | None = None) -> list[ShardRecord]:
+        return list(_current(self._records(), pyramid).values())
 
-    def lookup(self, tier: str, shard_dur: str, period_start_ms: int) -> ShardRecord | None:
-        return _current(self._records()).get((tier, shard_dur, period_start_ms))
+    def existing_keys(self, pyramid: str | None = None) -> set[str]:
+        return {r.key for r in self.current_records(pyramid)}
+
+    def lookup(self, tier: str, shard_dur: str, period_start_ms: int, pyramid: str | None = None) -> ShardRecord | None:
+        return _lookup(self._records(), tier, shard_dur, period_start_ms, pyramid)
 
     def record_shard(self, record: ShardRecord) -> None:
         self._lines.append(json.dumps(_row(record)))
@@ -205,27 +244,28 @@ class D1ShardIndex:
         self.table = table
         self.pyramid = pyramid
 
-    def existing_keys(self) -> set[str]:
-        if self.pyramid is None:
-            raise ValueError("D1ShardIndex.existing_keys() needs `pyramid` (row scope)")
+    def current_records(self, pyramid: str | None = None) -> list[ShardRecord]:
+        pyramid = pyramid or self.pyramid
+        if pyramid is None:
+            raise ValueError("D1ShardIndex.current_records() needs `pyramid` (row scope)")
         from pyrmts.d1 import d1_query
-        rows = d1_query(
-            f'SELECT key FROM {self.table} WHERE pyramid = ?',
-            [self.pyramid],
-            database_id=self.database_id,
-        )
-        return {r['key'] for r in rows}
+        rows = d1_query(f'SELECT * FROM {self.table} WHERE pyramid = ?', [pyramid], database_id=self.database_id)
+        return [_record_from_row(r, pyramid) for r in rows]
 
-    def lookup(self, tier: str, shard_dur: str, period_start_ms: int) -> ShardRecord | None:
-        if self.pyramid is None:
+    def existing_keys(self, pyramid: str | None = None) -> set[str]:
+        return {r.key for r in self.current_records(pyramid)}
+
+    def lookup(self, tier: str, shard_dur: str, period_start_ms: int, pyramid: str | None = None) -> ShardRecord | None:
+        pyramid = pyramid or self.pyramid
+        if pyramid is None:
             raise ValueError("D1ShardIndex.lookup() needs `pyramid` (row scope)")
         from pyrmts.d1 import d1_query
         rows = d1_query(
             f'SELECT * FROM {self.table} WHERE pyramid = ? AND tier = ? AND shard_dur = ? AND period_start = ?',
-            [self.pyramid, tier, shard_dur, period_start_ms],
+            [pyramid, tier, shard_dur, period_start_ms],
             database_id=self.database_id,
         )
-        return _record_from_row(rows[0], self.pyramid) if rows else None
+        return _record_from_row(rows[0], pyramid) if rows else None
 
     def record_shard(self, record: ShardRecord) -> None:
         from pyrmts.d1 import register_shard

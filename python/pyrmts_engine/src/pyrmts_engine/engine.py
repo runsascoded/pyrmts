@@ -101,12 +101,13 @@ from pyrmts import (
     put_shard,
     shard_periods_covering,
     slot_key,
-    slot_of,
+    slot_of_any,
     template_has_hash,
     write_tier_parquet,
 )
 
 from .longform import long_to_wide, rebin_long
+from .discovery import registry_key_set
 from .plan import UNIT_MS, _divides, bin_floor_expr, compile_plan
 from .shard_index import NoopShardIndex, ShardIndex, ShardRecord, now_ms
 from .source import Source, Tile
@@ -530,13 +531,14 @@ def build_local(
             # Hashed keys: the registry is the truth for "what's built" (a
             # LIST may hold several versions of one slot, incl. orphans), and
             # expected shards are identified by slot key.
-            if existing_keys is None:
+            current_records = getattr(shard_index, 'current_records', None)
+            if current_records is None:
                 raise ValueError(
                     "build_local: a keyTemplate with {hash} needs a shard_index that can list "
-                    "prior records (existing_keys()) — the registry, not a LIST, says what is built"
+                    "prior records (current_records()) — the registry, not a LIST, says what is built"
                 )
-            done = {s for k in existing_keys() if (s := slot_of(pyramid.keyTemplate, k)) is not None}
-            listed = {s for k in listed if (s := slot_of(pyramid.keyTemplate, k)) is not None}
+            done = set(registry_key_set(pyramid, current_records(pyramid_name), filter))
+            listed = {s for k in listed if (s := slot_of_any(pyramid.keyTemplate, k)) is not None}
         else:
             done = set(listed)
             if existing_keys is not None:
@@ -681,7 +683,7 @@ def build_local(
             )
         done = existing_keys()
         if template_has_hash(pyramid.keyTemplate):
-            done = {s for k in done if (s := slot_of(pyramid.keyTemplate, k)) is not None}
+            done = set(registry_key_set(pyramid, shard_index.current_records(pyramid_name), filter))
         for name, q in pending.items():
             kept = deque(e for e in q if e.key not in done)
             result.resumed_shards += len(q) - len(kept)

@@ -195,7 +195,7 @@ def canonicalize(
     else:
         raise SystemExit("canonicalize: need an `identityRollup` or `geo` block to resolve the vocab column")
     id_map = _load_id_map(pyramid, map_override)
-    registry = _open_registry(manifest)
+    registry = _open_registry(manifest, pyramid_name)
     from .shard_index import RegistryResolver
     result = canonicalize_shards(
         pyramid, id_map, _parse_range(range_),
@@ -205,7 +205,7 @@ def canonicalize(
         filter=_parse_filters(filters),
         sort=sort_csv.split(',') if sort_csv else None,
         row_group_size=rg_size,
-        resolver=RegistryResolver(registry) if registry is not None else None,
+        resolver=RegistryResolver(registry, pyramid_name) if registry is not None else None,
         registry=registry,
         pyramid_name=pyramid_name,
     )
@@ -445,23 +445,31 @@ def multiscan_seal(
     err(f"multiscan seal: wrote {len(written)} archive(s), {p.scheme} ({detail}), dataset {p.dataset}, {engine}")
 
 
-def _open_registry(manifest: str | None):
-    """A shard registry from a JSONL manifest path or `s3://bucket/key`; None when not given."""
-    if manifest is None:
+def _open_registry(spec: str | None, pyramid_name: str | None = None):
+    """A shard registry: a JSONL manifest path, `s3://bucket/key` (JSONL on
+    S3/R2), or `d1://<database-id>[/<table>]` (Cloudflare D1 over REST, env
+    `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN`; scoped to
+    `pyramid_name`). None when not given."""
+    if spec is None:
         return None
-    if manifest.startswith('s3://'):
-        bucket, _, key = manifest[len('s3://'):].partition('/')
+    if spec.startswith('d1://'):
+        from .shard_index import D1ShardIndex
+        database_id, _, table = spec[len('d1://'):].partition('/')
+        return D1ShardIndex(database_id=database_id or None, table=table or 'pyramid_shards', pyramid=pyramid_name)
+    if spec.startswith('s3://'):
+        bucket, _, key = spec[len('s3://'):].partition('/')
         return StorageJsonlShardIndex(S3Storage(bucket=bucket), key)
-    return JsonlShardIndex(manifest)
+    return JsonlShardIndex(spec)
 
 
 @cli.command()
 @option('-a', '--apply', is_flag=True, help="Delete (default: dry-run, list what would be deleted)")
 @option('-G', '--grace', type=float, default=24.0, help="Hours an orphan must be older than to be deleted (default 24: in-flight reads + edge cache TTL)")
-@option('-i', '--index', 'manifest', required=True, help="Shard registry: JSONL manifest path or s3://bucket/key")
+@option('-i', '--index', 'manifest', required=True, help="Shard registry: JSONL manifest path, s3://bucket/key, or d1://<database-id>[/<table>]")
+@option('-n', '--pyramid-name', required=True, help="Pyramid whose rows say what is current")
 @option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
 @argument('config')
-def gc(apply: bool, grace: float, manifest: str, fs_root: str | None, config: str) -> None:
+def gc(apply: bool, grace: float, manifest: str, pyramid_name: str, fs_root: str | None, config: str) -> None:
     """Delete blobs under the pyramid's prefix that no registry row references
     (content-hashed keys leave the previous version behind on every rewrite)
     once older than the grace period. `specs/content-addressed-shards.md`."""
@@ -470,15 +478,15 @@ def gc(apply: bool, grace: float, manifest: str, fs_root: str | None, config: st
     from .gc import gc_orphans
 
     pyramid = _load_pyramid(config, fs_root)
-    registry = _open_registry(manifest)
-    result = gc_orphans(pyramid, registry.existing_keys(), grace=timedelta(hours=grace), apply=apply)
+    registry = _open_registry(manifest, pyramid_name)
+    result = gc_orphans(pyramid, registry, pyramid_name, grace=timedelta(hours=grace), apply=apply)
     for key in result.deleted:
         print(key)
     err(result.summary())
 
 
 @cli.command()
-@option('-i', '--index', 'manifest', required=True, help="Shard registry: JSONL manifest path or s3://bucket/key")
+@option('-i', '--index', 'manifest', required=True, help="Shard registry: JSONL manifest path, s3://bucket/key, or d1://<database-id>[/<table>]")
 @option('-n', '--pyramid-name', required=True, help="Pyramid name for shard registration")
 @option('-R', '--fs-root', help="Use filesystem storage rooted here (instead of the config's storage block)")
 @option('-r', '--range', 'range_', required=True, help="Half-open range of expected shards to check, <from-iso>/<to-iso> (UTC)")
@@ -490,7 +498,7 @@ def adopt(manifest: str, pyramid_name: str, fs_root: str | None, range_: str, co
     from .gc import adopt_unregistered
 
     pyramid = _load_pyramid(config, fs_root)
-    registry = _open_registry(manifest)
+    registry = _open_registry(manifest, pyramid_name)
     adopted = adopt_unregistered(pyramid, registry, pyramid_name, _parse_range(range_))
     for rec in adopted:
         print(rec.key)
@@ -747,7 +755,7 @@ def build(
             raise SystemExit(f"invalid --source {source_spec!r} (want module:attr)")
         source = getattr(import_module(mod_name), attr)(pyramid, filter_)
     else:
-        source = WideShardSource(pyramid, tier_name=source_tier, shard_dur=source_shard, filter=filter_)
+        source = None   # built below, once the registry is open (a hashed template resolves source tiles through it)
     if manifest is None:
         if resume:
             raise SystemExit("-u/--resume needs -m/--manifest (prior records are what get skipped)")
@@ -757,6 +765,11 @@ def build(
         shard_index = StorageJsonlShardIndex(S3Storage(bucket=bucket), key)
     else:
         shard_index = JsonlShardIndex(manifest)
+    if source is None:
+        source = WideShardSource(
+            pyramid, tier_name=source_tier, shard_dur=source_shard, filter=filter_,
+            registry=None if manifest is None else shard_index, pyramid_name=pyramid_name,
+        )
     try:
         result = build_local(
             pyramid,

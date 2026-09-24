@@ -141,18 +141,33 @@ export function shardKey(
   })
 }
 
-// A response ETag for a query served from a set of shard keys. With
-// content-hashed keys a shard's bytes never change under its key, so the set
-// of keys a response was built from identifies the response: serve with a
-// short `max-age` + revalidation, and a rewrite (registry swap) changes the
-// tag. Order-independent, and a version prefix so a format change
+// A response ETag for a query served from a set of shards. With content-hashed
+// keys a shard's bytes never change under its key, so the keys alone identify
+// the response; a legacy (mutable) key needs its row's md5 or written_at mixed
+// in, or an in-place rewrite would keep the tag and serve a stale 304. Pass
+// `{ key, md5?, writtenAt? }` entries during a migration. Order-independent,
+// 64 bits (two FNV-1a lanes), with a version prefix so a format change
 // invalidates every cached tag at once.
-export function keysEtag(keys: Iterable<string>, version = 1): string {
-  const sorted = [...keys].sort()
-  let h = 0x811c9dc5
-  for (const ch of `${version}\u0000${sorted.join('\u0000')}`) {
-    h ^= ch.charCodeAt(0)
-    h = Math.imul(h, 0x01000193) >>> 0
+export interface EtagEntry {
+  key: string
+  md5?: string
+  writtenAt?: Date | number
+}
+
+export function keysEtag(entries: Iterable<string | EtagEntry>, version = 1): string {
+  const parts = [...entries].map(e => {
+    if (typeof e === 'string') return e
+    const at = e.writtenAt instanceof Date ? e.writtenAt.getTime() : e.writtenAt
+    return `${e.key}#${e.md5 ?? ''}#${at ?? ''}`
+  }).sort()
+  const text = `${version}\u0000${parts.join('\u0000')}`
+  let h1 = 0x811c9dc5
+  let h2 = 0x01000193 ^ 0x811c9dc5
+  for (const ch of text) {
+    const c = ch.charCodeAt(0)
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0
+    h2 = Math.imul(h2 ^ c, 0x01000193) >>> 0
+    h2 = ((h2 << 13) | (h2 >>> 19)) >>> 0
   }
-  return `"v${version}-${sorted.length}-${h.toString(16).padStart(8, '0')}"`
+  return `"v${version}-${parts.length}-${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}"`
 }

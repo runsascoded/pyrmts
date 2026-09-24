@@ -474,17 +474,75 @@ def test_adopt_and_gc_orphans():
     # A second, superseded version of another slot: orphan by construction.
     other = next(r for r in index.records if r.tier == 'h')
     stale = put_shard_slot(pyramid.storage, pyramid.keyTemplate, other.key.replace(other.key.split('.')[-2], '{hash:10}'), b'not a real shard')
-    orphans = {o.key for o in list_orphans(pyramid, index.existing_keys())}
-    assert victim.key in orphans and stale.key in orphans
+    # The ingest tiles (q@6h ×6) are hashed blobs without rows too, so they list as orphans as well.
+    ingest = sorted(k for k in pyramid.storage.list('pyr/q/6h/'))
+    assert sorted(o.key for o in list_orphans(pyramid, index.existing_keys())) == sorted([victim.key, stale.key, *ingest])
     adopted = adopt_unregistered(pyramid, index, 'test', (FROM, TO))
-    assert [a.key for a in adopted] == [victim.key]                       # the q@6h rows were adopted in _hashed_ladder? no: here
+    assert [a.key for a in adopted] == [victim.key]                        # the only EXPECTED slot without a row
     assert index.lookup(victim.tier, victim.shard_dur, victim.period_start_ms).key == victim.key
     # gc: dry-run lists, apply deletes; the grace period protects young blobs.
     now = datetime.now(timezone.utc)
-    dry = gc_orphans(pyramid, index.existing_keys(), grace=timedelta(0), now=now + timedelta(seconds=1))
-    assert dry.dry_run and stale.key in dry.deleted and pyramid.storage.get(stale.key) is not None
-    young = gc_orphans(pyramid, index.existing_keys(), grace=timedelta(hours=24), now=now, apply=True)
-    assert young.deleted == [] and stale.key in young.kept_young
-    old = gc_orphans(pyramid, index.existing_keys(), grace=timedelta(0), now=now + timedelta(seconds=1), apply=True)
-    assert stale.key in old.deleted and pyramid.storage.get(stale.key) is None
+    dry = gc_orphans(pyramid, index, 'test', grace=timedelta(0), now=now + timedelta(seconds=1))
+    assert dry.dry_run and sorted(dry.deleted) == sorted([stale.key, *ingest]) and pyramid.storage.get(stale.key) is not None
+    young = gc_orphans(pyramid, index, 'test', grace=timedelta(hours=24), now=now, apply=True)
+    assert young.deleted == [] and sorted(young.kept_young) == sorted([stale.key, *ingest])
+    old = gc_orphans(pyramid, index, 'test', grace=timedelta(0), now=now + timedelta(seconds=1), apply=True)
+    assert sorted(old.deleted) == sorted([stale.key, *ingest]) and pyramid.storage.get(stale.key) is None
     assert pyramid.storage.get(victim.key) is not None                     # registered again → not an orphan
+
+
+def test_gc_refuses_hashless_templates_and_empty_registries_and_keeps_repointed_blobs():
+    from datetime import timedelta
+
+    from pyrmts import put_shard_slot
+    from pyrmts_engine import gc_orphans
+    from pyrmts_engine.shard_index import MemShardIndex
+
+    plain = build_base_ladder()
+    with pytest.raises(ValueError, match='no {hash} token'):
+        gc_orphans(plain, MemShardIndex(), 'test')
+    pyramid, index = _hashed_ladder()
+    with pytest.raises(ValueError, match='no rows for this pyramid'):
+        gc_orphans(pyramid, MemShardIndex(), 'test', apply=True)
+    # A slot re-pointed at an old orphan between the listing and the delete is kept:
+    # simulate with a registry whose rows change on the second read.
+    victim = next(r for r in index.records if r.tier == 'd')
+    orphan = put_shard_slot(pyramid.storage, pyramid.keyTemplate, victim.key.replace(victim.key.split('.')[-2], '{hash:10}'), b'old version')
+
+    class Repointing(MemShardIndex):
+        reads = 0
+        def current_records(self, pyramid=None):
+            self.reads += 1
+            if self.reads >= 2:      # the re-read right before deleting sees the swap
+                return [r for r in super().current_records(pyramid) if r is not victim] + [
+                    replace(victim, key=orphan.key)
+                ]
+            return super().current_records(pyramid)
+
+    reg = Repointing(records=list(index.records))
+    far = datetime.now(timezone.utc) + timedelta(days=2)
+    res = gc_orphans(pyramid, reg, 'test', grace=timedelta(0), now=far, apply=True)
+    assert orphan.key in res.kept_repointed and orphan.key not in res.deleted
+    assert pyramid.storage.get(orphan.key) == b'old version'
+
+
+def test_adopt_registers_a_newer_orphan_for_a_slot_that_already_has_a_row():
+    """A rewrite whose registration was lost: the slot has a row, and a newer
+    hashed blob exists; adopt re-points the row at the newer blob."""
+    import io
+
+    import pyarrow.parquet as pq
+
+    from pyrmts import put_shard_slot, write_tier_parquet
+    from pyrmts_engine import adopt_unregistered
+
+    pyramid, index = _hashed_ladder()
+    row = next(r for r in index.records if r.tier == 'd')
+    t = pq.read_table(io.BytesIO(pyramid.storage.get(row.key)))
+    buf = io.BytesIO()
+    write_tier_parquet(t.slice(0, max(1, t.num_rows - 1)), pyramid, out=buf)      # a legitimately different rewrite
+    newer = put_shard_slot(pyramid.storage, pyramid.keyTemplate, row.key.replace(row.key.split('.')[-2], '{hash:10}'), buf.getvalue())
+    assert newer.put and newer.key != row.key
+    adopted = adopt_unregistered(pyramid, index, 'test', (FROM, TO))
+    assert [a.key for a in adopted] == [newer.key]
+    assert index.lookup(row.tier, row.shard_dur, row.period_start_ms).key == newer.key

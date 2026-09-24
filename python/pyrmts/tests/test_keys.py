@@ -60,19 +60,23 @@ def test_hash_token_full_and_truncated():
     v = {'tier': 'base', 'shard': '1mo', 'period': '2026-01', 'hash': MD5}
     assert substitute_key('blobs/{hash}.parquet', v) == f'blobs/{MD5}.parquet'
     assert substitute_key(T, v) == f'rides/base/1mo/2026-01.{MD5[:12]}.parquet'
-    assert substitute_key('{hash:1}', v) == MD5[:1]
-    assert substitute_key('{hash:32}', v) == MD5
+    assert substitute_key('{tier}/{hash:8}', v) == f'base/{MD5[:8]}'
+    assert substitute_key('{tier}/{hash:32}', v) == f'base/{MD5}'
 
 
 def test_hash_token_validation():
-    with pytest.raises(ValueError, match=r'\{hash:0\} must be 1\.\.32'):
-        validate_key_template('x/{hash:0}')
-    with pytest.raises(ValueError, match=r'\{hash:33\} must be 1\.\.32'):
-        validate_key_template('x/{hash:33}')
+    with pytest.raises(ValueError, match=r'\{hash:4\} must be 8\.\.32'):
+        validate_key_template('x/{tier}/{hash:4}')
+    with pytest.raises(ValueError, match=r'\{hash:33\} must be 8\.\.32'):
+        validate_key_template('x/{tier}/{hash:33}')
+    with pytest.raises(ValueError, match='needs the full'):
+        validate_key_template('blobs/{hash:12}.parquet')          # pure content-addressed: unique across all payloads
+    with pytest.raises(ValueError, match='at most one'):
+        validate_key_template('{tier}/{hash:8}/{hash}.parquet')
     with pytest.raises(ValueError, match=r'`:8` is only defined for \{hash\}'):
         validate_key_template('x/{period:8}')
     with pytest.raises(ValueError, match='wants a 32-char md5 hex'):
-        substitute_key('{hash:8}', {'hash': 'nope'})
+        substitute_key('{tier}/{hash:8}', {'tier': 't', 'hash': 'nope'})
     with pytest.raises(KeyError, match=r'\{hash\}'):
         substitute_key(T, {'tier': 'base', 'shard': '1mo', 'period': '2026-01'})
     assert template_has_hash(T) and not template_has_hash('rides/{tier}/{period}.parquet')
@@ -86,7 +90,7 @@ def test_slot_key_keeps_the_hash_placeholder():
 
 def test_key_pattern_parse_and_slot_of():
     key = f'rides/base/1mo/2026-01.{MD5[:12]}.parquet'
-    assert key_pattern(T).pattern == r'^rides/(?P<tier>[^/]+)/(?P<shard>[^/]+)/(?P<period>[^/]+)\.(?P<hash>[0-9a-f]{12})\.parquet$'
+    assert key_pattern(T).pattern == r'^rides/(?P<tier>[^/]+)/(?P<shard>[^/]+)/(?P<period>[^/]+)\.(?P<hash>[0-9a-f]{12})\.parquet\Z'
     assert parse_key(T, key) == {'tier': 'base', 'shard': '1mo', 'period': '2026-01', 'hash': MD5[:12]}
     assert parse_key(T, 'rides/base/1mo/2026-01.parquet') is None                    # legacy key: no hash
     assert parse_key(T, f'rides/base/1mo/2026-01.{MD5[:11]}.parquet') is None         # wrong width
@@ -142,3 +146,37 @@ def test_slot_values_put_shard_slot_and_listed_slots():
     put_shard_slot(s, T, slot, b'payload v2')                                         # a second version → ambiguous
     with pytest.raises(ValueError, match='several versions'):
         listed_slots(s, T)
+
+
+def test_legacy_template_and_slot_of_any():
+    from pyrmts import legacy_template, slot_of_any
+
+    assert legacy_template(T) == 'rides/{tier}/{shard}/{period}.parquet'
+    assert legacy_template('a/{period}-{hash:8}.parquet') == 'a/{period}.parquet'
+    assert legacy_template('a/{period}/{hash}') is None                 # no separator to drop
+    assert legacy_template('blobs/{hash}.parquet') is None
+    assert legacy_template('rides/{tier}/{period}.parquet') is None
+    legacy_key = 'rides/base/1mo/2026-01.parquet'
+    hashed_key = f'rides/base/1mo/2026-01.{MD5[:12]}.parquet'
+    assert slot_of_any(T, legacy_key) == slot_of_any(T, hashed_key) == 'rides/base/1mo/2026-01.{hash:12}.parquet'
+    assert slot_of_any(T, 'other/x.parquet') is None
+
+
+def test_put_shard_detects_a_prefix_collision_via_the_backend_md5_etag():
+    """S3/R2 single-part etags are the md5: a HEAD hit whose etag differs from
+    the payload's md5 is a truncated-hash collision, not a skippable duplicate."""
+    class Md5EtagStorage(MemStorage):
+        def head(self, key):
+            h = super().head(key)
+            if h is None:
+                return None
+            import hashlib
+            return {**h, 'etag': '"' + hashlib.md5(self.get(key)).hexdigest() + '"'}
+
+    s = Md5EtagStorage()
+    v = {'tier': 'base', 'shard': '1mo', 'period': '2026-01'}
+    w = put_shard(s, T, v, b'payload')
+    assert put_shard(s, T, v, b'payload').put is False                  # genuine duplicate: etag == md5
+    s.put(w.key, b'different bytes, same key')                           # simulate a collision
+    with pytest.raises(ValueError, match='prefix collision'):
+        put_shard(s, T, v, b'payload')

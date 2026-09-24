@@ -199,7 +199,7 @@ def test_canonicalize_adds_summed_canonical_rows(tmp_path: Path):
     config, data, pyr, key = _canon_setup(tmp_path)
     result = CliRunner().invoke(cli, ['canonicalize', '-r', CANON_RANGE, '-R', str(data), str(config)])
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == 'canonicalize_shards: wrote 1, skipped 0, errors 0'
+    assert result.output.strip() == 'canonicalize_shards: wrote 1, unchanged 0, skipped 0, errors 0'
     assert _canon_rows(pyr, key) == [
         ('c:X', 0, 5),   # s:A + s:B
         ('s:A', 0, 3),

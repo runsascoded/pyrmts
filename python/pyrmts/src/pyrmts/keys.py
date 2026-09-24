@@ -24,13 +24,24 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-_PLACEHOLDER = re.compile(r'\{(\w+)(?::(\d+))?\}')
+_PLACEHOLDER = re.compile(r'\{([A-Za-z0-9_]+)(?::([0-9]+))?\}')   # ASCII, like the TS twin
 HASH = 'hash'
 MD5_HEX_LEN = 32
+#: Fewer hex chars than this and a prefix collision between two versions of one
+#: slot stops being negligible (`put_shard` would skip the upload and register
+#: a key whose bytes differ from the recorded md5).
+MIN_HASH_WIDTH = 8
 
 
 def validate_key_template(template: str) -> None:
-    """Config-time check: `:N` is only defined for `{hash}`, and `N` is 1..32."""
+    """Config-time check: `:N` is only defined for `{hash}`; at most one hash
+    token; `N` in `MIN_HASH_WIDTH..32`, and exactly 32 when the hash is the
+    template's only placeholder (a pure content-addressed layout dedupes across
+    slots, so the hash must be unique among *all* payloads, not one slot's)."""
+    hashes = [m for m in _PLACEHOLDER.finditer(template) if m.group(1) == HASH]
+    if len(hashes) > 1:
+        raise ValueError(f"keyTemplate: at most one {{hash}} token ({template!r})")
+    others = [m for m in _PLACEHOLDER.finditer(template) if m.group(1) != HASH]
     for m in _PLACEHOLDER.finditer(template):
         name, width = m.group(1), m.group(2)
         if width is None:
@@ -38,8 +49,13 @@ def validate_key_template(template: str) -> None:
         if name != HASH:
             raise ValueError(f"keyTemplate: `:{width}` is only defined for {{hash}}, not {{{name}}} ({template!r})")
         n = int(width)
-        if not 1 <= n <= MD5_HEX_LEN:
-            raise ValueError(f"keyTemplate: {{hash:{width}}} must be 1..{MD5_HEX_LEN} ({template!r})")
+        if not MIN_HASH_WIDTH <= n <= MD5_HEX_LEN:
+            raise ValueError(f"keyTemplate: {{hash:{width}}} must be {MIN_HASH_WIDTH}..{MD5_HEX_LEN} ({template!r})")
+        if not others and n != MD5_HEX_LEN:
+            raise ValueError(
+                f"keyTemplate: a template whose only placeholder is the hash needs the full {{hash}} "
+                f"(32 chars): the key must be unique across every payload, not one slot's versions ({template!r})"
+            )
 
 
 def template_has_hash(template: str) -> bool:
@@ -71,7 +87,7 @@ def substitute_key(template: str, values: Mapping[str, str | int]) -> str:
             raise KeyError(f"substitute_key: missing value for {{{name}}}")
         value = str(values[name])
         if name == HASH:
-            if len(value) != MD5_HEX_LEN or not re.fullmatch(r'[0-9a-f]+', value):
+            if not re.fullmatch(r'[0-9a-f]{32}', value):
                 raise ValueError(f"substitute_key: {{hash}} wants a 32-char md5 hex, got {value!r}")
             return value[: int(width)] if width else value
         return value
@@ -116,7 +132,7 @@ def key_pattern(template: str) -> re.Pattern[str]:
                 parts.append(f'(?P<{name}>[^/]+)')
         pos = m.end()
     parts.append(re.escape(template[pos:]))
-    return re.compile('^' + ''.join(parts) + '$')
+    return re.compile('^' + ''.join(parts) + r'\Z')
 
 
 def parse_key(template: str, key: str) -> dict[str, str] | None:
@@ -132,6 +148,41 @@ def slot_of(template: str, key: str) -> str | None:
     if values is None:
         return None
     return slot_key(template, {k: v for k, v in values.items() if k != HASH})
+
+
+def legacy_template(template: str) -> str | None:
+    """The key shape a pyramid had *before* its template gained a hash token:
+    the template with the token and one adjacent separator (`.`, `-`, `_`)
+    removed — `…/{period}.{hash:12}.parquet` → `…/{period}.parquet`. None when
+    the template has no hash, or the hash is not attached to a literal
+    separator that way (a pure content-addressed layout has no legacy shape).
+    This is the migration assumption `slot_of_any` makes; rows written under
+    the legacy shape keep their keys and stay readable."""
+    m = next((m for m in _PLACEHOLDER.finditer(template) if m.group(1) == HASH), None)
+    if m is None or not any(x.group(1) != HASH for x in _PLACEHOLDER.finditer(template)):
+        return None   # no hash, or nothing but the hash: no legacy shape
+    start, end = m.start(), m.end()
+    if start > 0 and template[start - 1] in '.-_':
+        return template[: start - 1] + template[end:]
+    if end < len(template) and template[end] in '.-_':
+        return template[:start] + template[end + 1:]
+    return None
+
+
+def slot_of_any(template: str, key: str) -> str | None:
+    """`slot_of` that also accepts a key in the template's legacy (hashless)
+    shape, mapping it to the hashed template's slot key — so a registry or
+    listing that mixes migrated and not-yet-rewritten slots resolves whole."""
+    slot = slot_of(template, key)
+    if slot is not None:
+        return slot
+    legacy = legacy_template(template)
+    if legacy is None:
+        return None
+    values = parse_key(legacy, key)
+    if values is None:
+        return None
+    return slot_key(template, values)
 
 
 def slot_values(template: str, slot: str) -> dict[str, str]:
@@ -151,7 +202,7 @@ def slot_values(template: str, slot: str) -> dict[str, str]:
             parts.append(f'(?P<{name}>[^/]+)')
         pos = m.end()
     parts.append(re.escape(template[pos:]))
-    m2 = re.compile('^' + ''.join(parts) + '$').match(slot)
+    m2 = re.compile('^' + ''.join(parts) + r'\Z').match(slot)
     if m2 is None:
         raise ValueError(f"slot_values: {slot!r} is not a slot key of {template!r}")
     return m2.groupdict()
@@ -167,7 +218,7 @@ def listed_slots(storage, template: str, prefix: str | None = None) -> dict[str,
         prefix = template.split('{')[0]
     by_slot: dict[str, list[str]] = {}
     for key in storage.list(prefix):
-        slot = slot_of(template, key)
+        slot = slot_of_any(template, key)
         if slot is not None:
             by_slot.setdefault(slot, []).append(key)
     dupes = {s: sorted(k) for s, k in by_slot.items() if len(k) > 1}
@@ -198,7 +249,17 @@ def put_shard(storage, template: str, values: Mapping[str, str | int], payload: 
     md5 = content_hash(payload)
     if template_has_hash(template):
         key = substitute_key(template, {**values, HASH: md5})
-        if storage.head(key) is not None:
+        head = storage.head(key)
+        if head is not None:
+            # Identical bytes by construction — unless the (truncated) hash
+            # collided. S3/R2 single-part etags ARE the md5, so verify when
+            # the backend gives one; a mismatch is a collision, not a skip.
+            etag = str(head.get('etag') or '').strip('"') if isinstance(head, dict) else ''
+            if re.fullmatch(r'[0-9a-f]{32}', etag) and etag != md5:
+                raise ValueError(
+                    f"put_shard: {key!r} exists with md5 {etag} but the payload's md5 is {md5}: "
+                    f"a {{hash:N}} prefix collision — widen N"
+                )
             return ShardWrite(key=key, md5=md5, n_bytes=len(payload), put=False)
         storage.put(key, payload)
         return ShardWrite(key=key, md5=md5, n_bytes=len(payload), put=True)

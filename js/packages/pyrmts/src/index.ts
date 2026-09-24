@@ -118,6 +118,7 @@ export {
   templateHasHash,
   validateKeyTemplate,
 } from './keys.js'
+export type { EtagEntry } from './keys.js'
 
 export { tileFromExisting } from './tile-from-existing.js'
 export type { TilingResult } from './tile-from-existing.js'

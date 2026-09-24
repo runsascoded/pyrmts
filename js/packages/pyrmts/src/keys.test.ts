@@ -76,12 +76,19 @@ tiers: [{ name: base, bin: 1h, shards: [1mo] }]
 })
 
 describe('keysEtag', () => {
-  test('is order-independent, key-sensitive, and versioned', () => {
+  test('is order-independent, key-sensitive, versioned, and 64-bit', () => {
     const a = keysEtag(['p/1.abc.parquet', 'p/2.def.parquet'])
     expect(a).toBe(keysEtag(['p/2.def.parquet', 'p/1.abc.parquet']))
-    expect(a).toMatch(/^"v1-2-[0-9a-f]{8}"$/)
+    expect(a).toMatch(/^"v1-2-[0-9a-f]{16}"$/)
     expect(keysEtag(['p/1.abc.parquet', 'p/2.fff.parquet'])).not.toBe(a)   // a registry swap changes the tag
     expect(keysEtag(['p/1.abc.parquet', 'p/2.def.parquet'], 2)).not.toBe(a)
-    expect(keysEtag([])).toBe('"v1-0-' + keysEtag([]).slice(6))
+  })
+
+  test('a legacy (mutable) key changes the tag when its md5 or written_at changes', () => {
+    const before = keysEtag([{ key: 'p/1.parquet', md5: 'aaaa', writtenAt: 1 }])
+    expect(keysEtag([{ key: 'p/1.parquet', md5: 'bbbb', writtenAt: 1 }])).not.toBe(before)
+    expect(keysEtag([{ key: 'p/1.parquet', md5: 'aaaa', writtenAt: new Date(2) }])).not.toBe(before)
+    expect(keysEtag([{ key: 'p/1.parquet', md5: 'aaaa', writtenAt: new Date(1) }])).toBe(before)
+    expect(keysEtag([{ key: 'p/1.parquet' }])).not.toBe(keysEtag(['p/1.parquet']))
   })
 })

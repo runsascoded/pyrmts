@@ -25,7 +25,7 @@ from typing import Protocol
 import polars as pl
 import pyarrow.parquet as pq
 
-from pyrmts import Pyramid, ShardPeriod, shard_periods_covering, slot_key, slot_of, template_has_hash
+from pyrmts import Pyramid, ShardPeriod, shard_periods_covering, slot_key, slot_of_any, template_has_hash
 from .longform import empty_long, long_schema, wide_to_long
 
 
@@ -283,6 +283,8 @@ class WideShardSource(TiledSource):
         tier_name: str | None = None,
         shard_dur: str | None = None,
         filter: dict[str, str | int] | None = None,
+        registry=None,
+        pyramid_name: str | None = None,
     ) -> None:
         super().__init__(pyramid)
         tier = pyramid.tier(tier_name) if tier_name else pyramid.tiers[0]
@@ -290,6 +292,9 @@ class WideShardSource(TiledSource):
         self.shard_dur = shard_dur  # None → min-cover selection across the tier's rungs
         self.filter = filter or {}
         self._listing: set[str] | None = None
+        self._slots: dict[str, str] | None = None
+        self.registry = registry
+        self.pyramid_name = pyramid_name
 
     @property
     def provides(self) -> tuple[str, str | None]:
@@ -319,24 +324,39 @@ class WideShardSource(TiledSource):
             return self._listing
 
     def _current(self) -> dict[str, str]:
-        """Hashed template: slot key → its listed storage key. A slot with
-        several listed versions is ambiguous from a LIST alone (an orphan not
-        yet GC'd next to the current one): refuse rather than guess."""
+        """Hashed template: slot key → its current storage key. From the
+        registry when one was given (`registry` + `pyramid_name`: the truth,
+        and unaffected by orphans awaiting GC); else from the LIST, mapping
+        hashed and legacy-shaped keys alike and refusing a slot with several
+        hashed versions (ambiguous without a registry). Computed once."""
+        if self._slots is not None:
+            return self._slots
         template = self.pyramid.keyTemplate
+        slots: dict[str, str] = {}
+        if self.registry is not None:
+            from .discovery import slot_for_record
+            for r in self.registry.current_records(self.pyramid_name):
+                slot = slot_for_record(self.pyramid, r, self.filter)
+                if slot is not None:
+                    slots[slot] = r.key
+        # Slots the registry doesn't cover (ingest tiles are often written
+        # outside it) come from the listing, hashed or legacy-shaped alike; a
+        # listed-only slot with several hashed versions is ambiguous.
         by_slot: dict[str, list[str]] = {}
         for key in self._listed():
-            slot = slot_of(template, key)
-            if slot is not None:
+            slot = slot_of_any(template, key)
+            if slot is not None and slot not in slots:
                 by_slot.setdefault(slot, []).append(key)
         dupes = {s: sorted(k) for s, k in by_slot.items() if len(k) > 1}
         if dupes:
             sample = next(iter(dupes.items()))
             raise ValueError(
-                f"WideShardSource: {len(dupes)} slot(s) have several versions in storage "
-                f"(e.g. {sample[0]!r}: {sample[1]}) — GC the orphans, or read the source rung "
-                f"through its registry"
+                f"WideShardSource: {len(dupes)} slot(s) have several versions in storage and no registry row "
+                f"(e.g. {sample[0]!r}: {sample[1]}) — register them (`adopt`) or GC the orphans"
             )
-        return {s: k[0] for s, k in by_slot.items()}
+        slots.update({s: k[0] for s, k in by_slot.items()})
+        self._slots = slots
+        return slots
 
     def tile_at(self, at: datetime) -> Tile:
         """The tile to read for instant `at`: the pinned rung's grid

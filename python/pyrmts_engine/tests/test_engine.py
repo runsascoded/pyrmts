@@ -530,10 +530,54 @@ def test_hashed_template_fill_trusts_the_registry_not_the_listing():
     )
     assert [w.key for w in refill.written] == [victim.key]
     # The rebuilt bytes are identical, so the orphan simply became current again; no new object.
-    assert sorted(r.key for r in index.records) == sorted(r.key for r in full.written and index.records)
+    # The registry's current rows are exactly the first build's keys (the rebuilt slot re-registered the same key).
+    assert sorted(r.key for r in index.current_records()) == sorted(w.key for w in full.written)
     from pyrmts_engine.shard_index import NoopShardIndex
     with pytest.raises(ValueError, match='needs a shard_index that can list'):
         build_local(
             pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h'),
             pyramid_name='test', shard_index=NoopShardIndex(), fill=True,
         )
+
+
+def test_adding_a_hash_token_to_a_legacy_pyramid_rebuilds_nothing():
+    """Lazy migration: a pyramid built under `…/{period}.parquet` gains
+    `{hash:12}`; its registry rows still carry legacy keys. A fill must see
+    every legacy slot as built (rows are matched by their fields, not by
+    re-parsing keys) and write nothing; only a genuinely missing slot is built,
+    at a hashed key."""
+    pyramid, result, index = _run_engine()
+    assert len(index.records) == len(EXPECTED_KEYS)
+    pyramid.keyTemplate = pyramid.keyTemplate.replace('.parquet', '.{hash:12}.parquet')
+    again = build_local(
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h', registry=index, pyramid_name='test'),
+        pyramid_name='test', shard_index=index, fill=True,
+    )
+    assert again.written == [] and again.present_shards == len(EXPECTED_KEYS)
+    assert sorted(r.key for r in index.current_records()) == EXPECTED_KEYS   # untouched legacy rows
+    victim = next(r for r in index.records if r.tier == 'q')
+    index.records = [r for r in index.records if r is not victim]
+    refill = build_local(
+        pyramid, (FROM, TO), WideShardSource(pyramid, shard_dur='6h', registry=index, pyramid_name='test'),
+        pyramid_name='test', shard_index=index, fill=True,
+    )
+    (written,) = refill.written
+    assert written.key.startswith(victim.key.removesuffix('.parquet') + '.') and written.key.endswith('.parquet')
+    assert index.lookup(victim.tier, victim.shard_dur, victim.period_start_ms).key == written.key
+
+
+def test_registry_rows_are_scoped_by_pyramid_like_the_d1_pk():
+    """One manifest holding two pyramids: `existing_keys(pyramid)` and
+    `lookup(..., pyramid=)` see each pyramid's rows; an unscoped lookup that
+    hits both is refused rather than guessed."""
+    from pyrmts_engine.shard_index import MemShardIndex, RegistryResolver, ShardRecord
+
+    def rec(pyr, key):
+        return ShardRecord(pyramid=pyr, tier='q', shard_dur='1d', period_start_ms=0, period_end_ms=86_400_000, key=key, written_at_ms=1)
+    index = MemShardIndex(records=[rec('a', 'a/q/1d/x.parquet'), rec('b', 'b/q/1d/x.parquet')])
+    assert index.existing_keys('a') == {'a/q/1d/x.parquet'}
+    assert index.existing_keys() == {'a/q/1d/x.parquet', 'b/q/1d/x.parquet'}
+    assert index.lookup('q', '1d', 0, pyramid='b').key == 'b/q/1d/x.parquet'
+    with pytest.raises(ValueError, match='rows for 2 pyramids'):
+        index.lookup('q', '1d', 0)
+    assert RegistryResolver(index, 'a').resolve('q', '1d', 0, 'x', {}) == 'a/q/1d/x.parquet'

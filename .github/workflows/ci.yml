@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync (pinned lock, all workspace packages + test extras)
+        run: uv sync --all-packages --extra test --extra duckdb --frozen
+      - name: Test
+        run: uv run --frozen pytest -q

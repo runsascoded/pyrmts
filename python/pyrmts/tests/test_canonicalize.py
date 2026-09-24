@@ -365,9 +365,9 @@ def test_canonicalize_hashed_template_writes_a_new_key_and_swaps_the_registry_ro
     assert _parse_sum(pq.read_table(io.BytesIO(storage.get(new_key))), extra_dim=True)[:2] == [
         ('c:X', 'a', 0, 5, 50, 500), ('c:X', 'a', 1, 5, 50, 500),
     ]
-    # Idempotent: a second pass produces identical bytes → the same key, no new object.
+    # Idempotent: a second pass produces identical bytes → the same key, no new object, no re-registration.
     again = canonicalize_shards(p, id_map, tr, resolver=RegistryResolver(index), registry=index, pyramid_name='t')
-    assert again.written == [new_key]
+    assert (again.written, again.unchanged) == ([], [new_key])
     assert sorted(storage.list('p/')) == sorted([first.key, new_key])
 
 

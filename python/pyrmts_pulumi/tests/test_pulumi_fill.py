@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pulumi
 import pytest
-from conftest import declared, names_of
+from conftest import settled_test, declared, names_of
 
 from pyrmts_pulumi import FillFunction, Schedule
 
@@ -13,20 +13,20 @@ TARGET = 'aws:cloudwatch/eventTarget:EventTarget'
 PERM = 'aws:lambda/permission:Permission'
 
 
-@pulumi.runtime.test
+@settled_test
 def test_image_function_with_no_schedules():
     fn = FillFunction('f1', image_uri='repo:tag', prefix='alpha')
-    def check(_):
+    def check():
         (_, inputs), = declared(FN, 'f1')
         assert [inputs['name'], inputs['packageType'], inputs['imageUri']] == [
             'alpha', 'Image', 'repo:tag',
         ]
         assert declared(RULE, 'f1') == []
         assert declared(PERM, 'f1') == []
-    return pulumi.Output.all(fn.arn).apply(check)
+    return check
 
 
-@pulumi.runtime.test
+@settled_test
 def test_each_schedule_gets_its_own_rule_target_and_permission():
     # The `StatementId` collision that took ctbk's v6 tick down is structural
     # here: two schedules mean two Permission resources, so there is no shared
@@ -38,7 +38,7 @@ def test_each_schedule_gets_its_own_rule_target_and_permission():
             Schedule('v6-tick', 'rate(5 minutes)', input_json='{"p":"v6"}'),
         ],
     )
-    def check(_):
+    def check():
         assert sorted(names_of(RULE, 'f2')) == ['beta-v5-tick', 'beta-v6-tick']
         assert len(declared(TARGET, 'f2')) == 2
         assert len(declared(PERM, 'f2')) == 2
@@ -46,10 +46,10 @@ def test_each_schedule_gets_its_own_rule_target_and_permission():
         assert len({str(i.get('sourceArn')) for _, i in declared(PERM, 'f2')}) == 2
     # Depend on the permissions themselves — the function's ARN resolves
     # before the schedule resources are registered.
-    return pulumi.Output.all(*[p.urn for p in fn.permissions.values()]).apply(check)
+    return check
 
 
-@pulumi.runtime.test
+@settled_test
 def test_a_disabled_schedule_is_declared_disabled():
     # Retirement is a declared fact, not the absence of code: the rule stays
     # in the graph as DISABLED rather than being deleted and forgotten.
@@ -60,12 +60,12 @@ def test_a_disabled_schedule_is_declared_disabled():
             Schedule('v6-tick', 'rate(5 minutes)'),
         ],
     )
-    def check(_):
+    def check():
         assert sorted((i['name'], i['state']) for _, i in declared(RULE, 'f3')) == [
             ('gamma-v3-tick', 'DISABLED'),
             ('gamma-v6-tick', 'ENABLED'),
         ]
-    return pulumi.Output.all(*[r.urn for r in fn.rules.values()]).apply(check)
+    return check
 
 
 @pulumi.runtime.test

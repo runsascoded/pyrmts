@@ -15,9 +15,36 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
+import functools
+
 import pulumi
 
 PROJECT = 'proj'
+
+
+def settled_test(fn):
+    """`@pulumi.runtime.test` for assertions about the DECLARED graph.
+
+    A test body that asserts inside an `Output.apply` runs when *that* output
+    resolves — not when every resource of the component has been registered
+    (registration is asynchronous, and on Python 3.12 a sibling's RPC can
+    still be in flight). `settled_test` runs the body under the Pulumi test
+    harness, which awaits every outstanding RPC after the body returns, and
+    only then calls the `check` the body returned. Assertions on `DECLARED`
+    therefore see the whole graph, deterministically."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        holder: dict = {}
+
+        @pulumi.runtime.test
+        def build():
+            holder['check'] = fn(*args, **kwargs)
+
+        build()
+        check = holder.get('check')
+        if check is not None:
+            check()
+    return wrapper
 STACK = 'stack'
 
 

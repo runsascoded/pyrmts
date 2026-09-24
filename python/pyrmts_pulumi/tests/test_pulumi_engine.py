@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 
 import pulumi
-from conftest import DECLARED, declared, names_of
+from conftest import settled_test, DECLARED, declared, names_of
 
 from pyrmts_engine.batch import job_definition_spec, resource_names
 from pyrmts_pulumi import BatchEngine
@@ -26,12 +26,12 @@ def _engine(name: str, **kwargs) -> BatchEngine:
     )
 
 
-@pulumi.runtime.test
+@settled_test
 def test_declares_the_full_spot_footprint():
     # Sorted, not in declaration order: Pulumi registers resources
     # concurrently, so order here is a race, not a contract.
     engine = _engine('e1', prefix='alpha')
-    def check(_):
+    def check():
         assert sorted(t for t, n, _ in DECLARED if t.startswith('aws:') and n.startswith('e1')) == sorted([
             ROLE,
             'aws:iam/rolePolicyAttachment:RolePolicyAttachment',
@@ -40,24 +40,24 @@ def test_declares_the_full_spot_footprint():
             QUEUE,
             JOB_DEF,
         ])
-    return pulumi.Output.all(engine.job_definition).apply(check)
+    return check
 
 
-@pulumi.runtime.test
+@settled_test
 def test_on_demand_adds_a_second_pair_only():
     engine = _engine('e2', prefix='beta', on_demand=True)
-    def check(_):
+    def check():
         assert sorted(names_of(CE, 'e2')) == ['beta-od', 'beta-spot']
         assert sorted(names_of(QUEUE, 'e2')) == ['beta', 'beta-od']
-    return pulumi.Output.all(engine.job_definition).apply(check)
+    return check
 
 
-@pulumi.runtime.test
+@settled_test
 def test_container_properties_are_the_imperative_spec_verbatim():
     # The anti-drift property: one description, two appliers. If this ever
     # fails, the declarative and imperative paths have forked.
     engine = _engine('e3', prefix='gamma', vcpus=4, memory_mib=8192)
-    def check(_):
+    def check():
         (_, inputs), = declared(JOB_DEF, 'e3')
         expected = job_definition_spec(
             name='gamma',
@@ -68,25 +68,25 @@ def test_container_properties_are_the_imperative_spec_verbatim():
             log_group='/gamma/batch',
         )
         assert json.loads(inputs['containerProperties']) == expected['containerProperties']
-    return pulumi.Output.all(engine.job_definition).apply(check)
+    return check
 
 
-@pulumi.runtime.test
+@settled_test
 def test_sizing_defaults_come_from_the_builder():
     engine = _engine('e4', prefix='delta')
-    def check(_):
+    def check():
         (_, inputs), = declared(JOB_DEF, 'e4')
         cp = json.loads(inputs['containerProperties'])
         assert {r['type']: r['value'] for r in cp['resourceRequirements']} == {
             'VCPU': '16', 'MEMORY': '32768',
         }
-    return pulumi.Output.all(engine.job_definition).apply(check)
+    return check
 
 
-@pulumi.runtime.test
+@settled_test
 def test_every_physical_name_carries_the_prefix():
     engine = _engine('e5', prefix='epsilon', on_demand=True)
-    def check(_):
+    def check():
         names = resource_names('epsilon')
         assert {
             'role': sorted(names_of(ROLE, 'e5')),
@@ -101,10 +101,10 @@ def test_every_physical_name_carries_the_prefix():
             'queue': sorted([names.spot_queue, names.od_queue]),
             'job_def': [names.job_definition],
         }
-    return pulumi.Output.all(engine.job_definition).apply(check)
+    return check
 
 
-@pulumi.runtime.test
+@settled_test
 def test_two_deployments_share_no_physical_name():
     # The isolation guarantee, stated as a test: two stacks must not name the
     # same account-global resource. Compared per resource type, because the
@@ -112,7 +112,7 @@ def test_two_deployments_share_no_physical_name():
     # Batch scopes those in separate namespaces.
     a = _engine('e6a', prefix='one', on_demand=True)
     b = _engine('e6b', prefix='two', on_demand=True)
-    def check(_):
+    def check():
         # Partition by owning deployment rather than by declaration order.
         per_type = {
             typ: {
@@ -130,12 +130,12 @@ def test_two_deployments_share_no_physical_name():
         }
         for owners in per_type.values():
             assert set(owners['one']) & set(owners['two']) == set()
-    return pulumi.Output.all(a.job_definition, b.job_definition).apply(check)
+    return check
 
 
-@pulumi.runtime.test
+@settled_test
 def test_submit_args_point_the_cli_at_this_stack():
     engine = _engine('e7', prefix='zeta')
-    def check(_):
+    def check():
         assert engine.submit_args() == ['--prefix', 'zeta']
-    return pulumi.Output.all(engine.job_definition).apply(check)
+    return check

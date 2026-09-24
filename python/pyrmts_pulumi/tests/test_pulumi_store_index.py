@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pulumi
 import pytest
-from conftest import DECLARED, declared
+from conftest import settled_test, DECLARED, declared
 
 from pyrmts_pulumi import Pyramid, R2ShardStore, S3ShardStore, ShardIndex
 
@@ -13,24 +13,24 @@ R2 = 'cloudflare:index/r2Bucket:R2Bucket'
 D1 = 'cloudflare:index/d1Database:D1Database'
 
 
-@pulumi.runtime.test
+@settled_test
 def test_s3_store_names_the_bucket_from_the_prefix():
     store = S3ShardStore('s1', prefix='alpha')
-    def check(_):
+    def check():
         (_, inputs), = declared(BUCKET, 's1')
         assert inputs['bucket'] == 'alpha'
         assert declared(LIFECYCLE, 's1') == []
-    return pulumi.Output.all(store.bucket).apply(check)
+    return check
 
 
-@pulumi.runtime.test
+@settled_test
 def test_raw_expiry_scopes_its_rule_to_the_raw_prefix():
     # Shards must never fall under a blanket age rule — the cover ladder and
     # `pyrmts_ops.gc` decide what is droppable, and the fill loop would
     # rebuild anything deleted while the cover still expects it.
     store = S3ShardStore('s2', prefix='beta', expire_raw_after_days=30)
     assert store.lifecycle is not None
-    def check(_):
+    def check():
         (_, inputs), = declared(LIFECYCLE, 's2')
         assert inputs['rules'] == [{
             'id': 'expire-raw',
@@ -40,7 +40,7 @@ def test_raw_expiry_scopes_its_rule_to_the_raw_prefix():
         }]
     # Await the rule's own output, not just the bucket's: the rule registers
     # after the bucket, and on Python 3.12 the bucket's apply could run first.
-    return pulumi.Output.all(store.bucket, store.lifecycle.id).apply(check)
+    return check
 
 
 @pulumi.runtime.test
@@ -82,7 +82,7 @@ def test_pyramid_rejects_s3_only_options_on_r2():
     return pulumi.Output.from_input(0).apply(check)
 
 
-@pulumi.runtime.test
+@settled_test
 def test_pyramid_wires_store_and_index_into_the_fill_env():
     # The actual boilerplate this saves: one prefix, and the bucket/database
     # identifiers threaded into the function's environment.
@@ -90,7 +90,7 @@ def test_pyramid_wires_store_and_index_into_the_fill_env():
         'p4', prefix='ctbk-gbfs', cloudflare_account_id='acct123',
         fill_image_uri='repo:tag',
     )
-    def check(_):
+    def check():
         (_, fn), = declared('aws:lambda/function:Function', 'p4')
         assert fn['environment'] == {'variables': {
             'PYRMTS_BUCKET': 'ctbk-gbfs',
@@ -100,7 +100,7 @@ def test_pyramid_wires_store_and_index_into_the_fill_env():
         assert [n for _, n, _ in DECLARED].count('p4-store-bucket') == 1
     # Depend on the *function's* output: the store's resolves before the
     # function is registered, so checking on it races the graph.
-    return pulumi.Output.all(p.fill.arn).apply(check)
+    return check
 
 
 @pulumi.runtime.test

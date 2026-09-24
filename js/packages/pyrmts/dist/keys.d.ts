@@ -21,4 +21,5 @@ export declare function parseKey(template: string, key: string): Record<string, 
 /** The slot key a storage key belongs to, or null if it doesn't match. */
 export declare function slotOf(template: string, key: string): string | null;
 export declare function shardKey(pyramid: Pyramid, tierName: string, shardDur: Shard, periodStart: Date, filter?: Record<string, string | number>): string;
+export declare function keysEtag(keys: Iterable<string>, version?: number): string;
 //# sourceMappingURL=keys.d.ts.map

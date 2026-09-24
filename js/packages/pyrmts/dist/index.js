@@ -12,7 +12,7 @@ export { validateLadders } from './ladder.js';
 export { CachedShardIndex, WATERMARK_KEY_SEPARATOR, decodeWatermarkKey, encodeWatermarkKey, } from './shard-index.js';
 export { listExpectedShards, listMissingShards } from './gap-discovery.js';
 export { CAS_ATTEMPTS, JOURNAL_BASENAME, invalidate, journalKey, listExistingWithMtime, loadInvalidations, overlaps, pruneSpent, staleKeysFor, } from './invalidation.js';
-export { hashWidth, keyPattern, parseKey, shardKey, slotKey, slotOf, substituteKey, templateHasHash, validateKeyTemplate, } from './keys.js';
+export { hashWidth, keyPattern, keysEtag, parseKey, shardKey, slotKey, slotOf, substituteKey, templateHasHash, validateKeyTemplate, } from './keys.js';
 export { tileFromExisting } from './tile-from-existing.js';
 export { ManifestShardIndex } from './manifest-shard-index.js';
 // `assertShardIndexConformance` is exported separately as

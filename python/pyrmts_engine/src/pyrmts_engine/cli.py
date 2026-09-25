@@ -700,6 +700,7 @@ def diffindex_diff(scan_a: str, scan_b: str, dataset: str, out: str, write_path:
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
 @option('-f', '--fill', is_flag=True, help="Gap-fill: LIST the target prefix, build exactly the expected-but-missing shards (walking only their windows); missing shards the source can't cover are reported + skipped. Tiled sources are checked before the walk: shards over an absent open-period tile are deferred (exit 0), shards over an absent closed-period tile fail fast past -M with nothing written (exit 4)")
 @option('-g', '--rg-size', type=int, help="Output-shard parquet row-group size (all tiers; per-tier via the library)")
+@option('-I', '--ignore-invalidations', is_flag=True, help="-f: don't read the invalidation journal (default: built shards overlapping an entry newer than their build are rebuilt, and spent entries pruned)")
 @option('-j', '--workers', type=int, help="Window-worker threads (default: cpu count)")
 @option('-K', '--max-inflight', type=int, help="Max windows in flight past the watermark (memory bound; default 2×workers)")
 @option('-M', '--max-missing', type=float, default=0.0, help="Tolerated fraction of absent source shards (default 0.0 = strict; absent ≠ present-but-EMPTY)")
@@ -725,6 +726,7 @@ def build(
     filters: tuple[str, ...],
     fill: bool,
     rg_size: int | None,
+    ignore_invalidations: bool,
     workers: int | None,
     max_inflight: int | None,
     max_missing: float,
@@ -788,6 +790,7 @@ def build(
             close_workers=close_workers,
             close_chunk_bytes=_parse_bytes(close_chunk) if close_chunk is not None else None,
             fill=fill,
+            honor_invalidations=not ignore_invalidations,
             resume=resume,
             allow_empty=allow_empty,
             max_missing_source=max_missing,
@@ -865,6 +868,7 @@ def batch_push(no_build: bool, context: str, dockerfile: str | None, platform: s
 @option('-F', '--filter', 'filters', multiple=True, help="Extra keyTemplate substitution, key=value (repeatable)")
 @option('-f', '--fill', is_flag=True, help="build -f: gap-fill exactly the expected-but-missing shards")
 @option('-g', '--rg-size', type=int, help="Output-shard parquet row-group size")
+@option('-I', '--ignore-invalidations', is_flag=True, help="build -I: -f ignores the invalidation journal")
 @option('-j', '--job-name', help="Batch job name (default: derived from pyramid name)")
 @option('-K', '--max-inflight', type=int, help="build -K: max windows in flight past the watermark")
 @option('-m', '--manifest', help="Manifest destination (use s3:// — container disk is ephemeral)")
@@ -894,6 +898,7 @@ def batch_submit(
     filters: tuple[str, ...],
     fill: bool,
     rg_size: int | None,
+    ignore_invalidations: bool,
     job_name: str | None,
     max_inflight: int | None,
     manifest: str | None,
@@ -930,6 +935,7 @@ def batch_submit(
             source_shard=source_shard,
             manifest=manifest,
             fill=fill,
+            ignore_invalidations=ignore_invalidations,
             resume=resume,
             allow_empty=allow_empty,
             max_missing=max_missing,

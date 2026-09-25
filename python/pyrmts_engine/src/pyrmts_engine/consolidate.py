@@ -59,7 +59,7 @@ from pyrmts import (
 from pyrmts.types import Tier
 
 from .discovery import KeySet, discover_gaps, list_existing_with_mtime, registry_key_set, split_stale
-from .invalidation import load_invalidations, overlaps, prune_spent
+from .invalidation import load_invalidations, overlaps, prune_spent, slot_write_times
 from .longform import empty_long, long_to_wide, rebin_long, wide_to_long
 from .materialize import MaterializeResult, buildable_at, shard_key, source_tier_for
 from .plan import bin_floor_expr
@@ -513,7 +513,11 @@ def run_extension_fill(
     err(f"extension fill: {by_status or 'nothing to do'}")
     if invs:
         expected_all = [e for shards in expected_by_tier.values() for e in shards]
-        n_pruned, n_left = prune_spent(pyramid, expected_all)
+        # Hashed: per-slot write times from the (re-read) registry — a LIST
+        # is keyed by storage key, which never matches a slot key, so every
+        # entry would look spent.
+        mtimes = slot_write_times(pyramid, shard_index.current_records(pyramid_name)) if hashed else None
+        n_pruned, n_left = prune_spent(pyramid, expected_all, mtimes=mtimes, within=(genesis, now))
         err(f"invalidations: pruned {n_pruned} spent entries ({n_left} remain)")
     return results
 

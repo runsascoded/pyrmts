@@ -87,7 +87,7 @@ from collections import deque
 from os.path import commonprefix
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -108,6 +108,7 @@ from pyrmts import (
 
 from .longform import long_to_wide, rebin_long
 from .discovery import registry_key_set
+from .invalidation import load_invalidations, prune_spent, slot_write_times, stale_keys_for
 from .plan import UNIT_MS, _divides, bin_floor_expr, compile_plan
 from .shard_index import NoopShardIndex, ShardIndex, ShardRecord, now_ms
 from .source import Source, Tile
@@ -151,6 +152,9 @@ class BuildResult:
     # tile whose period extends past `to` (open — still happening). Not
     # built this run; a later fill picks them up once the tile exists.
     deferred: int = 0
+    # Fill mode: built shards overlapping an invalidation-journal entry newer
+    # than their last write — counted as missing, so rebuilt this run.
+    invalidated: int = 0
     source_rows: int = 0
     missing_source: int = 0
     # Absent source shards whose period extends past the range's `to` —
@@ -165,10 +169,11 @@ class BuildResult:
         present = f"{self.present_shards} present shards skipped, " if self.present_shards else ""
         unfillable = f"{self.unfillable} unfillable shards skipped, " if self.unfillable else ""
         deferred = f"{self.deferred} shards deferred (open-period source absent), " if self.deferred else ""
+        invalidated = f"{self.invalidated} invalidated shards rebuilt-or-pending, " if self.invalidated else ""
         return (
             f"build_local: {self.windows} windows, {self.source_rows:,} source rows → "
             f"{len(self.written)} shards ({total_bytes:,} bytes), "
-            f"{self.skipped_rungs} source-provided rungs skipped, {resumed}{present}{unfillable}{deferred}"
+            f"{self.skipped_rungs} source-provided rungs skipped, {resumed}{present}{unfillable}{deferred}{invalidated}"
             f"wall {self.wall_seconds:.1f}s"
         )
 
@@ -377,6 +382,7 @@ def build_local(
     close_workers: int | None = None,
     close_chunk_bytes: int | None = None,
     fill: bool = False,
+    honor_invalidations: bool = True,
     resume: bool = False,
     allow_empty: bool = False,
     max_missing_source: float = 0.0,
@@ -445,6 +451,17 @@ def build_local(
             written — the guard fires before the outputs, not after.
             Within tolerance, closed holes build through as empty and
             the post-walk ratio reports them as before.
+        honor_invalidations: fill mode only (default on, like
+            `run_extension_fill`): load the pyramid's invalidation journal
+            (`pyrmts.invalidate`); a BUILT expected shard overlapping an
+            entry whose `requested_at` postdates the shard's last write
+            (listing mtime; hashed template: the registry row's
+            `written_at`) counts as missing, so it is rebuilt — coarse
+            rungs included, so the refold reaches every tier. After a
+            successful build, entries with no stale overlap left are
+            pruned (CAS'd); an entry reaching outside `time_range`, or any
+            entry under a `filter` (the journal is shared by every filter
+            value), is kept.
         resume: skip shards already recorded in `shard_index` (which must
             expose `existing_keys()` — the JSONL manifest impls do), and
             skip source windows that only feed skipped shards. Shards are
@@ -522,6 +539,9 @@ def build_local(
 
     resume_from = from_
     fill_spans: list[tuple[datetime, datetime]] | None = None
+    invs: list = []
+    write_times: dict[str, datetime | None] = {}
+    written_slots: list[str] = []
     if fill:
         from .discovery import list_existing_keys
         expected = plan.outputs + plan.skipped_rungs
@@ -537,12 +557,23 @@ def build_local(
                     "build_local: a keyTemplate with {hash} needs a shard_index that can list "
                     "prior records (current_records()) — the registry, not a LIST, says what is built"
                 )
-            done = set(registry_key_set(pyramid, current_records(pyramid_name), filter))
+            registry_records = current_records(pyramid_name)
+            done = set(registry_key_set(pyramid, registry_records, filter))
             listed = {s for k in listed if (s := slot_of_any(pyramid.keyTemplate, k)) is not None}
         else:
+            registry_records = None
             done = set(listed)
             if existing_keys is not None:
                 done |= existing_keys()
+        if honor_invalidations:
+            invs, _ = load_invalidations(pyramid)
+            if invs:
+                write_times = slot_write_times(pyramid, registry_records, filter)
+                inv_stale = stale_keys_for(plan.outputs, write_times, invs) & done
+                done -= inv_stale
+                result.invalidated = len(inv_stale)
+                err(f"invalidations: {len(invs)} journal entries; {len(inv_stale)} built shards "
+                    f"overlap an entry newer than their build → rebuild")
         missing_src = [e for e in plan.skipped_rungs if e.key not in done]
         missing = [e for e in plan.outputs if e.key not in done]
         result.present_shards = len(plan.outputs) - len(missing)
@@ -754,6 +785,7 @@ def build_local(
                 key=written.key, tier=shard.tier, shard_dur=shard.shard_dur,
                 rows=wide.height, bytes=n_bytes,
             ))
+            written_slots.append(shard.key)
             next_reg += 1
             reg_cond.notify_all()
         log(f"  flush {shard.tier:6s} {shard.key}: {wide.height:,} rows, "
@@ -1103,6 +1135,15 @@ def build_local(
                 f"{len(result.written)} zero-row shards WERE written/registered); "
                 f"pass allow_empty=True / --allow-empty if intentional"
             )
+        if invs:
+            if filter:
+                err(f"invalidations: not pruning under filter {filter} (the journal is shared "
+                    f"by every filter value; an unfiltered fill prunes)")
+            else:
+                now = datetime.now(timezone.utc)
+                fresh = {**write_times, **{k: now for k in written_slots}}
+                n_pruned, n_left = prune_spent(pyramid, plan.outputs, mtimes=fresh, within=(from_, to))
+                err(f"invalidations: pruned {n_pruned} spent entries ({n_left} remain)")
     finally:
         window_pool.shutdown(wait=True, cancel_futures=True)
         close_pool.shutdown(wait=True, cancel_futures=True)

@@ -182,6 +182,7 @@ def build_command(
     source_shard: str | None = None,
     manifest: str | None = None,
     fill: bool = False,
+    ignore_invalidations: bool = False,
     resume: bool = False,
     allow_empty: bool = False,
     max_missing: float | None = None,
@@ -213,6 +214,8 @@ def build_command(
         cmd += ['-m', manifest]
     if fill:
         cmd += ['-f']
+    if ignore_invalidations:
+        cmd += ['-I']
     if resume:
         cmd += ['-u']
     if allow_empty:

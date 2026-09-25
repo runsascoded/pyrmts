@@ -19,7 +19,7 @@ from functools import partial
 
 from pyrmts import ExpectedShard, Pyramid, format_period, list_expected_shards, parse_duration, slot_key, slot_of_any, template_has_hash
 
-from .invalidation import Invalidation, stale_keys_for
+from .invalidation import Invalidation, slot_write_times, stale_keys_for
 from .plan import _approx_ms
 
 err = partial(print, file=sys.stderr, flush=True)
@@ -242,7 +242,11 @@ def discover_gaps(
                 "not a LIST, says which shards are built"
             )
         current = registry_key_set(pyramid, registry_records, filter)
-        existing_mtimes = {slot: existing_mtimes.get(current.key(slot)) for slot in current}
+        # Per-slot write time = the registry row's `written_at`, not the
+        # current key's listing mtime: an identical-bytes rebuild reuses the
+        # existing object, whose mtime never advances.
+        written = slot_write_times(pyramid, registry_records, filter)
+        existing_mtimes = {slot: written.get(slot) for slot in current}
     existing_set, stale = split_stale(existing_mtimes, stale_before)
     existing = current - stale if hashed else KeySet(existing_set)
     err(f"  existing: {len(existing_mtimes)} keys on storage"

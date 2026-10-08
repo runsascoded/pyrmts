@@ -15,6 +15,10 @@ dependencies = [
     # `on` column, tolerated by 1.41, `DuplicateError` on 1.44). Bump this
     # deliberately and re-validate the image, never incidentally.
     "polars==1.44.1",
+    # PINNED for the same reason as polars: the Batch image installs this
+    # package unpinned, and output bytes depend on the parquet writer. Core
+    # `pyrmts` takes a range so consumers can bring their own pin.
+    "pyarrow==22.0.0",
     "click>=8",
 ]
 

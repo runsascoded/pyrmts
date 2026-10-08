@@ -23,38 +23,20 @@ hashless template is refused outright.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import partial
 
-from pyrmts import Pyramid, content_hash, hash_width, list_expected_shards, parse_key, slot_of, template_has_hash
+from pyrmts import Pyramid, content_hash, hash_width, list_expected_shards, parse_key
+from pyrmts.gc import DEFAULT_GRACE, GcResult, Orphan, require_hashed
+from pyrmts.gc import gc_orphans as _gc_orphans
+from pyrmts.gc import list_orphans as _list_orphans
 
 from .discovery import slot_for_record
 from .shard_index import ShardRecord, now_ms
 
 err = partial(print, file=sys.stderr, flush=True)
 
-DEFAULT_GRACE = timedelta(hours=24)
-
-
-@dataclass
-class Orphan:
-    key: str
-    slot: str
-    mtime: datetime | None
-
-
-def _require_hashed(pyramid: Pyramid, what: str) -> None:
-    if not template_has_hash(pyramid.keyTemplate):
-        raise ValueError(
-            f"{what}: keyTemplate {pyramid.keyTemplate!r} has no {{hash}} token — its keys are mutable and "
-            f"template-derived, so a listing minus a registry is not a set of orphans"
-        )
-    if not any(m in pyramid.keyTemplate for m in ('{tier}', '{shard}', '{period}')):
-        raise ValueError(
-            f"{what}: keyTemplate {pyramid.keyTemplate!r} has no slot placeholders — a pure content-addressed "
-            f"layout can be shared by several pyramids, so one registry cannot say what is orphaned; not supported"
-        )
+__all__ = ['DEFAULT_GRACE', 'GcResult', 'Orphan', 'adopt_unregistered', 'gc_orphans', 'list_orphans']
 
 
 def _registry_keys(shard_index, pyramid_name: str | None) -> set[str]:
@@ -65,36 +47,8 @@ def _registry_keys(shard_index, pyramid_name: str | None) -> set[str]:
 
 
 def list_orphans(pyramid: Pyramid, registry_keys: set[str], prefix: str | None = None) -> list[Orphan]:
-    """Hashed-shape blobs under `prefix` (default: the template's static
-    prefix) that no registry row references."""
-    _require_hashed(pyramid, 'list_orphans')
-    template = pyramid.keyTemplate
-    if prefix is None:
-        prefix = template.split('{')[0]
-    out: list[Orphan] = []
-    for key, mtime in pyramid.storage.list_with_mtime(prefix):
-        if key in registry_keys:
-            continue
-        slot = slot_of(template, key)
-        if slot is None:
-            continue
-        out.append(Orphan(key=key, slot=slot, mtime=mtime))
-    return out
-
-
-@dataclass
-class GcResult:
-    deleted: list[str] = field(default_factory=list)
-    kept_young: list[str] = field(default_factory=list)      # orphans inside the grace period
-    kept_repointed: list[str] = field(default_factory=list)  # re-referenced between the listing and the delete
-    dry_run: bool = True
-
-    def summary(self) -> str:
-        verb = 'would delete' if self.dry_run else 'deleted'
-        return (
-            f"gc: {verb} {len(self.deleted)} orphan(s), kept {len(self.kept_young)} inside the grace period"
-            + (f", {len(self.kept_repointed)} re-pointed since the listing" if self.kept_repointed else '')
-        )
+    """`pyrmts.gc.list_orphans` over a `Pyramid`'s storage + keyTemplate."""
+    return _list_orphans(pyramid.storage, pyramid.keyTemplate, registry_keys, prefix)
 
 
 def gc_orphans(
@@ -107,39 +61,22 @@ def gc_orphans(
     apply: bool = False,
     prefix: str | None = None,
 ) -> GcResult:
-    """Delete (or, dry-run, list) orphans older than `grace`.
+    """`pyrmts.gc.gc_orphans` with the registry's current keys (re-read right
+    before deleting) as the referenced set. An empty registry for this
+    pyramid is refused: every blob would be an orphan."""
+    def referenced() -> set[str]:
+        keys = _registry_keys(shard_index, pyramid_name)
+        if not keys:
+            raise ValueError(
+                "gc_orphans: the registry has no rows for this pyramid — refusing (every blob would be an orphan); "
+                "run `adopt` first, or check the registry / pyramid name"
+            )
+        return keys
 
-    Safety: a hashless template is refused; an empty registry is refused
-    (nothing would be an orphan except everything); a blob without an mtime is
-    never deleted; and because `put_shard` can re-point a slot at an *old*
-    orphan (identical bytes → the existing object is reused, its mtime
-    untouched), the registry is re-read right before deleting and any key it
-    now references is kept. The residual window is the moment between that
-    re-read and the delete — keep `grace` well above a fill's duration."""
-    _require_hashed(pyramid, 'gc_orphans')
-    now = now or datetime.now(timezone.utc)
-    registered = _registry_keys(shard_index, pyramid_name)
-    if not registered:
-        raise ValueError(
-            "gc_orphans: the registry has no rows for this pyramid — refusing (every blob would be an orphan); "
-            "run `adopt` first, or check the registry / pyramid name"
-        )
-    result = GcResult(dry_run=not apply)
-    candidates = [o for o in list_orphans(pyramid, registered, prefix)]
-    old = [o for o in candidates if o.mtime is not None and now - o.mtime >= grace]
-    result.kept_young = [o.key for o in candidates if o not in old]
-    if not old:
-        return result
-    if apply:
-        registered = _registry_keys(shard_index, pyramid_name)   # fresh: catch a re-point since the listing
-    for o in old:
-        if o.key in registered:
-            result.kept_repointed.append(o.key)
-            continue
-        if apply:
-            pyramid.storage.delete(o.key)
-        result.deleted.append(o.key)
-    return result
+    return _gc_orphans(
+        pyramid.storage, pyramid.keyTemplate, referenced,
+        grace=grace, now=now, apply=apply, prefix=prefix,
+    )
 
 
 def adopt_unregistered(
@@ -155,7 +92,7 @@ def adopt_unregistered(
     the slot has no row), if its bytes still hash to its key. Heals both a
     first write and a rewrite whose registration was lost. Returns the records
     adopted."""
-    _require_hashed(pyramid, 'adopt_unregistered')
+    require_hashed(pyramid.keyTemplate, 'adopt_unregistered')
     template = pyramid.keyTemplate
     width = hash_width(template)
     assert width is not None

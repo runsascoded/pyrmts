@@ -178,6 +178,9 @@ def test_hashed_template_tip_appends_land_at_new_keys_and_swap_the_registry_row(
     content-hashed key (the previous tip stays as an orphan) and the registry
     row moves to it; the next flush reads the current tip through the registry."""
     from pyrmts import parse_key
+    # The registry lives in the engine; a core-only env (e.g. CI's
+    # pyarrow-21 job) skips this cross-package test.
+    pytest.importorskip('pyrmts_engine.shard_index')
     from pyrmts_engine.shard_index import MemShardIndex, RegistryResolver
 
     pyramid = make_pyramid()

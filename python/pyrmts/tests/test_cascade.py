@@ -449,6 +449,9 @@ def test_cascade_hashed_template_registers_content_addressed_outputs():
     content-hashed key, registers it, and a second run skips every slot the
     registry already knows. Without a registry it refuses."""
     from pyrmts import parse_key, put_shard
+    # The registry lives in the engine; a core-only env (e.g. CI's
+    # pyarrow-21 job) skips this cross-package test.
+    pytest.importorskip('pyrmts_engine.shard_index')
     from pyrmts_engine.shard_index import MemShardIndex, RegistryResolver, ShardRecord
 
     storage = MemStorage()

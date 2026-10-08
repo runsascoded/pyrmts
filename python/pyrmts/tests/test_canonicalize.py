@@ -336,6 +336,9 @@ def test_canonicalize_hashed_template_writes_a_new_key_and_swaps_the_registry_ro
     content-hashed key (the old blob is untouched, left for GC), and the
     registry row swaps to it; without a registry the call refuses."""
     from pyrmts import parse_key, put_shard, write_tier_parquet
+    # The registry lives in the engine; a core-only env (e.g. CI's
+    # pyarrow-21 job) skips this cross-package test.
+    pytest.importorskip('pyrmts_engine.shard_index')
     from pyrmts_engine.shard_index import MemShardIndex, RegistryResolver, ShardRecord
 
     p, tr, key, table, layout = _layout_fixture(MemStorage())

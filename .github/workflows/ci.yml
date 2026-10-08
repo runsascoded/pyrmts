@@ -18,3 +18,21 @@ jobs:
         run: uv sync --all-packages --extra test --extra duckdb --frozen
       - name: Test
         run: uv run --frozen pytest -q
+
+  # Core `pyrmts` takes a pyarrow range (consumers bring their own pin:
+  # crashes is on 21). Run the core suite alone on the range's floor; the
+  # engine (pinned to 22) isn't installed, so its cross-package tests skip.
+  core-pyarrow-floor:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install core on pyarrow 21 (no engine, no polars)
+        run: |
+          uv venv -p 3.12 .venv-core
+          uv pip install -p .venv-core 'pyarrow==21.0.0' './pyrmts[test]'
+      - name: Test
+        run: .venv-core/bin/python -m pytest -q pyrmts/tests

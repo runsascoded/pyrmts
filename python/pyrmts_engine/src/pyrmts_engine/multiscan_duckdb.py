@@ -26,6 +26,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from pyrmts import MultiScan, Pyramid, get_monoid, scan_digest
+from pyrmts.intervals import islands_sql
 from pyrmts.multiscan import SCAN_HI, SCAN_LO
 
 SCAN_COL = '__scan'  # the folded scan-index column in the `long` relation
@@ -48,36 +49,12 @@ def _intervals_sql(union_sql: str, key_cols: list[str], state_cols: list[str], p
     """The gaps-and-islands query over a `long` relation `(__scan, *key_cols,
     *state_cols)` → interval rows `(*key_cols, *state_cols, __scan_lo,
     __scan_hi)`, in `pyrmts.multiscan._multiscan_table`'s exact column order and
-    `(*dims, binCol, __scan_lo, __scan_hi)` sort."""
-    key_by = ', '.join(_q(c) for c in key_cols)
-    state_changed = ' OR '.join(f'{_q(c)} IS DISTINCT FROM lag({_q(c)}) OVER w' for c in state_cols)
-    key_sel = ', '.join(_q(c) for c in key_cols)
-    state_first = ', '.join(f'any_value({_q(c)}) AS {_q(c)}' for c in state_cols)
+    `(*dims, binCol, __scan_lo, __scan_hi)` sort. The kernel is
+    `pyrmts.intervals.islands_sql` (every state column a change column); this
+    adds the `Pyramid`'s canonical sort."""
     order_by = ', '.join(_q(c) for c in (*(d.name for d in pyramid.dims), pyramid.binCol))
     return f"""
-    WITH long AS ({union_sql}),
-    marked AS (
-        SELECT *,
-            CASE WHEN row_number() OVER w = 1
-                      OR {_q(SCAN_COL)} <> lag({_q(SCAN_COL)}) OVER w + 1
-                      OR {state_changed}
-                 THEN 1 ELSE 0 END AS __is_new
-        FROM long
-        WINDOW w AS (PARTITION BY {key_by} ORDER BY {_q(SCAN_COL)})
-    ),
-    grp AS (
-        SELECT *,
-            sum(__is_new) OVER (
-                PARTITION BY {key_by} ORDER BY {_q(SCAN_COL)}
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            ) AS __grp
-        FROM marked
-    )
-    SELECT {key_sel}, {state_first},
-           min({_q(SCAN_COL)})::BIGINT AS {_q(SCAN_LO)},
-           max({_q(SCAN_COL)})::BIGINT AS {_q(SCAN_HI)}
-    FROM grp
-    GROUP BY {key_by}, __grp
+    SELECT * FROM ({islands_sql(union_sql, key_cols, state_cols, scan_col=SCAN_COL)})
     ORDER BY {order_by}, {_q(SCAN_LO)}, {_q(SCAN_HI)}
     """
 

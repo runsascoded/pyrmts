@@ -1,6 +1,6 @@
 # Multi-scan intervals at fleet scale: streaming output, key-range parallelism, one-scan append
 
-Status: **proposed** (2026-10-08, from disky's static name search). Phase 1 is ready to implement: its shape comes from code that already runs at full scale in disky. Phase 2 waits on disky's daily-delta format.
+Status: **Phase 1 landed** (2026-10-08, see "Phase 1 — landed" below); **Phase 2 open**, waiting on disky's daily-delta format. From disky's static name search.
 
 ## Origin
 
@@ -44,6 +44,21 @@ pyrmts already has the matching policy layer: `multiscan seal` with `scheme: exp
 ### Acceptance
 - disky's `static-names` intervals stage switches to the pyrmts API with no restated kernel. It must produce byte-identical outputs on generation `2026-10-08` (per-range md5) and keep `append == rebuild`.
 - pyrmts' own tests: the Python fold stays the oracle for the kernel; add change/carried coalescing, range-union-equals-whole, and append-equals-rebuild.
+
+### Phase 1 — landed
+
+`pyrmts.intervals` in **core** `pyrmts`, with a new `pyrmts[duckdb]` extra. It imports only pyarrow (and duckdb at call time): no polars, no engine, no `Pyramid`. disky's job image can depend on `pyrmts[duckdb]` alone.
+
+- **1.1 Kernel:** `islands_sql(long_sql, key_cols, state_cols, *, carried=None, scan_col='__scan', order=False)`. Output `(*key_cols, *state_cols, __scan_lo, __scan_hi)`. `carried={col: 'first' | 'last'}` columns never open a run; values via `arg_min` / `arg_max` over the scan index. Change columns use `any_value` (equal within a run). `order=True` appends `ORDER BY key_cols, __scan_lo`; off by default. `long_sql(sources)` builds the `__scan` union. `pyrmts_engine.multiscan_duckdb._intervals_sql` is now a thin adapter (kernel + the `Pyramid`'s canonical sort), and its byte-identity tests against the Python fold pass unchanged.
+- **1.2 Streaming output:** `write_query(con, sql, out, schema, *, row_group_size, sort, compression, dictionary)` streams DuckDB batches into `write_exact_row_groups` (disky's `write_sorted`, lifted): exact row groups, so bytes depend only on rows. Stamps: `stamped_sql(runs, key_cols, state_cols, stamps, open_stamp)` → `(*keys, vf, vt, *state)`. Digests in DuckDB: `relation_digest(con, sql, cols)` and `interval_digests(con, table, open_cols, close_cols, open_stamp)` (disky's per-stamp opened/closed format; `md5_number_upper` over `col::VARCHAR` joined by `|`). Not done: `consolidate_parquet_duckdb` still builds an in-memory `MultiScan` with pyarrow digests; it is the small-scale `Pyramid` path, and fleet scale now goes through `pyrmts.intervals`.
+- **1.3 Ranges:** `plan_ranges(footers: [(FileMetaData, weight)], range_cols, k, *, floor=None)`, generalized from disky: a row group is a cut candidate when every range column but the last is constant in it. Footer fetching stays the caller's (disky reads GCS footers with two ranged reads). `key_range_pieces(range_cols, lo, hi)` → conjunctive predicates for any number of columns; read each piece separately and `UNION ALL`, so each prunes by row-group stats.
+- **1.4 Append:** `append_intervals(con, prev, new, key_cols, state_cols, stamp, open_stamp, *, carried=None)` creates the next intervals table (prev's column order) and returns `(opened, closed)`. `delta_sql(table, stamp)` gives the scan's delta (`op` = 1 opened, −1 closed). Carried `last` rewrites the carried values of continuing open runs (documented). Refuses a stamp at or below the intervals' newest `vf`.
+
+**Verified against disky's code** (scratch harness, not committed): disky's own fixture (`cloud/tests/test_static_names.py`, v1 + v2 scans) run through disky's `plan_ranges` / `build_range` / `digests` / `append_range` vs the same stages composed from `pyrmts.intervals`. Ranges JSON equal at k = 1, 4, 7; every per-range interval file **md5-equal**; digests equal; appended intervals and delta files md5-equal. disky keeps its per-scan source parsing (`V1_SELECT` / `V2_SELECT` / `MERGED`) and swaps its `Piece`s for `key_range_pieces` predicates.
+
+**Tests:** `pyrmts/tests/test_intervals.py` (12): kernel vs a sequential-ingest oracle with no / `first` / `last` carried columns, carried columns never opening a run, argument checks, `key_range_pieces` vs brute force (union exact, pieces disjoint), plan-ranges contiguity + determinism + range-union byte-identical to a whole build, append byte-identical to a rebuild (all three carried modes) with exact delta, exact row groups independent of batch chunking, digests order-insensitive and split-additive. Python 466 passed; the core suite also passes on pyarrow 21 without polars.
+
+**Remaining acceptance (disky's side):** switch `static-names intervals` / `append` to this API and confirm per-range md5 on generation `2026-10-08`, then delete `islands_sql` and `test_islands_equal_pyrmts`.
 
 ## Phase 2 — sorted-run merge (after disky's daily deltas exist)
 

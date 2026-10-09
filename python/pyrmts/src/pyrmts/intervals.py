@@ -15,9 +15,10 @@ Pieces, composable per range and per process:
   columns ride along with a `first` | `last` policy and never open a run.
 - `stamped_sql`: scan indices → observation stamps `[vf, vt)`, `vt` = the
   stamp of the first scan after the run, or an `open_stamp` sentinel.
-- `key_range_pieces` / `plan_ranges`: `k` contiguous, disjoint, roughly
-  row-balanced key ranges (deterministic, JSON), each as conjunctive
-  predicates that prune a key-sorted parquet by row-group statistics.
+- `key_range_terms` / `key_range_pieces` / `plan_ranges`: `k` contiguous,
+  disjoint, roughly row-balanced key ranges (deterministic, JSON), each as
+  conjunctive comparisons (structured, or rendered for DuckDB / ClickHouse)
+  that prune a key-sorted parquet by row-group statistics.
 - `append_intervals`: previous stamped intervals + one new scan → the next
   intervals (equal to a rebuild through that scan) and the scan's delta.
 - `write_query` / `write_exact_row_groups`: stream a query's batches into a
@@ -60,6 +61,19 @@ def lit(v: Any) -> str:
     raise TypeError(f"lit: unsupported key value {v!r}")
 
 
+def ident_clickhouse(name: str) -> str:
+    """A backquoted ClickHouse identifier."""
+    return '`' + name.replace('\\', '\\\\').replace('`', '\\`') + '`'
+
+
+def lit_clickhouse(v: Any) -> str:
+    """A ClickHouse literal for a key value: like `lit`, but string literals
+    escape backslashes (ClickHouse treats `\\` as an escape character)."""
+    if isinstance(v, str):
+        return "'" + v.replace('\\', '\\\\').replace("'", "\\'") + "'"
+    return lit(v)
+
+
 # ── Kernel ────────────────────────────────────────────────────────────────
 
 
@@ -84,7 +98,15 @@ def islands_sql(
     column — the original encoding, byte-identical to the Python fold.
 
     `order`: append the canonical `ORDER BY key_cols, __scan_lo` (opt-in — the
-    sort is the expensive part, and callers that re-sort downstream skip it)."""
+    sort is the expensive part, and callers that re-sort downstream skip it).
+
+    Memory: the plan is two `WINDOW` operators (each sorts the whole input by
+    key and scan) and a hash aggregate. DuckDB does not keep these under
+    `memory_limit` on wide many-scan unions — disky measured 59 GB RSS at a
+    36 GB limit on a 70-scan range, and an OOM kill under a 30 GB cgroup at a
+    16 GB limit. Run fleet-scale builds under a hard memory cap (cgroup /
+    container), and size key ranges (`plan_ranges` `k`) so each range's
+    union fits it; `memory_limit` alone is not a bound."""
     carried = dict(carried or {})
     unknown = set(carried) - set(state_cols)
     if unknown:
@@ -108,9 +130,12 @@ def islands_sql(
         return f'any_value({ident(c)}) AS {ident(c)}'
 
     vals = ', '.join(agg(c) for c in state_cols)
+    # Project to the columns the kernel reads, so unused source columns don't
+    # ride through the window sorts.
+    cols = ', '.join(ident(c) for c in [scan_col, *key_cols, *state_cols])
     sql = f"""
     WITH __marked AS (
-        SELECT *,
+        SELECT {cols},
             CASE WHEN row_number() OVER w = 1 OR {s} <> lag({s}) OVER w + 1 OR {changed}
                  THEN 1 ELSE 0 END AS __is_new
         FROM ({long_sql})
@@ -175,55 +200,79 @@ def stamped_sql(
 # ── Key ranges ────────────────────────────────────────────────────────────
 
 
-def key_range_pieces(
+Term = tuple[str, str, Any]
+"""One comparison `(column, op, value)`, `op` in `=`, `>`, `>=`, `<`."""
+
+
+def key_range_terms(
     range_cols: Sequence[str],
     lo: Sequence[Any] | None,
     hi: Sequence[Any] | None,
-) -> list[str]:
+) -> list[list[Term]]:
     """The lexicographic key range `[lo, hi)` over `range_cols` (`None` =
-    unbounded) as a list of conjunctive SQL predicates whose union is exactly
-    the range. Each piece is a plain conjunction of comparisons, so it prunes
-    a parquet sorted by `range_cols` by row-group statistics — read each piece
-    separately and `UNION ALL` them rather than OR-ing them into one filter."""
+    unbounded) as conjunctions of `(column, op, value)` comparisons whose
+    union is exactly the range, and which are pairwise disjoint. Structured,
+    so callers can render them in any SQL dialect (or none); `key_range_pieces`
+    renders them. An unbounded range is one empty conjunction."""
     cols = list(range_cols)
     lo_t = tuple(lo) if lo is not None else None
     hi_t = tuple(hi) if hi is not None else None
     for name, t in (('lo', lo_t), ('hi', hi_t)):
         if t is not None and len(t) != len(cols):
-            raise ValueError(f"key_range_pieces: {name} {t!r} has {len(t)} values for {len(cols)} columns")
+            raise ValueError(f"key_range_terms: {name} {t!r} has {len(t)} values for {len(cols)} columns")
     if lo_t is not None and hi_t is not None and hi_t <= lo_t:
-        raise ValueError(f"key_range_pieces: empty range {lo_t!r} → {hi_t!r}")
+        raise ValueError(f"key_range_terms: empty range {lo_t!r} → {hi_t!r}")
 
-    def rec(cs: list[str], lo: tuple | None, hi: tuple | None) -> list[list[str]]:
+    def rec(cs: list[str], lo: tuple | None, hi: tuple | None) -> list[list[Term]]:
         if not cs:
             # Zero columns left: every remaining key equals `lo` (inclusive)
             # and `hi` (exclusive), so a bounded-above range here is empty.
             return [] if hi is not None else [[]]
-        c = ident(cs[0])
+        c = cs[0]
         if len(cs) == 1:
             # Last column: one comparison per bound (`>=` lo, `<` hi).
-            last = []
+            last: list[Term] = []
             if lo is not None:
-                last.append(f'{c} >= {lit(lo[0])}')
+                last.append((c, '>=', lo[0]))
             if hi is not None:
-                last.append(f'{c} < {lit(hi[0])}')
+                last.append((c, '<', hi[0]))
             return [last]
         if lo is not None and hi is not None and lo[0] == hi[0]:
-            return [[f'{c} = {lit(lo[0])}', *p] for p in rec(cs[1:], lo[1:], hi[1:])]
-        out: list[list[str]] = []
+            return [[(c, '=', lo[0]), *p] for p in rec(cs[1:], lo[1:], hi[1:])]
+        out: list[list[Term]] = []
         if lo is not None:
-            out += [[f'{c} = {lit(lo[0])}', *p] for p in rec(cs[1:], lo[1:], None)]
-        middle = []
+            out += [[(c, '=', lo[0]), *p] for p in rec(cs[1:], lo[1:], None)]
+        middle: list[Term] = []
         if lo is not None:
-            middle.append(f'{c} > {lit(lo[0])}')
+            middle.append((c, '>', lo[0]))
         if hi is not None:
-            middle.append(f'{c} < {lit(hi[0])}')
+            middle.append((c, '<', hi[0]))
         out.append(middle)
         if hi is not None:
-            out += [[f'{c} = {lit(hi[0])}', *p] for p in rec(cs[1:], None, hi[1:])]
+            out += [[(c, '=', hi[0]), *p] for p in rec(cs[1:], None, hi[1:])]
         return out
 
-    return [' AND '.join(p) if p else 'TRUE' for p in rec(cols, lo_t, hi_t)]
+    return rec(cols, lo_t, hi_t)
+
+
+def key_range_pieces(
+    range_cols: Sequence[str],
+    lo: Sequence[Any] | None,
+    hi: Sequence[Any] | None,
+    *,
+    ident: Callable[[str], str] = ident,
+    lit: Callable[[Any], str] = lit,
+) -> list[str]:
+    """`key_range_terms` rendered as SQL predicates (`TRUE` for an empty
+    conjunction). Each piece is a plain conjunction of comparisons, so it
+    prunes a parquet sorted by `range_cols` by row-group statistics — read
+    each piece separately and `UNION ALL` them rather than OR-ing them into
+    one filter. `ident` / `lit` default to DuckDB's quoting; pass
+    `ident_clickhouse` / `lit_clickhouse` (or your own) for another dialect."""
+    return [
+        ' AND '.join(f'{ident(c)} {op} {lit(v)}' for c, op, v in p) if p else 'TRUE'
+        for p in key_range_terms(range_cols, lo, hi)
+    ]
 
 
 def plan_ranges(
@@ -303,7 +352,12 @@ def append_intervals(
     (so `last` makes an append rewrite open rows, not only add rows).
 
     The delta (`delta_sql`) is the rows with `vf = stamp` (opened) plus the
-    rows with `vt = stamp` (closed)."""
+    rows with `vt = stamp` (closed).
+
+    `prev` is read three times (its newest `vf`, its open rows, and the full
+    copy into `out`), and `new` once. Pass tables or local files: a remote
+    `read_parquet(...)` or an expensive query as `prev` is fetched or
+    recomputed on every read, so materialize it first."""
     carried = dict(carried or {})
     change = [c for c in state_cols if c not in carried]
     last_cols = [c for c, p in carried.items() if p == 'last']

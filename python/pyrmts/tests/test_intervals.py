@@ -19,7 +19,10 @@ from pyrmts.intervals import (  # noqa: E402
     delta_sql,
     interval_digests,
     islands_sql,
+    ident_clickhouse,
     key_range_pieces,
+    key_range_terms,
+    lit_clickhouse,
     long_sql,
     plan_ranges,
     relation_digest,
@@ -172,6 +175,28 @@ def test_key_range_pieces_match_brute_force():
     assert key_range_pieces(KEYS, None, None) == ['TRUE']
     with pytest.raises(ValueError, match='empty range'):
         key_range_pieces(KEYS, (2, 'a'), (2, 'a'))
+
+
+def test_key_range_terms_and_dialects():
+    """`key_range_terms` is the structured form `key_range_pieces` renders;
+    the ClickHouse renderers escape backslashes, DuckDB's don't."""
+    assert key_range_terms(KEYS, (1, 'b'), (3, 'a')) == [
+        [('depth', '=', 1), ('path', '>=', 'b')],
+        [('depth', '>', 1), ('depth', '<', 3)],
+        [('depth', '=', 3), ('path', '<', 'a')],
+    ]
+    assert key_range_terms(KEYS, None, None) == [[]]
+    assert key_range_terms(KEYS, (2, 'a'), None) == [
+        [('depth', '=', 2), ('path', '>=', 'a')],
+        [('depth', '>', 2)],
+    ]
+    lo, hi = (1, "a\\b'c"), (1, 'z')
+    assert key_range_pieces(KEYS, lo, hi) == ['"depth" = 1 AND "path" >= \'a\\b\'\'c\' AND "path" < \'z\'']
+    assert key_range_pieces(KEYS, lo, hi, ident=ident_clickhouse, lit=lit_clickhouse) == [
+        "`depth` = 1 AND `path` >= 'a\\\\b\\'c' AND `path` < 'z'",
+    ]
+    assert [lit_clickhouse(v) for v in (1.5, None, True, 7)] == ['1.5', 'NULL', 'TRUE', '7']
+    assert ident_clickhouse('a`b\\c') == '`a\\`b\\\\c`'
 
 
 def test_plan_ranges_partition_and_union_equals_whole(tmp_path):

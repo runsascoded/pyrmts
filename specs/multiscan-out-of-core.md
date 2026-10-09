@@ -1,6 +1,6 @@
 # Multi-scan intervals at fleet scale: streaming output, key-range parallelism, one-scan append
 
-Status: **Phase 1 landed** (2026-10-08, see "Phase 1 — landed" below); **Phase 2 open**, waiting on disky's daily-delta format. From disky's static name search.
+Status: **Phase 1 landed and accepted** (2026-10-08 / disky switchover 2026-10-09, see "Phase 1 — landed" below); **Phase 2 open**, waiting on disky's daily-delta format. From disky's static name search.
 
 ## Origin
 
@@ -56,9 +56,15 @@ pyrmts already has the matching policy layer: `multiscan seal` with `scheme: exp
 
 **Verified against disky's code** (scratch harness, not committed): disky's own fixture (`cloud/tests/test_static_names.py`, v1 + v2 scans) run through disky's `plan_ranges` / `build_range` / `digests` / `append_range` vs the same stages composed from `pyrmts.intervals`. Ranges JSON equal at k = 1, 4, 7; every per-range interval file **md5-equal**; digests equal; appended intervals and delta files md5-equal. disky keeps its per-scan source parsing (`V1_SELECT` / `V2_SELECT` / `MERGED`) and swaps its `Piece`s for `key_range_pieces` predicates.
 
-**Tests:** `pyrmts/tests/test_intervals.py` (12): kernel vs a sequential-ingest oracle with no / `first` / `last` carried columns, carried columns never opening a run, argument checks, `key_range_pieces` vs brute force (union exact, pieces disjoint), plan-ranges contiguity + determinism + range-union byte-identical to a whole build, append byte-identical to a rebuild (all three carried modes) with exact delta, exact row groups independent of batch chunking, digests order-insensitive and split-additive. Python 466 passed; the core suite also passes on pyarrow 21 without polars.
+**Tests:** `pyrmts/tests/test_intervals.py` (13): kernel vs a sequential-ingest oracle with no / `first` / `last` carried columns, carried columns never opening a run, argument checks, `key_range_pieces` vs brute force (union exact, pieces disjoint), `key_range_terms` structure + ClickHouse rendering, plan-ranges contiguity + determinism + range-union byte-identical to a whole build, append byte-identical to a rebuild (all three carried modes) with exact delta, exact row groups independent of batch chunking, digests order-insensitive and split-additive. Python 466 passed; the core suite also passes on pyarrow 21 without polars.
 
-**Remaining acceptance (disky's side):** switch `static-names intervals` / `append` to this API and confirm per-range md5 on generation `2026-10-08`, then delete `islands_sql` and `test_islands_equal_pyrmts`.
+**Acceptance — met (disky `ch-store` 98ec30a4, on pyrmts 4365396):** `static-names` intervals / append run on `pyrmts.intervals`. Real generation `2026-10-08`: `ranges.json` md5-equal; full rebuilds of 12 ranges (incl. r0, r255, and the largest, r41 at 63.4M rows) md5-equal to the stored intervals, hist and digests; appending 10-08 byte-identical to the rebuild on all 12 (6 with real churn, e.g. r85 294,864 opened / 290,697 closed). disky's coalesced intervals (`2026-10-08c`, versions only on `size` / `n_files` change) are reproduced md5-equal by `islands_sql` over just those two state columns (no `carried` needed). disky deleted `islands_sql` and `test_islands_equal_pyrmts`.
+
+**Follow-ups from the integration:**
+- `key_range_terms` returns the pieces as structured `(column, op, value)` conjunctions; `key_range_pieces(..., ident=, lit=)` renders them, with `ident_clickhouse` / `lit_clickhouse` (backslash-escaping) alongside DuckDB's defaults. disky can drop its `Piece`.
+- `islands_sql` projects its input to `(scan, *key_cols, *state_cols)` explicitly. On DuckDB 1.5.5 the optimizer already pruned unused columns through `SELECT *` and the `long_sql` union (identical `EXPLAIN`), so this is robustness, not a memory fix.
+- Memory: DuckDB exceeded `memory_limit` on wide 70-scan unions (disky: 59 GB RSS at a 36 GB limit; OOM under a 30 GB cgroup at 16 GB). Documented on `islands_sql`: run under a hard cap and size ranges to fit it. The plan has two full `WINDOW` sorts plus a hash aggregate; which operator overshoots is not yet measured.
+- `append_intervals` documents that `prev` is read three times (newest `vf`, open rows, full copy), so callers should materialize remote or computed `prev`.
 
 ## Phase 2 — sorted-run merge (after disky's daily deltas exist)
 

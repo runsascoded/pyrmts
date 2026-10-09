@@ -1,6 +1,6 @@
 # Multi-scan intervals at fleet scale: streaming output, key-range parallelism, one-scan append
 
-Status: **Phase 1 landed and accepted** (2026-10-08 / disky switchover 2026-10-09, see "Phase 1 — landed" below); **Phase 2 mechanism landed** (2026-10-09, `pyrmts.runs`, see "Phase 2 — landed"), pending disky's adoption in its tier merges. From disky's static name search.
+Status: **Phase 1 landed and accepted** (2026-10-08 / disky switchover 2026-10-09, see "Phase 1 — landed" below); **Phase 2 mechanism landed** (2026-10-09, `pyrmts.runs`, see "Phase 2 — landed"), adopted by disky's daily append (2026-10-09); real-data tier merge and compaction still to report. From disky's static name search.
 
 ## Origin
 
@@ -105,6 +105,8 @@ disky's daily updates add a small sorted delta per scan and merge deltas under a
 - errors, and `row_group_spans` tiling.
 
 Throughput, **synthetic** (local, 4 runs × 500k rows, 8,192-row groups, string + int key): ~5M rows/s merged and written, with or without reduce. Not measured on disky's data.
+
+**disky adoption (2026-10-09, pinned 541bc8e):** the daily append runs on `pyrmts.runs` and is live on disky's dev site for the 2026-10-09 scan: 1.29M versions opened, 388K closed → 44.1M suffix rows (append 16 tasks × 3.5 min, shards 1.2 min); 175/175 checks equal brute force. Base ⊕ runs compaction is byte-identical to a full build on every shard and sidecar, **on disky's test fixture only**. Open: real-data tier-merge numbers (first carry), and the real-data compaction (before 32 days); move this spec to `done/` once those report.
 
 **Not done:** pyrmts' own consumer, the engine's consolidation of already-sorted shards (`engine-incremental-consolidation.md` Direction 1), still re-sorts. `merge_sorted(..., reduce=None)` is its mechanism; wiring it in is separate work. Zero-decode row-group concatenation is not attempted.
 

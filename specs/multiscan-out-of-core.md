@@ -1,6 +1,6 @@
 # Multi-scan intervals at fleet scale: streaming output, key-range parallelism, one-scan append
 
-Status: **Phase 1 landed and accepted** (2026-10-08 / disky switchover 2026-10-09, see "Phase 1 — landed" below); **Phase 2 open**, waiting on disky's daily-delta format. From disky's static name search.
+Status: **Phase 1 landed and accepted** (2026-10-08 / disky switchover 2026-10-09, see "Phase 1 — landed" below); **Phase 2 mechanism landed** (2026-10-09, `pyrmts.runs`, see "Phase 2 — landed"), pending disky's adoption in its tier merges. From disky's static name search.
 
 ## Origin
 
@@ -76,7 +76,37 @@ disky's daily updates add a small sorted delta per scan and merge deltas under a
   - pyrmts engine consolidation: disjoint inputs (no-op), possibly zero-decode row-group concatenation (the existing design card).
 - **Policy:** reuse the Bentley–Saxe scheme from `MultiScanPolicy` to decide which runs merge when.
 
-The API shape here depends on disky's delta file format (disky "step 3"). Spec it once that format is committed; this section records the intent so the two efforts share one implementation.
+### disky's formats (`daily-append` 0e899147, `specs/static-daily-append.md` "Formats")
+
+- Runs share the base's schema and sort key. Suffix rows `(s, depth, path, usr, vf, vt, size, n_files)`, sorted `(s, path, usr, vf)` in code-point order, 8,192-row groups, zstd, `vt` = 2106-01-01 while open, one file per three-character prefix, plus a per-row-group sidecar `(file, rg, s_min, s_max, offset, length, rows)`.
+- No `op` / tombstone column. Identity `(s, path, usr, vf)` is unique within a run. A **close record** is the version's row with `vf` before the run and `vt` = the closing scan.
+- **Combine:** for equal identity keep the smallest `vt`; other columns are equal by construction. Commutative and associative, since `vt` moves once (OPEN → scan).
+- Version delta (`cdelta`): `(depth, path, usr, vf, vt, size, n_files, op)`, sorted `(depth, path, usr, vf, op)`, 65,536-row groups; combines on `(depth, path, usr, vf)`, min `vt`, `op` = 1 if the version opened inside the merged span (= max `op`).
+- Catalog cells `(q, bucket, vf, b, o)` sorted `(q, bucket, vf)`: a union; the per-`q` header row `(q, '', 0, …)` comes from the newest tier.
+- Tiering: a binary counter; immutable `manifests/<D>.json` list the runs oldest first. The policy stays disky's.
+
+### Phase 2 — landed
+
+`pyrmts.runs` in core `pyrmts` (pyarrow only: no numpy, no duckdb, no engine).
+
+- `merge_sorted(inputs, key, *, identity=None, reduce=None)`: inputs are iterables of record batches, each sorted by `key`, oldest first. Output is one batch stream sorted by `key`. `identity` (default `key`) must be a prefix of `key`; rows with equal identity, within or across inputs, reduce to one row:
+  - `None`: no reduce (all rows; ties ordered by input);
+  - `{col: 'min' | 'max'}`: those columns aggregated; every other column must agree, else `ValueError` naming the identity and values;
+  - `'newest'`: the newest input's row (catalog headers).
+- Streaming: per input, one batch at a time. The frontier is the smallest last-identity among unexhausted inputs; buffered rows before it are final, so they're sorted (by key, then input), reduced and emitted, and the inputs at the frontier read their next batch. Resident ≈ one batch per input plus the frontier's pending rows. An input whose batches go backwards raises; nulls in `key` raise. Dictionary columns are decoded for the merge; the writer's schema re-encodes them.
+- `merge_parquets(paths, key, ..., columns=)` reads each file row group by row group. `row_group_spans(path)` → per row group `{rg, offset, length, rows}` (disky's sidecar byte span; the `s_min` / `s_max` come from `write_exact_row_groups`' `on_group`).
+- Write with `pyrmts.intervals.write_exact_row_groups`, so bytes depend only on rows.
+- disky's uses: suffix rows `merge_parquets(runs, ['s','path','usr','vf'], reduce={'vt': 'min'})`; `cdelta` `merge_parquets(runs, ['depth','path','usr','vf','op'], identity=['depth','path','usr','vf'], reduce={'vt': 'min', 'op': 'max'})`; catalog cells `reduce='newest'` on `(q, bucket, vf)`. Re-sharding by prefix and the sidecar stay disky's.
+
+**Tests** (`pyrmts/tests/test_runs.py`, 10), against `pyrmts.intervals`:
+- base intervals ⊕ every later scan's delta (from chained `append_intervals`, `op` dropped, min `vt`) is **md5-equal** to a rebuild through the last scan, i.e. compaction;
+- per-scan deltas merged flat, binary-counter style (`((d0 d1)(d2 d3)) d4`), and right-nested are md5-equal to each other and to the span's delta read off a rebuild (opened in the span with final `vt`, `op` 1; older versions closed in it, `op` −1);
+- brute force over random inputs (dictionary keys, non-ASCII strings, duplicate identities within and across inputs, 1–5-row batches, key longer than identity) for all three reduce modes;
+- errors, and `row_group_spans` tiling.
+
+Throughput, **synthetic** (local, 4 runs × 500k rows, 8,192-row groups, string + int key): ~5M rows/s merged and written, with or without reduce. Not measured on disky's data.
+
+**Not done:** pyrmts' own consumer, the engine's consolidation of already-sorted shards (`engine-incremental-consolidation.md` Direction 1), still re-sorts. `merge_sorted(..., reduce=None)` is its mechanism; wiring it in is separate work. Zero-decode row-group concatenation is not attempted.
 
 ## Consumers
 - **disky:** `dt_cloud/static_names.py` (fleet name search: intervals → suffix postings, daily append), `dt_cloud/overtime.py` (over-time index).
